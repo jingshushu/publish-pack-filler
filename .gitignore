@@ -4,4 +4,6 @@ __pycache__/
 node_modules/
 .env
 *.log
+logs/
 dist/
+.bridge.local.json

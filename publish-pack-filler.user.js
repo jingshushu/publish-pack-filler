@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         万物有数 · 多平台发布包安全填表助手 (Publish Pack Filler)
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      1.3.0
-// @description  兼容 PublishPack v1.0 通用 JSON 协议与 Markdown 发布包，支持视频、图文轮播、专栏长文在小红书、微信视频号、抖音、B站等平台安全预填与拟人延时配图
+// @version      1.4.0
+// @description  支持飞书链接一键唤起 Finder 与发布页并自动透传成品包，兼容 PublishPack v1.0 JSON 与 Markdown，覆盖小红书、视频号、抖音、B站等平台安全预填与配图
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
 // @match        https://creator.douyin.com/*
@@ -13,6 +13,8 @@
 // @match        https://zhuanlan.zhihu.com/*
 // @match        https://weibo.com/*
 // @match        https://studio.youtube.com/*
+// @match        http://127.0.0.1/*
+// @match        http://localhost/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -43,7 +45,7 @@
   const STORAGE_KEY_PACK = 'ppf_current_pack_v1';
   const STORAGE_KEY_SETTINGS = 'ppf_settings_v2';
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
-  const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:18765';
+  const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
   const IDB_NAME = 'ppf_local_covers_v1';
   const IDB_STORE = 'covers';
 
@@ -2024,6 +2026,7 @@
       clipboardOnlyMode: false,
       autoTopicEnter: false,
       bridgeUrl: BRIDGE_DEFAULT_URL,
+      lastBridgeVersion: '',
       selectedCoverSlot: '',
       selectedTitleIdx: -1,
     };
@@ -2031,7 +2034,11 @@
       const raw = await xStorageGet(STORAGE_KEY_SETTINGS, '');
       if (raw) {
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        return { ...defaults, ...parsed };
+        const merged = { ...defaults, ...parsed };
+        if (merged.bridgeUrl === 'http://127.0.0.1:18765') {
+          merged.bridgeUrl = BRIDGE_DEFAULT_URL;
+        }
+        return merged;
       }
     } catch {
       // ignore
@@ -2370,8 +2377,8 @@
       shadow.getElementById('ppf-input-dir')?.click();
     }
 
-    async function syncFromLocalBridge() {
-      setStatus('⏳ 正在从本地只读桥接服务同步...');
+    async function syncFromLocalBridge(silent = false) {
+      if (!silent) setStatus('⏳ 正在从本地飞书桥接服务同步...');
       try {
         const data = await gmRequestJson(`${settings.bridgeUrl}/api/pack`);
         if (Array.isArray(data.covers) && data.covers.length > 0) {
@@ -2390,13 +2397,21 @@
         }
         const fileName = data.packFile || data.mdFile || 'publish.pack.json';
         const rawContent = data.content || data.markdown || '';
-        applyPackContent(fileName, rawContent);
+        if (rawContent) {
+          applyPackContent(fileName, rawContent, data.subMarkdowns || {});
+        }
+        if (data.packVersion) {
+          settings.lastBridgeVersion = data.packVersion;
+          saveSettings(settings);
+        }
         currentPack.meta.baseDir = data.baseDir || '';
         savePackState(currentPack);
-        setStatus(`✅ 桥接同步成功：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张图片全平台已共享）`);
+        setStatus(`✅ 已从飞书本地桥接载入：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张配图就绪）`);
         render();
       } catch {
-        setStatus('⚠️ 本地桥接未启动，直接点「📂 选择成品包目录」或「📋 粘贴JSON」即可');
+        if (!silent) {
+          setStatus('⚠️ 本地桥接未运行，可点「📂 选择成品包目录」或启动 serve_pack.py');
+        }
       }
     }
 
@@ -2914,7 +2929,7 @@
       };
       shadow.getElementById('ppf-collapse-btn').onclick = toggleCollapse;
       shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapse;
-      shadow.getElementById('ppf-sync-bridge').onclick = syncFromLocalBridge;
+      shadow.getElementById('ppf-sync-bridge').onclick = () => syncFromLocalBridge(false);
 
       // 渲染平台子选项与合规徽章
       const optBadgesWrap = shadow.getElementById('ppf-opt-badges');
@@ -3322,7 +3337,120 @@
     }
 
     render();
+
+    // 若本地 8765 飞书桥接服务刚切换过新作品且尚未同步，在扩展后台静默自动拉取最新一期（创作者网页本身零网络痕迹）
+    gmRequestJson(`${settings.bridgeUrl}/api/status`)
+      .then((st) => {
+        if (st && st.hasActivePack && st.packVersion && st.packVersion !== settings.lastBridgeVersion) {
+          syncFromLocalBridge(true);
+        }
+      })
+      .catch(() => {});
   }
 
-  setTimeout(mountUI, 1000);
+  // ==================== 飞书跳板页 (127.0.0.1:8765/open) 极速透传处理器 ====================
+  async function handleFeishuLaunchpad() {
+    const launchEl = document.getElementById('ppf-feishu-launchpad');
+    // 严格校验标识：普通本地开发项目 (localhost:3000/5173 等) 绝不挂载任何东西！
+    if (!launchEl) return;
+
+    launchEl.setAttribute('data-ext-handled', '1');
+    const msgEl = document.getElementById('ppf-sync-msg');
+    const setLaunchMsg = (txt) => {
+      if (msgEl) msgEl.textContent = txt;
+    };
+
+    let targetUrls = [];
+    try {
+      targetUrls = JSON.parse(launchEl.getAttribute('data-target-urls') || '[]');
+    } catch {
+      targetUrls = [];
+    }
+
+    try {
+      setLaunchMsg('⏳ 正在将当前作品《发布包》与全部高清配图透传至插件...');
+      const origin = location.origin;
+      const res = await fetch(`${origin}/api/pack`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const records = [];
+        if (Array.isArray(data.covers) && data.covers.length > 0) {
+          for (const rel of data.covers) {
+            try {
+              const imgRes = await fetch(`${origin}/api/file?path=${encodeURIComponent(rel)}`, { cache: 'no-store' });
+              if (imgRes.ok) {
+                const blob = await imgRes.blob();
+                records.push({ relPath: rel, blob });
+              }
+            } catch {
+              // ignore
+            }
+          }
+          await saveCoversCrossPlatform(records);
+        }
+
+        const fileName = data.packFile || data.mdFile || 'publish.pack.json';
+        const rawContent = data.content || data.markdown || '';
+        if (rawContent) {
+          const isJson = /\.json$/i.test(fileName) || stripJsonCodeFence(rawContent).startsWith('{');
+          const parsed = isJson
+            ? parsePublishPackJson(rawContent, { fileName, sourceLabel: fileName, baseDir: data.baseDir || '' })
+            : parsePublishPackMarkdown(rawContent, { mdFileName: fileName, sourceLabel: fileName, baseDir: data.baseDir || '' });
+
+          if (!isJson && data.subMarkdowns && typeof data.subMarkdowns === 'object') {
+            for (const [subPath, subText] of Object.entries(data.subMarkdowns)) {
+              const subData = parseSinglePlatformMarkdown(subText);
+              if (subPath.includes('小红书') && subData.body) {
+                parsed.platforms.xiaohongshu.title = subData.title || parsed.platforms.xiaohongshu.title;
+                parsed.platforms.xiaohongshu.body = subData.body;
+                parsed.platforms.xiaohongshu.tags = subData.tags;
+              } else if (subPath.includes('抖音') && subData.body) {
+                parsed.platforms.douyin.title = subData.title || parsed.platforms.douyin.title;
+                parsed.platforms.douyin.body = subData.body;
+                parsed.platforms.douyin.tags = subData.tags;
+              } else if (subPath.includes('B站') && subData.body) {
+                parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
+                parsed.platforms.bilibili.body = subData.body;
+              }
+            }
+          }
+
+          if ((!parsed.covers || !parsed.covers.length) && records.length > 0 && parsed.meta?.contentType !== 'image_post') {
+            parsed.covers = records.map((r) => inferCoverMetaFromPath(r.relPath));
+          }
+          await xStorageSet(STORAGE_KEY_PACK, JSON.stringify(parsed));
+
+          const curSettings = await loadSettings();
+          curSettings.lastBridgeVersion = data.packVersion || '';
+          curSettings.selectedTitleIdx = -1;
+          curSettings.selectedCoverSlot = '';
+          await xStorageSet(STORAGE_KEY_SETTINGS, JSON.stringify(curSettings));
+        }
+        setLaunchMsg(`✅ 透传完成（含 ${records.length} 张配图）！正在前往目标发布后台...`);
+      }
+    } catch {
+      // 即使目录内暂无发布包文档，仍正常执行页面跳转
+      setLaunchMsg('✅ Finder 已打开，正在前往目标发布后台...');
+    }
+
+    if (targetUrls.length === 1) {
+      window.location.replace(targetUrls[0]);
+    } else if (targetUrls.length > 1) {
+      if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'PPF_OPEN_EXTRA_TABS', urls: targetUrls.slice(1) }, () => {
+          window.location.replace(targetUrls[0]);
+        });
+      } else {
+        window.location.replace(targetUrls[0]);
+      }
+    } else {
+      setLaunchMsg('✅ Finder 已定位文件，且新作品已同步至所有已打开的发布页面！可关闭此标签页。');
+    }
+  }
+
+  if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
+    handleFeishuLaunchpad();
+  } else {
+    setTimeout(mountUI, 1000);
+  }
 })();
