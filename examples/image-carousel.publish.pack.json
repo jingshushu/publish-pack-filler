@@ -1,0 +1,59 @@
+{
+  "$schema": "../schemas/publish-pack.v1.schema.json",
+  "specVersion": "1.0",
+  "id": "20261117-hardware-pcb-carousel",
+  "contentType": "image_post",
+  "meta": {
+    "title": "桌面语音小盒子硬件拆解（6图轮播笔记）",
+    "summary": "展示图文笔记/多图轮播 (image_post) 在小红书、抖音图文、公众号小绿书的标准打包结构",
+    "language": "zh-CN",
+    "compliance": {
+      "aiLevel": "assisted",
+      "isOriginal": true
+    }
+  },
+  "assets": {
+    "images": [
+      { "id": "slide_01", "path": "slides/01_封面总览.png", "ratio": "3:4", "alt": "三款桌面硬件原型合照" },
+      { "id": "slide_02", "path": "slides/02_PCB自动走线.png", "ratio": "3:4", "alt": "双层电路板走线避让细节" },
+      { "id": "slide_03", "path": "slides/03_25度斜插装配.png", "ratio": "3:4", "alt": "外壳卡扣与静音开关避位示意" },
+      { "id": "slide_04", "path": "slides/04_BOM物料清单.png", "ratio": "3:4", "alt": "核心元器件选型参考表" }
+    ]
+  },
+  "default": {
+    "title": "把一句话变成桌面小硬件，到底要踩几个坑？",
+    "body": "花了一周把脑子里的桌面语音小盒子做成了能通电亮屏的工程样机，左滑看 4 张核心拆解图👇\n\n1️⃣ 走线避干扰：麦克风阵列和电源线离太近会有底噪，重新分区铺铜后干净多了。\n2️⃣ 外壳装配角：侧边静音拨杆老顶住外壳，最后改成了先斜 25° 滑入再放平锁螺丝。\n3️⃣ 成本控制：整套打样控制在百元内，适合周末手搓。",
+    "tags": ["硬件DIY", "桌面搭子", "电子设计", "电路板", "科技科普"],
+    "imageRefs": ["slide_01", "slide_02", "slide_03", "slide_04"],
+    "pinnedComment": "大家最想自己手搓一个什么功能的桌面小物件？评论区提名，赞最多的下期画板实测！"
+  },
+  "platforms": {
+    "xiaohongshu": {
+      "title": "一句话变成桌面硬件，到底要踩几个坑？",
+      "altTitles": [
+        "百元手搓桌面语音小盒子，4图看懂结构！",
+        "静音开关老顶外壳？斜25度装板太丝滑了"
+      ],
+      "options": {
+        "visibility": "public",
+        "aiDeclaration": "assisted"
+      }
+    },
+    "douyin": {
+      "contentType": "image_post",
+      "title": "百元手搓桌面小硬件：从画板到装壳全拆解",
+      "options": {
+        "bgm": "轻快科技感纯音乐",
+        "allowDownload": true
+      }
+    },
+    "weixin_mp": {
+      "contentType": "image_post",
+      "title": "周末手搓一台桌面语音小盒子：走线与外壳避坑笔记",
+      "options": {
+        "isOriginal": true,
+        "allowReward": true
+      }
+    }
+  }
+}

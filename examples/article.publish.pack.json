@@ -1,0 +1,49 @@
+{
+  "$schema": "../schemas/publish-pack.v1.schema.json",
+  "specVersion": "1.0",
+  "id": "20261117-gis-3d-workflow-article",
+  "contentType": "article",
+  "meta": {
+    "title": "如何用开源 GIS 数据渲染 26 万栋城市三维白模",
+    "language": "zh-CN",
+    "compliance": {
+      "aiLevel": "none",
+      "isOriginal": true
+    }
+  },
+  "assets": {
+    "covers": [
+      { "id": "hero_16x9", "path": "covers/article_hero_16x9.png", "ratio": "16:9", "variant": "A" },
+      { "id": "thumb_1x1", "path": "covers/article_thumb_1x1.png", "ratio": "1:1", "variant": "A" }
+    ]
+  },
+  "default": {
+    "title": "不靠商业引擎：用开源 GIS 数据流渲染 26 万栋城市三维白模全记录",
+    "digest": "从 CMAB 建筑轮廓、Copernicus 30米高程到浏览器离线逐帧渲染的完整管线拆解。",
+    "markdown": "## 一、数据准备\n\n一座千万级人口大城的建筑矢量通常超过 25 万栋。直接塞进前端会导致显存爆炸，核心思路是在预处理阶段做 **分块合并 Geometry** 与 **高度属性纹理化**。\n\n## 二、坐标系对齐与退海平原高程夸张\n\n平原城市地表起伏往往不足 5 米，而北部山区海拔超千米，采用分段非线性高程映射能同时保留河道细节与远山天际线。",
+    "tags": ["GIS", "数据可视化", "三维地图", "前端渲染"],
+    "coverRef": "hero_16x9"
+  },
+  "platforms": {
+    "weixin_mp": {
+      "coverWideRef": "hero_16x9",
+      "coverRef": "thumb_1x1",
+      "options": {
+        "isOriginal": true,
+        "allowReward": true
+      }
+    },
+    "zhihu": {
+      "options": {
+        "columnName": "城市数据可视化手记",
+        "topicNames": ["地理信息系统 (GIS)", "数据可视化", "Three.js"]
+      }
+    },
+    "bilibili": {
+      "contentType": "article",
+      "options": {
+        "category": ["科技", "计算机技术"]
+      }
+    }
+  }
+}

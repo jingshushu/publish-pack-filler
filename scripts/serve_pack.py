@@ -18,7 +18,10 @@ from pathlib import Path
 DEFAULT_PACK_DIR = Path.cwd()
 
 
-def find_latest_pack_md(base_dir: Path) -> Path | None:
+def find_latest_pack_file(base_dir: Path) -> Path | None:
+    json_packs = sorted(base_dir.glob("*.pack.json")) + sorted(base_dir.glob("publish*.json"))
+    if json_packs:
+        return json_packs[-1]
     candidates = sorted(base_dir.glob("发布包*.md"))
     if candidates:
         return candidates[-1]
@@ -29,10 +32,14 @@ def find_latest_pack_md(base_dir: Path) -> Path | None:
 def list_cover_rel_paths(base_dir: Path) -> list[str]:
     exts = {".png", ".jpg", ".jpeg", ".webp"}
     rels: list[str] = []
-    cover_dir = base_dir / "封面"
-    search_roots = [cover_dir] if cover_dir.is_dir() else [base_dir]
-    for root in search_roots:
-        for p in sorted(root.iterdir()):
+    for sub_name in ("封面", "covers", "slides", "images"):
+        sub_dir = base_dir / sub_name
+        if sub_dir.is_dir():
+            for p in sorted(sub_dir.iterdir()):
+                if p.is_file() and p.suffix.lower() in exts:
+                    rels.append(str(p.relative_to(base_dir)).replace("\\", "/"))
+    if not rels:
+        for p in sorted(base_dir.iterdir()):
             if p.is_file() and p.suffix.lower() in exts:
                 rels.append(str(p.relative_to(base_dir)).replace("\\", "/"))
     return rels
@@ -55,16 +62,21 @@ def make_handler(base_dir: Path):
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/pack":
-                md_file = find_latest_pack_md(base_dir)
-                if not md_file or not md_file.is_file():
-                    self._send_json({"error": f"未在 {base_dir} 找到 发布包*.md"}, status=404)
+                pack_file = find_latest_pack_file(base_dir)
+                if not pack_file or not pack_file.is_file():
+                    self._send_json({"error": f"未在 {base_dir} 找到 publish.pack.json 或 发布包*.md"}, status=404)
                     return
+                content = pack_file.read_text(encoding="utf-8")
+                is_json = pack_file.suffix.lower() == ".json"
                 self._send_json(
                     {
                         "baseDir": str(base_dir),
                         "folderName": base_dir.parent.name + "/" + base_dir.name,
-                        "mdFile": md_file.name,
-                        "markdown": md_file.read_text(encoding="utf-8"),
+                        "packFile": pack_file.name,
+                        "mdFile": pack_file.name,
+                        "format": "json" if is_json else "markdown",
+                        "content": content,
+                        "markdown": "" if is_json else content,
                         "covers": list_cover_rel_paths(base_dir),
                     }
                 )
@@ -112,12 +124,12 @@ def main() -> None:
         print(f"❌ 目录不存在: {base_dir}", file=sys.stderr)
         sys.exit(1)
 
-    md_file = find_latest_pack_md(base_dir)
+    pack_file = find_latest_pack_file(base_dir)
     covers = list_cover_rel_paths(base_dir)
     print("=" * 62)
     print("🚀 万物有数 · 发布包只读桥接服务已启动")
     print(f"📂 当前绑定目录 : {base_dir}")
-    print(f"📄 发布包文档   : {md_file.name if md_file else '未找到'}")
+    print(f"📄 发布包文件   : {pack_file.name if pack_file else '未找到'}")
     print(f"🖼️ 检测到封面   : {len(covers)} 张 ({', '.join(covers)})")
     print(f"🔒 监听地址     : http://127.0.0.1:{args.port} (仅本机回环只读)")
     print("💡 在浏览器悬浮面板点击右上角 🔄 即可同步全套文案与高清封面！")

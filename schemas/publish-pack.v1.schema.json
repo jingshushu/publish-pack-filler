@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/jingshushu/publish-pack-filler/main/schemas/publish-pack.v1.schema.json",
+  "title": "PublishPack Open Specification v1.0",
+  "description": "Universal, extensible multi-platform content publishing bundle format supporting video, image carousel, long-form article, social post, and audio podcast across domestic and global creator platforms.",
+  "type": "object",
+  "required": ["specVersion", "contentType"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "specVersion": {
+      "type": "string",
+      "enum": ["1.0"],
+      "description": "Specification version, currently '1.0'."
+    },
+    "id": {
+      "type": "string",
+      "description": "Optional unique slug or identifier for this release pack."
+    },
+    "contentType": {
+      "type": "string",
+      "enum": ["video", "image_post", "article", "post", "audio"],
+      "description": "Primary content archetype: video (短视频/中长视频), image_post (图文笔记/多图轮播), article (专栏/公众号长文), post (短动态/微头条/推文), audio (播客音频)."
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Internal project or episode title." },
+        "summary": { "type": "string", "description": "One-sentence summary of core facts or value proposition." },
+        "language": { "type": "string", "default": "zh-CN" },
+        "author": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "notes": { "type": "string", "description": "Internal operator reminders before publishing." },
+        "compliance": {
+          "type": "object",
+          "properties": {
+            "aiLevel": {
+              "type": "string",
+              "enum": ["none", "assisted", "generated"],
+              "default": "none",
+              "description": "AI synthesis disclosure level: none (纯实拍/非AI生成), assisted (AI辅助创作), generated (含AI生成合成画面或人声，需勾选平台AI标识)."
+            },
+            "aiNote": { "type": "string" },
+            "isOriginal": { "type": "boolean", "default": true },
+            "copyrightType": { "type": "string", "enum": ["original", "repost", "authorized"], "default": "original" },
+            "repostSource": { "type": "string" },
+            "sourceNote": { "type": "string", "description": "Data or citation credits." }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "assets": {
+      "type": "object",
+      "description": "Decoupled media manifest referencing local relative paths or URLs.",
+      "properties": {
+        "videos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "id": { "type": "string" },
+              "path": { "type": "string" },
+              "aspectRatio": { "type": "string", "examples": ["16:9", "9:16", "3:4", "4:3", "1:1"] },
+              "durationSec": { "type": "number" },
+              "label": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "covers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "id": { "type": "string", "description": "Unique asset ID referenced by coverRef / coverPortraitRef / coverLandscapeRef." },
+              "path": { "type": "string", "description": "Relative file path in the bundle folder, e.g. '封面/cover_vertical.png' or 'cover.jpg'." },
+              "ratio": { "type": "string", "examples": ["3:4", "4:3", "16:9", "9:16", "1:1", "2.35:1"] },
+              "variant": { "type": "string", "default": "A", "description": "A/B testing variant code (A, B, C, D)." },
+              "label": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "images": {
+          "type": "array",
+          "description": "Ordered slide images for 'image_post' carousel notes or inline illustrations.",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "id": { "type": "string" },
+              "path": { "type": "string" },
+              "ratio": { "type": "string" },
+              "alt": { "type": "string" },
+              "caption": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "subtitles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "lang": { "type": "string", "default": "zh-CN" },
+              "path": { "type": "string" }
+            }
+          }
+        },
+        "audio": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "id": { "type": "string" },
+              "path": { "type": "string" },
+              "durationSec": { "type": "number" }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "default": {
+      "$ref": "#/$defs/platformPayload",
+      "description": "Fallback base content inherited by any platform that omits specific fields."
+    },
+    "platforms": {
+      "type": "object",
+      "description": "Per-platform overrides and sub-options keyed by canonical platform ID (e.g. xiaohongshu, weixin_channels, douyin, bilibili, kuaishou, weixin_mp, zhihu, weibo, youtube, tiktok, x, instagram, xiaoyuzhou, or custom IDs).",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9_-]+$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/platformPayload"
+      }
+    }
+  },
+  "$defs": {
+    "chapterItem": {
+      "type": "object",
+      "required": ["time", "title"],
+      "properties": {
+        "time": { "type": "string", "pattern": "^(\\d{1,2}:)?\\d{2}:\\d{2}$", "description": "Timestamp in MM:SS or HH:MM:SS." },
+        "title": { "type": "string" }
+      }
+    },
+    "locationObject": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "city": { "type": "string" },
+            "poiId": { "type": "string" }
+          },
+          "required": ["name"]
+        }
+      ]
+    },
+    "platformPayload": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "contentType": {
+          "type": "string",
+          "enum": ["video", "image_post", "article", "post", "audio"],
+          "description": "Optional per-platform contentType override (e.g. 'image_post' on Xiaohongshu while 'video' on Bilibili)."
+        },
+        "title": { "type": "string", "description": "Primary title (or shortTitle fallback)." },
+        "shortTitle": { "type": "string", "description": "Dedicated short title (e.g. WeChat Channels 6-16 char whitelist title)." },
+        "altTitles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Alternative A/B testing titles."
+        },
+        "body": { "type": "string", "description": "Plain-text caption, post body, or video description." },
+        "markdown": { "type": "string", "description": "Markdown body for long-form 'article' platforms (WeChat MP, Zhihu, Juejin)." },
+        "html": { "type": "string", "description": "Optional pre-rendered HTML for rich-text article platforms." },
+        "digest": { "type": "string", "description": "Excerpt or summary card text for articles." },
+        "thread": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Multi-post thread array for X/Twitter, Threads, or Weibo."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Topic or keyword tags WITHOUT leading '#' (the filler adds '#' or Enter pills per platform convention)."
+        },
+        "coverRef": { "type": "string", "description": "Asset ID in assets.covers[] or relative file path." },
+        "coverPortraitRef": { "type": "string", "description": "3:4 or 9:16 portrait cover asset ID or path." },
+        "coverLandscapeRef": { "type": "string", "description": "4:3 or 16:9 landscape cover asset ID or path." },
+        "coverWideRef": { "type": "string", "description": "16:9 widescreen cover asset ID or path (e.g. Bilibili player cover)." },
+        "altCoverRefs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "imageRefs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of asset IDs or relative paths for 'image_post' carousel slides."
+        },
+        "collection": { "type": "string", "description": "Series / playlist /合集 name." },
+        "location": { "$ref": "#/$defs/locationObject" },
+        "pinnedComment": { "type": "string", "description": "First comment to post and pin immediately after publishing." },
+        "chapters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/chapterItem" }
+        },
+        "options": {
+          "type": "object",
+          "description": "Extensible platform-specific publishing sub-options.",
+          "properties": {
+            "visibility": {
+              "type": "string",
+              "enum": ["public", "friends", "fans", "private", "unlisted"]
+            },
+            "scheduleAt": {
+              "type": ["string", "null"],
+              "description": "ISO-8601 scheduled publish timestamp, or null for immediate."
+            },
+            "category": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+              ],
+              "description": "Submission category path, e.g. ['知识', '人文历史'] on Bilibili."
+            },
+            "topic": { "type": "string", "description": "Campaign / activity topic (e.g. Bilibili 活动话题)." },
+            "dynamicText": { "type": "string", "description": "Repost / feed dynamic commentary (e.g. Bilibili 动态转发语)." },
+            "copyright": { "type": "string", "enum": ["original", "repost", "authorized"] },
+            "repostSource": { "type": "string" },
+            "isOriginal": { "type": "boolean" },
+            "aiDeclaration": {
+              "type": "string",
+              "enum": ["none", "assisted", "ai_generated"],
+              "description": "Platform AI content label / declaration."
+            },
+            "selfDeclaration": {
+              "type": "string",
+              "description": "Self-declaration label (e.g. Douyin 自主声明: '内容由AI生成' | '内容为个人观点或见解' | '虚拟演绎，仅供娱乐')."
+            },
+            "contentLabel": {
+              "type": "string",
+              "description": "WeChat Channels 视频标注 (e.g. '含AI生成内容' | '个人观点，仅供参考')."
+            },
+            "allowComment": { "type": "boolean" },
+            "allowDownload": { "type": "boolean" },
+            "allowDuet": { "type": "boolean" },
+            "noReprint": { "type": "boolean" },
+            "enableWatermark": { "type": "boolean" },
+            "syncFeeds": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Cross-sync targets inside an ecosystem, e.g. ['xigua', 'toutiao']."
+            },
+            "bgm": {
+              "oneOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "volume": { "type": "number" }
+                  }
+                }
+              ]
+            },
+            "externalLink": {
+              "type": "string",
+              "description": "Official extension URL (e.g. WeChat Channels 公众号文章扩展链接)."
+            },
+            "mount": {
+              "type": "object",
+              "description": "Commercial or mini-program attachment (POI, product cart, mini-app, paid column).",
+              "properties": {
+                "type": { "type": "string", "enum": ["product", "poi", "mini_program", "article", "group_chat", "course"] },
+                "title": { "type": "string" },
+                "url": { "type": "string" },
+                "id": { "type": "string" }
+              },
+              "additionalProperties": true
+            },
+            "poll": {
+              "type": "object",
+              "description": "Interactive vote / poll configuration.",
+              "properties": {
+                "question": { "type": "string" },
+                "choices": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "coCreators": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Co-author / 联合投稿 usernames."
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

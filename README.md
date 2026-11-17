@@ -1,70 +1,58 @@
-# Publish Pack Filler · 多平台《发布包》安全填表与封面注入插件
+# Publish Pack Filler · 多平台《发布包》开放协议、AI Skill 与浏览器插件 (v1.3)
 
-面向短视频与图文创作者的 **Chrome / Edge 浏览器插件（Manifest V3） & 油猴脚本**。  
-只需在任意平台选择一次本地「成品包目录」，即可跨 **小红书、微信视频号、抖音、B站** 四大创作者后台**实时共享全套文案与多比例封面**，一键拟人节奏填表、一键注入封面并自动匹配裁剪比例。
+一套打通 **「AI 生成标准发布包 → 浏览器安全预填与自适应配图」** 的多平台内容分发工具链：
+1. **开放标准协议 (`PublishPack Spec v1.0`)**：支持 **视频 (`video`)、图文轮播 (`image_post`)、专栏长文 (`article`)、短动态 (`post`)、播客音频 (`audio`)** 五大形态，采用「`default` 全局默认层 + `platforms.<id>` 平台覆写与 `options` 子选项」架构。
+2. **配套通用 AI Skill (`skills/publish-pack/`)**：适用于 Claude Code、Cursor、Antigravity、Codex（亦附网页版豆包 / Kimi / ChatGPT 通用转换提示词），将任意文稿/字幕/草稿自动转换为合规的 `publish.pack.json` 并通过门禁脚本校验。
+3. **Chrome / Edge 浏览器插件 & 油猴脚本**：原生解析 `publish.pack.json`（同时 100% 向后兼容旧版《发布包.md》），支持直接粘贴 JSON、选择成品包目录跨平台实时共享配图、一键拟人填表、视频封面比例自动匹配、图文轮播多图一键按序注入。
 
-> **安全边界声明**：本插件严守「纯前端草稿填表辅助」定位——**不代传正片视频、不劫持网页任何网络请求、绝不自动点击「发布」按钮**，最终核对与点击发布 100% 交由创作者真人完成，从根源规避自动化群控风控。
-
----
-
-## 🚀 安装方式
-
-### 方式一：Chrome / Edge 浏览器插件（推荐，免装油猴，开箱即用）
-
-1. 前往本仓库右侧 **[Releases](../../releases)** 下载最新的 `publish-pack-filler-chrome-v1.2.0.zip` 并解压到本地文件夹（或克隆本仓库直接使用 `extension/` 目录）。
-2. 在 Chrome 地址栏输入 `chrome://extensions/`（Edge 输入 `edge://extensions/`），打开右上角的 **「开发者模式」** 开关。
-3. 点击左上角 **「加载已解压的扩展程序」**，选中解压出来的文件夹（内含 `manifest.json` 的那一层）即可完成安装！
-4. *(可选)* 点击浏览器右上角拼图图标，将 **「万物有数 · 多平台发布包填表助手」** 固定在工具栏——点击图标可 **一键同时打开四大平台发布后台**。
-
-### 方式二：Tampermonkey（篡改猴）脚本
-
-1. 浏览器安装 Tampermonkey 扩展后，点击「添加新脚本」。
-2. 复制本仓库根目录下的 [`publish-pack-filler.user.js`](./publish-pack-filler.user.js) 全文粘贴保存即可。
+> **安全边界声明**：本工具严守「纯前端草稿填表辅助」定位——**不代传正片视频、不劫持页面网络请求、绝不自动点击「发布」按钮**，最终核对与发布 100% 由真人物理点击完成。
 
 ---
 
-## ✨ 四大平台适配能力一览
+## 📦 一、安装浏览器插件
 
-| 平台 | 支持能力与专属防坑细节 |
-|---|---|
-| **📕 小红书**<br>`creator.xiaohongshu.com` | 标题字数折算核验（`≤20` 字）· `款A/B/C/D` 赛马封面与备选标题联动 · 注入封面后拟人延时自动切换 `3:4` 裁剪框（解决横版视频默认卡 `4:3`）· 点击 `#话题胶囊` 唤醒下拉按回车绑定官方蓝字 |
-| **💚 微信视频号**<br>`channels.weixin.qq.com` | Wujie 微前端 `ShadowRoot` 全穿透 · 支持 **`3:4 个人主页卡片` + `4:3 视频号动态卡`** 双弹窗自动打开与封面注入 · 自动净化短标题违规标点为空格（严守 6–16 字及 7 类符号白名单）· 一键自动匹配「添加到合集」 |
-| **🎵 抖音**<br>`creator.douyin.com` | 注入封面自动先切 **「设置竖封面 / 设置横封面」**，并精准过滤绕开弹窗左侧「AI生成参考图」陷阱上传槽 · 独立作品标题（`≤30` 字）+ 简介 + `#话题` 浮层自动清理 · 一键匹配「添加合集」 |
-| **📺 B 站**<br>`member.bilibili.com` | 推荐流列表封面（`4:3`）+ 播放页宽屏封面（`16:9`）切换注入 · 稿件标题 + Quill 简介填充 · 普通标签（去 `#` 纯词）自动逐词回车生成胶囊 |
+### 方式 1：Chrome / Edge 独立插件（推荐，免装油猴）
+1. 下载本仓库 [`releases/publish-pack-filler-chrome-v1.3.0.zip`](./releases/publish-pack-filler-chrome-v1.3.0.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
+2. 打开 `chrome://extensions/`（Edge 打开 `edge://extensions/`），开启右上角 **「开发者模式」**。
+3. 点击左上角 **「加载已解压的扩展程序」**，选择解压后的文件夹（内含 `manifest.json`）。
 
-### 界面与防风控细节
-- **一次选目录，四端免刷新实时热同步**：在任意一个平台点击 `📂 选择成品包目录`（自动跳过几百 MB 的 `.mp4` 视频文件），其他已打开的平台标签页实时同步最新文案与封面缩略图；右上角支持 `更换发布包.md` 单独切换文案。
-- **右侧分屏停靠 / 自由悬浮可缩放 + 黑白双皮肤**：
-  - 默认采用清爽的 **纯白浅色皮肤**（顶部 `🌙 / ☀️` 一键切换暗夜皮肤）；
-  - 默认 **右侧分屏停靠模式** 自动将网页主体左移防遮挡，左边缘可直接拖拽调宽（`320px–760px`），并配有 **`❯` 贴边折叠小耳朵（快捷键 `Alt+S` / `Option+S`）** 一键闪避全屏弹窗按钮；点击 `🪟` 可切换为四向自由缩放悬浮窗。
-- **反风控安全架构**：`ISOLATED` 隔离世界 + `Closed ShadowRoot` 封装 + 零 `web_accessible_resources` 暴露 + 类正态分布拟人延时与随机内部落点抖动。
+### 方式 2：Tampermonkey（篡改猴）脚本
+将根目录下的 [`publish-pack-filler.user.js`](./publish-pack-filler.user.js) 粘贴进 Tampermonkey 新建脚本保存即可。
 
 ---
 
-## 📂 成品包目录与《发布包.md》标准结构示例
+## 🤖 二、使用 AI Skill 或提示词生成标准 `publish.pack.json`
 
-推荐将单期作品的交付目录组织如下（选择目录时插件会自动读取最新版本的 `发布包*.md` 与 `封面/` 下所有图片）：
+### 1. 在 AI 编程/创作 Agent 中使用 Skill
+将 [`skills/publish-pack`](./skills/publish-pack) 目录安装或软链接到你的 Agent Skills 目录（如 `~/.claude/skills/publish-pack` 或 `~/.gemini/config/skills/publish-pack`）：
+- 对 AI 说：**「帮我把这期文稿和封面目录整理成 publish.pack.json」**；
+- AI 会自动扫描目录图片比例、按各平台硬门禁（小红书 ≤20 字折算、视频号 6–16 字及 7 类标点白名单、抖音 ≤30 字、B站无 `#` 标签与双封面）生成 `publish.pack.json`，并运行 `validate_pack.py` 门禁脚本确保 100% 合规。
 
-```text
-成片/
-├── 发布包_v01.md
-└── 封面/
-    ├── 封面_3x4_A-主推卖点_v01.png
-    ├── 封面_4x3_A-主推卖点_v01.png
-    ├── 封面_16x9_A-主推卖点_v01.png
-    └── 封面_3x4_B-备选卖点_v01.png
-```
-
-完整《发布包.md》格式可直接参考仓库内的真实测试样本：[`tests/fixtures/tianjin_pack_v01.md`](./tests/fixtures/tianjin_pack_v01.md)。
+### 2. 在网页端大模型（豆包 / Kimi / ChatGPT / Claude）中使用
+直接复制 [`skills/publish-pack/references/web-llm-prompt.md`](./skills/publish-pack/references/web-llm-prompt.md) 中的提示词发送给任意网页 AI → 复制 AI 输出的 JSON → 点击插件面板右上角的 **「粘贴JSON」** 即可一键载入全平台文案！
 
 ---
 
-## 🛠️ 本地开发与重新打包
+## 📐 三、PublishPack v1.0 标准协议与多形态示例
+
+- **完整协议文档**：[`docs/SPEC.md`](./docs/SPEC.md)
+- **JSON Schema（支持编辑器自动补全）**：[`schemas/publish-pack.v1.schema.json`](./schemas/publish-pack.v1.schema.json)
+- **三大内容形态标准样板**：
+  - 🎬 中短视频赛马包：[`examples/video-pack.publish.pack.json`](./examples/video-pack.publish.pack.json)
+  - 🖼️ 图文轮播笔记包（多图按序注入）：[`examples/image-carousel.publish.pack.json`](./examples/image-carousel.publish.pack.json)
+  - 📰 深度专栏长文包（公众号 / 知乎 / B站专栏）：[`examples/article.publish.pack.json`](./examples/article.publish.pack.json)
+
+---
+
+## 🛠️ 四、本地构建与校验命令
 
 ```bash
-# 同步构建 extension/content.js 并生成 dist/publish-pack-filler-chrome-v1.2.0.zip
-node scripts/build.mjs
+# 1. 校验任意 publish.pack.json 是否符合各平台门禁（加 --render-md 可导出可读预览）
+python3 skills/publish-pack/scripts/validate_pack.py examples/video-pack.publish.pack.json
 
-# 运行解析器回归测试
+# 2. 运行 Markdown + PublishPack JSON 双引擎回归单测
 node tests/test_parser.mjs
+
+# 3. 同步构建 Chrome 插件目录与 ZIP 发布包
+node scripts/build.mjs
 ```

@@ -1,0 +1,130 @@
+{
+  "$schema": "../schemas/publish-pack.v1.schema.json",
+  "specVersion": "1.0",
+  "id": "20261117-tianjin-city-rings",
+  "contentType": "video",
+  "meta": {
+    "title": "《一座城的年轮 · 天津》多平台标准发布包",
+    "summary": "从1404年1.6km²明代算盘城到北方第一大港：267,516栋真实3D建筑还原天津622年向海生长史",
+    "language": "zh-CN",
+    "createdAt": "2026-11-17T16:00:00+08:00",
+    "compliance": {
+      "aiLevel": "assisted",
+      "aiNote": "程序化真实 GIS 数据驱动三维白模动画，零 AI 合成人声（无须勾选数字人/AI配音声明；泛AI辅助创作按平台规范如实标注）",
+      "isOriginal": true,
+      "copyrightType": "original",
+      "sourceNote": "清华大学 CMAB 建筑数据集、Copernicus DEM GLO-30、OpenStreetMap、2025年统计公报"
+    }
+  },
+  "assets": {
+    "videos": [
+      {
+        "id": "main_video",
+        "path": "一座城的年轮_天津_v2_发布版.mp4",
+        "aspectRatio": "16:9",
+        "durationSec": 150
+      }
+    ],
+    "covers": [
+      { "id": "cover_3x4_a", "path": "封面/封面_3x4_A-曾经只有这么大_v01.png", "ratio": "3:4", "variant": "A", "label": "曾经只有这么大" },
+      { "id": "cover_4x3_a", "path": "封面/封面_4x3_A-曾经只有这么大_v01.png", "ratio": "4:3", "variant": "A", "label": "横版列表/分享卡" },
+      { "id": "cover_16x9_a", "path": "封面/封面_16x9_A-曾经只有这么大_v01.png", "ratio": "16:9", "variant": "A", "label": "宽屏播放页" },
+      { "id": "cover_3x4_b", "path": "封面/封面_3x4_B-夜景乐呵天津_v01.png", "ratio": "3:4", "variant": "B", "label": "夜景乐呵天津" },
+      { "id": "cover_3x4_c", "path": "封面/封面_3x4_C-黑金800倍扩张_v01.png", "ratio": "3:4", "variant": "C", "label": "黑金800倍扩张" },
+      { "id": "cover_3x4_d", "path": "封面/封面_3x4_D-来津第一站_v01.png", "ratio": "3:4", "variant": "D", "label": "来津第一站" }
+    ]
+  },
+  "default": {
+    "title": "紧挨北京装下2个上海，天津咋这么乐呵？",
+    "body": "1404年三岔河口筑起算盘城，向东奔海45公里造出北方第一大港和530米高楼，面积装下近2个上海，GDP稳居北方第二。150秒真实3D建筑数据带你看懂这座硬核又通透的大天津！",
+    "tags": ["天津", "一座城的年轮", "城市变迁", "数据可视化", "GIS制图"],
+    "collection": "一座城的年轮",
+    "location": { "name": "天津市", "city": "天津市" },
+    "pinnedComment": "来报个坐标：你在天津住哪个区？买煎饼果子默认夹果子还是果篦儿？👇",
+    "options": {
+      "visibility": "public",
+      "scheduleAt": null,
+      "allowComment": true,
+      "allowDownload": true
+    }
+  },
+  "platforms": {
+    "xiaohongshu": {
+      "enabled": true,
+      "title": "紧挨北京装下2个上海，天津咋这么乐呵？",
+      "altTitles": [
+        "GDP稳居北方第二，天津人咋只管乐呵？",
+        "600年狂翻800倍，天津人咋这么乐呵？",
+        "离北京仅半小时高铁，天津咋守住慢烟火？"
+      ],
+      "body": "评论区催更的「天津」来了！\n1404年三岔河口筑起算盘城，向东奔海45公里造出北方第一大港和530米高楼，面积装下近2个上海，GDP稳居北方第二\n结果到了胡同口，早点摊煎饼果子磕俩鸡蛋，下午茶馆竹板一响听相声，夏天狮子林桥扑通跳进海河\n嘛钱不钱的，乐呵乐呵得了！快夸夸这座既有硬核家底、又活得倍儿通透的大天津！",
+      "tags": ["天津", "北京", "上海", "GIS制图", "数据可视化设计", "城市可视化", "数字孪生", "城市漫游", "用AI讲知识", "ai替我说"],
+      "coverRef": "cover_3x4_a",
+      "altCoverRefs": ["cover_3x4_b", "cover_3x4_c", "cover_3x4_d"],
+      "collection": "一座城的年轮",
+      "pinnedComment": "来对个地道天津人暗号👇\n1️⃣ 买煎饼果子，你默认夹「果子」还是「果篦儿」？有没有拎着自家鸡蛋下楼排过队？🥚\n2️⃣ 你第一次来天津，是在天津站出来看见世纪钟和解放桥，还是在西站红砖楼下的车？\n（先主动自首保命：150秒拍完了中心六区、八里台和滨海，居然漏掉了京津走廊上的武清和宝坻！武清宝坻静海宁河的朋友别拿麻花砸我，评论区集合给自家上分🙋‍♂️）",
+      "options": {
+        "visibility": "public",
+        "aiDeclaration": "none",
+        "allowDuet": true
+      }
+    },
+    "weixin_channels": {
+      "enabled": true,
+      "shortTitle": "装下2个上海 天津咋这么乐呵",
+      "altTitles": [
+        "600年翻800倍 乐呵大天津",
+        "紧挨北京 稳居北方第二的天津"
+      ],
+      "body": "从1404年三岔河口1.6平方公里的明代算盘城，向东奔海45公里长成装下近两个上海、稳居北方第二的1363万人大城。这里有中国第一所现代大学、第一条时速350公里高铁，也有津湾世纪钟、八里台一墙之隔的天大南开和清晨热气腾腾的煎饼果子。谨以此片，献给每一个热爱并留在乐呵天津的人！",
+      "tags": ["天津", "一座城的年轮", "城市变迁", "数据可视化"],
+      "coverPortraitRef": "cover_3x4_a",
+      "coverLandscapeRef": "cover_4x3_a",
+      "collection": "一座城的年轮",
+      "location": "天津市",
+      "pinnedComment": "你当年来天津的第一站，是在天津站看见世纪钟，还是在西站下的车？如今住在哪个区？欢迎中心六区、滨海和武清宝坻静海宁河的老乡在评论区报到，转发给身边的天津朋友一起看看咱这600年的家底！",
+      "options": {
+        "isOriginal": true,
+        "contentLabel": "none"
+      }
+    },
+    "douyin": {
+      "enabled": true,
+      "title": "紧挨北京装下2个上海，天津咋这么乐呵？",
+      "altTitles": [
+        "GDP稳居北方第二，天津人咋只管乐呵？",
+        "600年狂翻800倍，天津人咋这么乐呵？"
+      ],
+      "body": "紧挨北京装下近2个上海！从1.6km²明代算盘城狂翻近800倍，GDP稳居北方第二的天津，骨子里咋活得这么乐呵？150秒真实3D数据带你看懂622年天津卫！",
+      "tags": ["天津", "一座城的年轮", "城市变迁", "数据可视化", "GIS制图"],
+      "coverPortraitRef": "cover_3x4_a",
+      "coverLandscapeRef": "cover_4x3_a",
+      "collection": "一座城的年轮",
+      "location": "天津市",
+      "pinnedComment": "来报个坐标：你在天津住哪个区？买煎饼果子是果子党还是果篦儿党？👇（武清、宝坻、滨海的朋友评论区集合！）",
+      "options": {
+        "selfDeclaration": "none",
+        "syncFeeds": [],
+        "allowDownload": true
+      }
+    },
+    "bilibili": {
+      "enabled": true,
+      "title": "从1.6km²明代算盘城到北方第一大港：26.7万栋3D建筑还原天津622年向海生长史",
+      "body": "九河下梢天津卫，三道浮桥两道关。它是中国古代唯一确切记载建城年月日（1404年12月23日）的大城市，九成五土地曾是渤海退海平原，却在622年间从1.6平方公里的矩形“算盘城”一路向东奔海45公里，长成建成区狂翻近800倍、GDP稳居北方第二的津滨双城。本期基于267,516栋真实三维建筑与30米地形数据，用150秒带你看懂这座硬核又乐呵的天津城。\n\n数据致谢：清华大学 CMAB 中国建筑数据集、Copernicus DEM GLO-30、OpenStreetMap 及 2025 年统计公报（历代城垣与地标造型为历史空间对位示意）",
+      "tags": ["天津", "一座城的年轮", "城市变迁", "历史地理", "三维地图", "GIS", "数据可视化", "数字孪生", "海河", "人文历史"],
+      "coverLandscapeRef": "cover_4x3_a",
+      "coverWideRef": "cover_16x9_a",
+      "collection": "一座城的年轮·3D城市变迁",
+      "pinnedComment": "补充两个片中细节考据：① 天津是中国古代唯一有确切建城日（1404年12月23日）的大城市，老城厢东西南北四马路就是当年城墙拆墙修路留下的边界；② 限于150秒篇幅，这次重点聚焦了三岔河口至滨海双城主轴，武清、宝坻、静海、宁河、蓟州的朋友快来评论区打卡补充！",
+      "options": {
+        "copyright": "original",
+        "category": ["知识", "人文历史"],
+        "topic": "知识分享官",
+        "dynamicText": "耗时打磨26.7万栋三维建筑，从1404年1.6km²的明代算盘城一路长到45公里外的渤海湾！天大南开的校友、还有全网的天津卫老乡快来认领你家的楼！",
+        "noReprint": true,
+        "enableWatermark": true
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v1.2.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v1.3.0) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -223,8 +223,13 @@
     const host = location.hostname;
     if (host.includes('xiaohongshu.com')) return 'xiaohongshu';
     if (host.includes('douyin.com')) return 'douyin';
-    if (host.includes('weixin.qq.com')) return 'weixin';
+    if (host.includes('channels.weixin.qq.com')) return 'weixin';
+    if (host.includes('mp.weixin.qq.com')) return 'weixin_mp';
     if (host.includes('bilibili.com')) return 'bilibili';
+    if (host.includes('kuaishou.com')) return 'kuaishou';
+    if (host.includes('zhihu.com')) return 'zhihu';
+    if (host.includes('weibo.com')) return 'weibo';
+    if (host.includes('youtube.com')) return 'youtube';
     return 'xiaohongshu';
   }
 
@@ -233,6 +238,19 @@
     douyin: { name: '抖音', accent: '#fe2c55', preferredRatios: ['3:4', '9:16', '4:3', '16:9'] },
     weixin: { name: '微信视频号', accent: '#07c160', preferredRatios: ['3:4', '4:3'] },
     bilibili: { name: 'B 站', accent: '#00aeec', preferredRatios: ['4:3', '16:9'] },
+    kuaishou: { name: '快手', accent: '#ff4906', preferredRatios: ['3:4', '9:16', '16:9'] },
+    weixin_mp: { name: '公众号/小绿书', accent: '#07c160', preferredRatios: ['16:9', '3:4', '1:1'] },
+    zhihu: { name: '知乎', accent: '#1772f6', preferredRatios: ['16:9', '4:3'] },
+    weibo: { name: '微博', accent: '#ff8200', preferredRatios: ['3:4', '16:9', '1:1'] },
+    youtube: { name: 'YouTube', accent: '#ff0033', preferredRatios: ['16:9', '9:16'] },
+  };
+
+  const CONTENT_TYPE_LABELS = {
+    video: '🎬 视频',
+    image_post: '🖼️ 图文轮播',
+    article: '📰 专栏长文',
+    post: '💬 短动态',
+    audio: '🎙️ 播客音频',
   };
 
   // 小红书标题字数折算（ASCII 算 0.5，汉字及全角算 1.0）
@@ -482,6 +500,302 @@
     const rawBody = bodyMatch ? bodyMatch[1].trim() : mdText.trim();
     const { bodyOnly, tags } = splitBodyAndHashtags(rawBody);
     return { title, body: bodyOnly, tags };
+  }
+
+  // ==================== PublishPack v1.0 通用 JSON 开放协议解析与归一化引擎 ====================
+  const PLATFORM_ALIASES = {
+    xhs: 'xiaohongshu',
+    xiaohongshu: 'xiaohongshu',
+    weixin: 'weixin',
+    weixin_channels: 'weixin',
+    channels: 'weixin',
+    dy: 'douyin',
+    douyin: 'douyin',
+    bili: 'bilibili',
+    bilibili: 'bilibili',
+    ks: 'kuaishou',
+    kuaishou: 'kuaishou',
+    mp: 'weixin_mp',
+    gzh: 'weixin_mp',
+    weixin_mp: 'weixin_mp',
+    zhihu: 'zhihu',
+    weibo: 'weibo',
+    yt: 'youtube',
+    youtube: 'youtube',
+    tt: 'tiktok',
+    tiktok: 'tiktok',
+    twitter: 'x',
+    x: 'x',
+    ig: 'instagram',
+    instagram: 'instagram',
+    xyz: 'xiaoyuzhou',
+    xiaoyuzhou: 'xiaoyuzhou',
+  };
+
+  function stripJsonCodeFence(raw = '') {
+    const trimmed = String(raw || '').trim();
+    const fenceMatch = trimmed.match(/^```(?:json|jsonc)?\s*\n([\s\S]*?)\n```\s*$/i);
+    return fenceMatch ? fenceMatch[1].trim() : trimmed;
+  }
+
+  function normalizeLocationStr(loc) {
+    if (!loc) return '';
+    if (typeof loc === 'string') return loc.trim();
+    if (typeof loc === 'object' && loc.name) return String(loc.name).trim();
+    return '';
+  }
+
+  function parsePublishPackJson(rawInput, options = {}) {
+    const obj = typeof rawInput === 'string' ? JSON.parse(stripJsonCodeFence(rawInput)) : rawInput;
+    if (!obj || typeof obj !== 'object') {
+      throw new Error('无效的 JSON 对象');
+    }
+
+    const rootContentType = obj.contentType || 'video';
+    const metaIn = obj.meta || {};
+    const defIn = obj.default || {};
+    const assetsIn = obj.assets || {};
+    const platformsIn = obj.platforms || {};
+
+    // 1. 归一化封面池 assets.covers[] 与图文轮播池 assets.images[]
+    const assetById = new Map();
+    const covers = [];
+    for (const [idx, c] of (assetsIn.covers || []).entries()) {
+      if (!c || !c.path) continue;
+      const inferred = inferCoverMetaFromPath(c.path);
+      const ratio = c.ratio || inferred.ratio;
+      const variant = (c.variant || inferred.variant || 'A').toUpperCase();
+      const id = c.id || `${ratio.replace(':', 'x')}_${variant}_${idx}`;
+      const slot = c.id || `${ratio.replace(':', 'x')}_${variant}`;
+      const baseName = c.path.split('/').pop();
+      const entry = {
+        id,
+        slot,
+        ratio,
+        variant,
+        relPath: c.path,
+        label: c.label ? `款${variant} · ${ratio} (${c.label})` : `款${variant} · ${ratio} (${baseName})`,
+      };
+      covers.push(entry);
+      assetById.set(id, entry);
+      assetById.set(c.path, entry);
+    }
+
+    const images = [];
+    for (const [idx, img] of (assetsIn.images || []).entries()) {
+      if (!img || !img.path) continue;
+      const id = img.id || `slide_${idx + 1}`;
+      const entry = {
+        id,
+        index: idx + 1,
+        relPath: img.path,
+        ratio: img.ratio || '3:4',
+        alt: img.alt || img.caption || `图 ${idx + 1}`,
+      };
+      images.push(entry);
+      assetById.set(id, entry);
+      assetById.set(img.path, entry);
+    }
+
+    const resolveAssetPath = (ref) => {
+      if (!ref) return '';
+      const hit = assetById.get(ref);
+      return hit ? hit.relPath : String(ref);
+    };
+
+    // 2. 合并 default 与各平台覆写层
+    const rawPlatMap = {};
+    for (const [rawKey, val] of Object.entries(platformsIn)) {
+      if (!val || typeof val !== 'object') continue;
+      const normKey = PLATFORM_ALIASES[rawKey.toLowerCase()] || rawKey.toLowerCase();
+      rawPlatMap[normKey] = val;
+    }
+
+    const targetIds = new Set([
+      'xiaohongshu',
+      'weixin',
+      'douyin',
+      'bilibili',
+      'kuaishou',
+      'weixin_mp',
+      'zhihu',
+      'weibo',
+      'youtube',
+      ...Object.keys(rawPlatMap),
+    ]);
+
+    const normalizedPlatforms = {};
+    for (const pid of targetIds) {
+      const p = rawPlatMap[pid] || {};
+      const cType = p.contentType || defIn.contentType || rootContentType;
+      const mergedTitle = p.title ?? defIn.title ?? '';
+      const rawShort = p.shortTitle ?? defIn.shortTitle ?? mergedTitle;
+      const mergedAltTitles = Array.isArray(p.altTitles) && p.altTitles.length ? p.altTitles : defIn.altTitles || [];
+      let mergedBody = p.body ?? p.markdown ?? defIn.body ?? defIn.markdown ?? '';
+      const mergedChapters = Array.isArray(p.chapters) && p.chapters.length ? p.chapters : defIn.chapters || [];
+      if (mergedChapters.length && (pid === 'bilibili' || pid === 'youtube') && !mergedBody.includes('00:')) {
+        const chapLines = mergedChapters.map((ch) => `${ch.time} ${ch.title}`).join('\n');
+        mergedBody = mergedBody ? `${mergedBody}\n\n${chapLines}` : chapLines;
+      }
+
+      const rawTags = Array.isArray(p.tags) && p.tags.length ? p.tags : defIn.tags || [];
+      const cleanTags = rawTags.map((t) => String(t).replace(/^#+/, '').trim()).filter(Boolean);
+
+      const mergedOptions = { ...(defIn.options || {}), ...(p.options || {}) };
+      const catOpt = mergedOptions.category;
+      const categoryStr = Array.isArray(catOpt) ? catOpt.join(' -> ') : catOpt || '';
+
+      const rawImgRefs = Array.isArray(p.imageRefs) && p.imageRefs.length ? p.imageRefs : defIn.imageRefs || [];
+      const slidePaths = rawImgRefs.length ? rawImgRefs.map(resolveAssetPath).filter(Boolean) : images.map((im) => im.relPath);
+
+      normalizedPlatforms[pid] = {
+        enabled: p.enabled !== false,
+        contentType: cType,
+        title: mergedTitle,
+        shortTitleRaw: rawShort,
+        shortTitleClean: sanitizeWeixinShortTitle(rawShort),
+        altTitles: pid === 'weixin' ? mergedAltTitles.map(sanitizeWeixinShortTitle) : mergedAltTitles,
+        body: mergedBody,
+        digest: p.digest ?? defIn.digest ?? '',
+        thread: Array.isArray(p.thread) ? p.thread : defIn.thread || [],
+        tags: cleanTags,
+        collection: p.collection ?? defIn.collection ?? '',
+        location: normalizeLocationStr(p.location ?? defIn.location),
+        pinnedComment: p.pinnedComment ?? defIn.pinnedComment ?? '',
+        coverRel: resolveAssetPath(p.coverPortraitRef || p.coverRef || p.coverLandscapeRef || defIn.coverRef),
+        coverSubRel: resolveAssetPath(p.coverLandscapeRef || ''),
+        coverWideRel: resolveAssetPath(p.coverWideRef || ''),
+        slidePaths,
+        category: categoryStr,
+        topic: mergedOptions.topic || '',
+        dynamicText: mergedOptions.dynamicText || '',
+        options: mergedOptions,
+      };
+    }
+
+    const firstVideo = (assetsIn.videos || [])[0];
+    return {
+      meta: {
+        specVersion: obj.specVersion || '1.0',
+        format: 'json',
+        contentType: rootContentType,
+        packTitle: metaIn.title || defIn.title || options.sourceLabel || 'PublishPack 发布包',
+        summary: metaIn.summary || '',
+        compliance: metaIn.compliance || {},
+        mdFileName: options.fileName || 'publish.pack.json',
+        baseDir: options.baseDir || '',
+        videoFile: firstVideo?.path || '',
+        updatedAt: metaIn.createdAt || new Date().toISOString(),
+        sourceLabel: options.sourceLabel || metaIn.title || 'publish.pack.json',
+      },
+      covers,
+      images,
+      platforms: normalizedPlatforms,
+    };
+  }
+
+  // 将当前内存中的任意发布包（含旧版 Markdown 解析结果）一键导出为标准 PublishPack v1.0 JSON
+  function exportPackToSpecJson(pack) {
+    const p = pack.platforms || {};
+    const specObj = {
+      $schema: 'https://raw.githubusercontent.com/jingshushu/publish-pack-filler/main/schemas/publish-pack.v1.schema.json',
+      specVersion: '1.0',
+      contentType: pack.meta?.contentType || 'video',
+      meta: {
+        title: pack.meta?.packTitle || '',
+        compliance: pack.meta?.compliance || { aiLevel: 'none', isOriginal: true },
+      },
+      assets: {
+        videos: pack.meta?.videoFile ? [{ id: 'main_video', path: pack.meta.videoFile }] : [],
+        covers: (pack.covers || []).map((c) => ({
+          id: c.slot || c.id,
+          path: c.relPath,
+          ratio: c.ratio,
+          variant: c.variant || 'A',
+          label: c.label || '',
+        })),
+        images: (pack.images || []).map((im) => ({
+          id: im.id,
+          path: im.relPath,
+          ratio: im.ratio || '3:4',
+          alt: im.alt || '',
+        })),
+      },
+      default: {
+        title: p.xiaohongshu?.title || p.douyin?.title || '',
+        body: p.xiaohongshu?.body || p.douyin?.body || '',
+        tags: p.douyin?.tags || p.xiaohongshu?.tags || [],
+        collection: p.xiaohongshu?.collection || '',
+        pinnedComment: p.xiaohongshu?.pinnedComment || '',
+      },
+      platforms: {
+        xiaohongshu: p.xiaohongshu
+          ? {
+              title: p.xiaohongshu.title,
+              altTitles: p.xiaohongshu.altTitles || [],
+              body: p.xiaohongshu.body,
+              tags: p.xiaohongshu.tags || [],
+              collection: p.xiaohongshu.collection || '',
+              pinnedComment: p.xiaohongshu.pinnedComment || '',
+              options: p.xiaohongshu.options || {},
+            }
+          : undefined,
+        weixin_channels: p.weixin
+          ? {
+              shortTitle: p.weixin.shortTitleClean || p.weixin.shortTitleRaw || '',
+              altTitles: p.weixin.altTitles || [],
+              body: p.weixin.body,
+              tags: p.weixin.tags || [],
+              collection: p.weixin.collection || '',
+              location: p.weixin.location || '',
+              pinnedComment: p.weixin.pinnedComment || '',
+              options: p.weixin.options || {},
+            }
+          : undefined,
+        douyin: p.douyin
+          ? {
+              title: p.douyin.title,
+              altTitles: p.douyin.altTitles || [],
+              body: p.douyin.body,
+              tags: p.douyin.tags || [],
+              collection: p.douyin.collection || '',
+              location: p.douyin.location || '',
+              pinnedComment: p.douyin.pinnedComment || '',
+              options: p.douyin.options || {},
+            }
+          : undefined,
+        bilibili: p.bilibili
+          ? {
+              title: p.bilibili.title,
+              altTitles: p.bilibili.altTitles || [],
+              body: p.bilibili.body,
+              tags: p.bilibili.tags || [],
+              collection: p.bilibili.collection || '',
+              pinnedComment: p.bilibili.pinnedComment || '',
+              options: {
+                ...(p.bilibili.options || {}),
+                category: p.bilibili.category || p.bilibili.options?.category || '',
+                topic: p.bilibili.topic || p.bilibili.options?.topic || '',
+                dynamicText: p.bilibili.dynamicText || p.bilibili.options?.dynamicText || '',
+              },
+            }
+          : undefined,
+      },
+    };
+    return JSON.stringify(specObj, null, 2);
+  }
+
+  // 灵活按相对路径或文件名匹配本地缓存的图片 Blob（解耦任意图片命名与子文件夹结构）
+  function findBlobFlexible(blobsMap, targetRelPath) {
+    if (!targetRelPath || !blobsMap || !blobsMap.size) return null;
+    if (blobsMap.has(targetRelPath)) return blobsMap.get(targetRelPath);
+    const targetBase = targetRelPath.split('/').pop();
+    for (const [k, blob] of blobsMap.entries()) {
+      if (k === targetBase || k.split('/').pop() === targetBase) {
+        return blob;
+      }
+    }
+    return null;
   }
 
   // ==================== IndexedDB + 跨平台 GM_setValue 封面共享存储 ====================
@@ -1522,7 +1836,72 @@
         ]),
       };
     }
-    return { titleInput: null, bodyEditor: null };
+
+    // 扩展平台通用自适应定位器（快手 / 微信公众号&小绿书 / 知乎专栏 / 微博 / YouTube Studio）
+    return {
+      titleInput: findFirstVisible([
+        'input[placeholder*="标题"]',
+        'textarea[placeholder*="标题"]',
+        '#title',
+        'input[name="title"]',
+      ]),
+      bodyEditor: findFirstVisible([
+        '.ProseMirror[contenteditable="true"]',
+        '.ql-editor[contenteditable="true"]',
+        '.DraftEditor-root [contenteditable="true"]',
+        '#edui1_iframeholder iframe',
+        'div[contenteditable="true"]',
+        'textarea[placeholder*="描述"]',
+        'textarea[placeholder*="正文"]',
+      ]),
+    };
+  }
+
+  // 图文轮播模式 (image_post) 多图按序批量注入器（兼容小红书上传图文、抖音发布图文、公众号小绿书）
+  async function injectCarouselSlides(slideItems, blobsMap, onProgress) {
+    const validFiles = [];
+    const win = window;
+    for (let i = 0; i < slideItems.length; i++) {
+      const rel = slideItems[i];
+      const blob = findBlobFlexible(blobsMap, rel);
+      if (!blob) continue;
+      const fname = rel.split('/').pop() || `slide_${String(i + 1).padStart(2, '0')}.png`;
+      validFiles.push(new win.File([blob], fname, { type: blob.type || 'image/png', lastModified: Date.now() + i }));
+    }
+
+    if (!validFiles.length) {
+      return { ok: false, msg: '未找到已缓存的图文轮播图片，请先选择包含图文图片的成品包目录。' };
+    }
+
+    const candidates = queryDeepAll('input[type="file"]').filter((inp) => {
+      const accept = (inp.getAttribute('accept') || '').toLowerCase();
+      const isImg = accept.includes('image') || accept.includes('.png') || accept.includes('.jpg') || inp.hasAttribute('multiple');
+      const isVideoOnly = (accept.includes('video') || accept.includes('.mp4')) && !accept.includes('image');
+      return isImg && !isVideoOnly;
+    });
+
+    const targetInput = candidates.find((inp) => inp.hasAttribute('multiple')) || candidates[0];
+    if (!targetInput) {
+      return { ok: false, msg: '未检测到图文多图上传框：请先在网页切换至「上传图文 / 发布图文」Tab。' };
+    }
+
+    onProgress?.(`⏳ 正在按顺序载入 ${validFiles.length} 张图文卡片...`);
+    await humanSleep(220, 440);
+
+    const iWin = targetInput.ownerDocument?.defaultView || window;
+    const dt = new iWin.DataTransfer();
+    for (const f of validFiles) dt.items.add(f);
+    try {
+      targetInput.value = '';
+    } catch {
+      // ignore
+    }
+    targetInput.files = dt.files;
+    targetInput.dispatchEvent(new iWin.Event('input', { bubbles: true, composed: true }));
+    targetInput.dispatchEvent(new iWin.Event('change', { bubbles: true, composed: true }));
+    await humanSleep(500, 860);
+
+    return { ok: true, msg: `已按序注入全部 ${validFiles.length} 张图文轮播卡片！` };
   }
 
   // ==================== 本地只读小助手桥接（可选，兼容 Chrome MV3 Service Worker 与油猴） ====================
@@ -1797,32 +2176,52 @@
       return `款${c.variant} (${c.ratio})`;
     }
 
-    function applyMarkdownToCurrentPack(mdName, mdText, subMdTextMap = {}) {
-      const parsed = parsePublishPackMarkdown(mdText, {
-        mdFileName: mdName,
-        sourceLabel: mdName,
-        baseDir: currentPack.meta?.baseDir || '',
-      });
+    let showPasteDrawer = false;
 
-      for (const [subPath, subText] of Object.entries(subMdTextMap)) {
-        const subData = parseSinglePlatformMarkdown(subText);
-        if (subPath.includes('小红书') && subData.body) {
-          parsed.platforms.xiaohongshu.title = subData.title || parsed.platforms.xiaohongshu.title;
-          parsed.platforms.xiaohongshu.body = subData.body;
-          parsed.platforms.xiaohongshu.tags = subData.tags;
-        } else if (subPath.includes('抖音') && subData.body) {
-          parsed.platforms.douyin.title = subData.title || parsed.platforms.douyin.title;
-          parsed.platforms.douyin.body = subData.body;
-          parsed.platforms.douyin.tags = subData.tags;
-        } else if (subPath.includes('B站') && subData.body) {
-          parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
-          parsed.platforms.bilibili.body = subData.body;
+    function applyPackContent(fileName, rawText, subMdTextMap = {}) {
+      const isJson = /\.json$/i.test(fileName) || stripJsonCodeFence(rawText).startsWith('{');
+      let parsed;
+
+      if (isJson) {
+        parsed = parsePublishPackJson(rawText, {
+          fileName,
+          sourceLabel: fileName,
+          baseDir: currentPack.meta?.baseDir || '',
+        });
+        // 若 JSON 中未显式列出 covers 但目录里扫到了封面图，自动补齐
+        if ((!parsed.covers || !parsed.covers.length) && coverBlobsMap.size > 0 && parsed.meta.contentType !== 'image_post') {
+          parsed.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
+        }
+      } else {
+        parsed = parsePublishPackMarkdown(rawText, {
+          mdFileName: fileName,
+          sourceLabel: fileName,
+          baseDir: currentPack.meta?.baseDir || '',
+        });
+        parsed.meta.format = 'markdown';
+        parsed.meta.contentType = 'video';
+
+        for (const [subPath, subText] of Object.entries(subMdTextMap)) {
+          const subData = parseSinglePlatformMarkdown(subText);
+          if (subPath.includes('小红书') && subData.body) {
+            parsed.platforms.xiaohongshu.title = subData.title || parsed.platforms.xiaohongshu.title;
+            parsed.platforms.xiaohongshu.body = subData.body;
+            parsed.platforms.xiaohongshu.tags = subData.tags;
+          } else if (subPath.includes('抖音') && subData.body) {
+            parsed.platforms.douyin.title = subData.title || parsed.platforms.douyin.title;
+            parsed.platforms.douyin.body = subData.body;
+            parsed.platforms.douyin.tags = subData.tags;
+          } else if (subPath.includes('B站') && subData.body) {
+            parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
+            parsed.platforms.bilibili.body = subData.body;
+          }
+        }
+
+        if (coverBlobsMap.size > 0) {
+          parsed.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
         }
       }
 
-      if (coverBlobsMap.size > 0) {
-        parsed.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
-      }
       currentPack = parsed;
       settings.selectedTitleIdx = -1;
       settings.selectedCoverSlot = '';
@@ -1834,19 +2233,40 @@
       const files = Array.from(rawFiles || []);
       if (!files.length) return;
 
-      const mdCandidates = [];
+      const packCandidates = [];
       const subMdTextMap = {};
       const imageFiles = [];
 
       for (const f of files) {
-        const relPath = f.webkitRelativePath || f._relPath || f.name;
+        const relPath = (f.webkitRelativePath || f._relPath || f.name).replace(/\\/g, '/');
         if (/\.(mp4|mov|mkv|wav|zip)$/i.test(relPath)) continue;
 
-        if (/\.md$/i.test(relPath)) {
+        if (/\.json$/i.test(relPath)) {
+          // 排除无关配置文件（如 sources_*.json / package.json），仅收录 PublishPack 或含 platforms/default 的 JSON
+          const txt = await f.text();
+          try {
+            const probe = JSON.parse(txt);
+            if (probe && (probe.specVersion || probe.platforms || probe.default)) {
+              packCandidates.push({
+                name: relPath.split('/').pop(),
+                relPath,
+                text: txt,
+                priority: /\.pack\.json$/i.test(relPath) ? 3 : 2,
+              });
+            }
+          } catch {
+            // ignore non-pack json
+          }
+        } else if (/\.md$/i.test(relPath)) {
           if (/(小红书|抖音|视频号|B站).*\.md$/i.test(relPath)) {
             subMdTextMap[relPath] = await f.text();
-          } else {
-            mdCandidates.push({ name: relPath.split('/').pop(), relPath, text: await f.text() });
+          } else if (!/\.preview\.md$/i.test(relPath)) {
+            packCandidates.push({
+              name: relPath.split('/').pop(),
+              relPath,
+              text: await f.text(),
+              priority: /发布包/.test(relPath) ? 1 : 0,
+            });
           }
         } else if (/\.(png|jpg|jpeg|webp)$/i.test(relPath)) {
           imageFiles.push({ file: f, relPath });
@@ -1854,37 +2274,41 @@
       }
 
       if (imageFiles.length > 0) {
-        const onlyCoverFolder = imageFiles.filter((it) => /(?:^|\/)封面\/|封面/.test(it.relPath));
-        const chosenImages = onlyCoverFolder.length > 0 ? onlyCoverFolder : imageFiles;
-
+        // 保留子目录相对路径（如 封面/xxx.png、slides/01.png、covers/hero.png），同时支持灵活文件名匹配
+        const stripTopFolder = (p) => {
+          const parts = p.split('/');
+          return parts.length > 1 ? parts.slice(1).join('/') : p;
+        };
         coverBlobsMap.clear();
         const records = [];
-        for (const { file } of chosenImages) {
-          const relName = `封面/${file.name}`;
-          coverBlobsMap.set(relName, file);
-          records.push({ relPath: relName, blob: file });
+        for (const { file, relPath } of imageFiles) {
+          const cleanRel = stripTopFolder(relPath);
+          const key = cleanRel.includes('/') ? cleanRel : `封面/${file.name}`;
+          coverBlobsMap.set(key, file);
+          records.push({ relPath: key, blob: file });
         }
-        setStatus('⏳ 正在跨平台缓存封面图片（小红书/视频号/抖音/B站共享）...');
+        setStatus('⏳ 正在跨平台缓存媒体图片（全平台实时共享）...');
         await saveCoversCrossPlatform(records);
       }
 
-      if (mdCandidates.length > 0) {
-        mdCandidates.sort((a, b) => {
-          const aIsPack = /发布包/.test(a.name) ? 1 : 0;
-          const bIsPack = /发布包/.test(b.name) ? 1 : 0;
-          if (aIsPack !== bIsPack) return bIsPack - aIsPack;
+      if (packCandidates.length > 0) {
+        // 优先级：*.pack.json (标准协议) > publish*.json > 发布包*.md (兼容旧版) > 其它 .md
+        packCandidates.sort((a, b) => {
+          if (a.priority !== b.priority) return b.priority - a.priority;
           return b.name.localeCompare(a.name, 'zh-CN', { numeric: true });
         });
-        availableMdFiles = mdCandidates;
-        const bestMd = mdCandidates[0];
-        applyMarkdownToCurrentPack(bestMd.name, bestMd.text, subMdTextMap);
+        availableMdFiles = packCandidates;
+        const best = packCandidates[0];
+        applyPackContent(best.name, best.text, subMdTextMap);
       } else if (imageFiles.length > 0) {
         currentPack.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
         savePackState(currentPack);
       }
 
       setStatus(
-        `✅ 已自动载入《${currentPack.meta?.mdFileName || '发布包'}》与 ${coverBlobsMap.size} 张封面（四平台已全局共享！）`
+        `✅ 已自动载入《${currentPack.meta?.mdFileName || '发布包'}》(${
+          currentPack.meta?.format === 'json' ? 'PublishPack JSON' : 'Markdown'
+        }) 与 ${coverBlobsMap.size} 张图片`
       );
       render();
     }
@@ -1899,13 +2323,13 @@
             for await (const [name, entry] of handle.entries()) {
               if (name.startsWith('.')) continue;
               if (entry.kind === 'file') {
-                if (/\.(md|png|jpg|jpeg|webp)$/i.test(name)) {
+                if (/\.(json|md|png|jpg|jpeg|webp)$/i.test(name)) {
                   const file = await entry.getFile();
                   file._relPath = `${prefix}${name}`;
                   collected.push(file);
                 }
               } else if (entry.kind === 'directory') {
-                if (/^(?:成片|封面|文案|04_发布与成片|09_发布与交付)$/.test(name) || depth === 0) {
+                if (/^(?:成片|封面|covers|slides|images|文案|04_发布与成片|09_发布与交付)$/i.test(name) || depth === 0) {
                   await walkDir(entry, `${prefix}${name}/`, depth + 1);
                 }
               }
@@ -1939,13 +2363,15 @@
           }
           await saveCoversCrossPlatform(records);
         }
-        applyMarkdownToCurrentPack(data.mdFile || '发布包_v01.md', data.markdown);
+        const fileName = data.packFile || data.mdFile || 'publish.pack.json';
+        const rawContent = data.content || data.markdown || '';
+        applyPackContent(fileName, rawContent);
         currentPack.meta.baseDir = data.baseDir || '';
         savePackState(currentPack);
-        setStatus(`✅ 桥接同步成功：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张封面四平台已共享）`);
+        setStatus(`✅ 桥接同步成功：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张图片全平台已共享）`);
         render();
       } catch {
-        setStatus('⚠️ 本地桥接未启动，直接点「📂 选择成品包目录」即可');
+        setStatus('⚠️ 本地桥接未启动，直接点「📂 选择成品包目录」或「📋 粘贴JSON」即可');
       }
     }
 
@@ -2084,6 +2510,8 @@
       }
 
       const pData = currentPack.platforms?.[platform] || {};
+      const activeContentType = pData.contentType || currentPack.meta?.contentType || 'video';
+      const cTypeBadge = CONTENT_TYPE_LABELS[activeContentType] || '🎬 内容';
       const { active: activeCover, sortedCovers } = resolvePlatformCoverOptions();
 
       const activeTitle =
@@ -2093,10 +2521,36 @@
           ? pData.shortTitleClean || pData.shortTitleRaw || ''
           : pData.title || '';
 
-      const activeBlob = activeCover ? coverBlobsMap.get(activeCover.relPath) : null;
+      const activeBlob = activeCover ? findBlobFlexible(coverBlobsMap, activeCover.relPath) : null;
       if (activeBlob) {
         activeThumbUrl = URL.createObjectURL(activeBlob);
       }
+
+      const slidePaths = Array.isArray(pData.slidePaths) && pData.slidePaths.length
+        ? pData.slidePaths
+        : (currentPack.images || []).map((im) => im.relPath);
+      const readySlideCount = slidePaths.filter((sp) => Boolean(findBlobFlexible(coverBlobsMap, sp))).length;
+
+      // 整理当前平台子选项与合规提示项
+      const optBadges = [];
+      const comp = currentPack.meta?.compliance || {};
+      const opts = pData.options || {};
+      if (comp.aiLevel === 'generated' || opts.aiDeclaration === 'ai_generated' || opts.selfDeclaration === '内容由AI生成' || opts.contentLabel === '含AI生成内容') {
+        optBadges.push({ text: '⚠️ 需勾选 AI 生成标识', warn: true });
+      } else if (comp.aiLevel === 'assisted' || opts.aiDeclaration === 'assisted') {
+        optBadges.push({ text: 'ℹ️ AI辅助创作(零AI配音免勾)' });
+      }
+      if (comp.isOriginal || opts.isOriginal || opts.copyright === 'original') {
+        optBadges.push({ text: '✓ 原创 / 自制' });
+      }
+      if (pData.category) optBadges.push({ text: `📂 分区：${pData.category}`, copyVal: pData.category });
+      if (pData.topic) optBadges.push({ text: `🎯 活动：${pData.topic}`, copyVal: pData.topic });
+      if (opts.selfDeclaration && opts.selfDeclaration !== 'none') optBadges.push({ text: `声明：${opts.selfDeclaration}` });
+      if (opts.contentLabel && opts.contentLabel !== 'none') optBadges.push({ text: `标注：${opts.contentLabel}` });
+      if (opts.scheduleAt) optBadges.push({ text: `⏰ 定时：${opts.scheduleAt}`, copyVal: opts.scheduleAt });
+      if (opts.noReprint) optBadges.push({ text: '🔒 禁止转载' });
+      if (opts.bgm) optBadges.push({ text: `🎵 BGM：${typeof opts.bgm === 'string' ? opts.bgm : opts.bgm.name || ''}`, copyVal: typeof opts.bgm === 'string' ? opts.bgm : opts.bgm.name || '' });
+      if (pData.digest) optBadges.push({ text: '📋 复制文章摘要(Digest)', copyVal: pData.digest });
 
       const xhsLen = platform === 'xiaohongshu' ? calcXhsTitleLen(activeTitle) : 0;
       const wxDirtyWarn =
@@ -2126,7 +2580,8 @@
           <div class="ppf-head" id="ppf-drag-handle">
             <div class="ppf-head-title">
               <span class="ppf-badge">${pMeta.name}</span>
-              <span>发布包填表助手</span>
+              <span>发布包助手</span>
+              <span style="font-size:11px; opacity:0.75; font-weight:500;">${cTypeBadge}</span>
             </div>
             <div class="ppf-row-nowrap">
               <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换 浅色纯白 / 深色暗夜 皮肤">
@@ -2143,17 +2598,32 @@
           </div>
 
           <div class="ppf-body">
-            <!-- 成品包一键载入区 -->
+            <!-- 成品包一键载入区（原生兼容 PublishPack JSON + 旧版 Markdown + 直接粘贴 JSON） -->
             <div class="ppf-pack-bar" id="ppf-dropzone">
               <div class="ppf-pack-top">
                 <div class="ppf-pack-name" title="${currentPack.meta?.packTitle || ''}">
                   📦 ${currentPack.meta?.packTitle || '未加载发布包'}
                 </div>
-                <button class="ppf-link-btn" id="ppf-pick-md" title="手动指定或更换另一份 发布包.md 文档">更换发布包.md</button>
+                <div class="ppf-row-nowrap">
+                  <button class="ppf-link-btn" id="ppf-toggle-paste" title="直接粘贴 AI 生成的 PublishPack JSON">粘贴JSON</button>
+                  <button class="ppf-link-btn" id="ppf-export-json" title="将当前发布包复制为标准 PublishPack v1.0 JSON">导出JSON</button>
+                  <button class="ppf-link-btn" id="ppf-pick-md" title="手动选择单份 .json 或 .md 发布包文件">更换文件</button>
+                </div>
               </div>
               ${
+                showPasteDrawer
+                  ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+                      <textarea id="ppf-paste-area" class="ppf-preview" style="min-height:92px; font-family:monospace; font-size:11.5px;" placeholder='在此粘贴符合 PublishPack v1.0 标准的 JSON（支持直接粘贴带 \`\`\`json 代码块的 AI 回复）...'></textarea>
+                      <div class="ppf-row" style="justify-content:flex-end;">
+                        <button class="ppf-btn" id="ppf-paste-cancel">取消</button>
+                        <button class="ppf-btn ppf-btn-accent" id="ppf-paste-confirm" style="padding:5px 12px;">✅ 解析并载入</button>
+                      </div>
+                    </div>`
+                  : ''
+              }
+              ${
                 availableMdFiles.length > 1
-                  ? `<select class="ppf-select" id="ppf-md-select" title="检测到目录内多份文档，可随时切换">
+                  ? `<select class="ppf-select" id="ppf-md-select" title="检测到目录内多份发布包文件，可随时切换">
                       ${availableMdFiles
                         .map(
                           (m, idx) =>
@@ -2166,40 +2636,58 @@
                   : ''
               }
               <button class="ppf-btn ppf-btn-block" id="ppf-pick-dir">
-                📂 选择成品包目录（一次载入，四平台共享封面与文案）
+                📂 选择成品包目录（自动识别 publish.pack.json / 发布包.md 与配图）
               </button>
               <input type="file" id="ppf-input-dir" webkitdirectory directory multiple style="display:none" />
-              <input type="file" id="ppf-input-md" accept=".md,.markdown,.txt" style="display:none" />
+              <input type="file" id="ppf-input-md" accept=".json,.md,.markdown,.txt" style="display:none" />
             </div>
 
-            <!-- 封面注入区（适配小红书比例框、视频号 3:4+4:3 双弹窗、抖音横竖双封防呆） -->
-            <div class="ppf-sec">
-              <div class="ppf-sec-hd">
-                <span>🖼️ 封面注入（${
-                  platform === 'weixin'
-                    ? '支持 3:4 主页卡 + 4:3 动态卡双封'
-                    : platform === 'douyin'
-                    ? '自动切竖封/横封并避开AI参考图槽'
-                    : `自动延时选中 ${activeRatioLabel} 裁剪框`
-                }）</span>
-                <span>${coverBlobsMap.size ? `已共享 ${coverBlobsMap.size} 张` : '待选目录'}</span>
-              </div>
-              <div class="ppf-cover-box">
-                ${
-                  activeThumbUrl
-                    ? `<img class="ppf-thumb" src="${activeThumbUrl}" alt="cover" />`
-                    : `<div class="ppf-thumb">${
-                        activeCover ? `${activeCover.ratio}\n选一次目录\n四端共享` : '选目录后\n自动配图'
-                      }</div>`
-                }
-                <div style="flex:1; display:flex; flex-direction:column; gap:7px; min-width:0;">
-                  <div class="ppf-row" id="ppf-cover-chips"></div>
-                  <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-inject-cover">
-                    ${injectBtnLabel}
-                  </button>
-                </div>
-              </div>
-            </div>
+            ${
+              activeContentType === 'image_post' && slidePaths.length > 0
+                ? `<!-- 图文轮播模式批量配图区 -->
+                  <div class="ppf-sec">
+                    <div class="ppf-sec-hd">
+                      <span>🖼️ 图文轮播卡片（共 ${slidePaths.length} 张 · 已缓存 ${readySlideCount} 张）</span>
+                    </div>
+                    <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-inject-slides">
+                      ⚡ 按顺序一键注入全部 ${slidePaths.length} 张轮播图
+                    </button>
+                  </div>`
+                : ''
+            }
+
+            <!-- 封面注入区（视频/专栏模式下展示，或图文有独立封面时展示） -->
+            ${
+              activeContentType !== 'image_post' || sortedCovers.length > 0
+                ? `<div class="ppf-sec">
+                    <div class="ppf-sec-hd">
+                      <span>🖼️ 封面注入（${
+                        platform === 'weixin'
+                          ? '支持 3:4 主页卡 + 4:3 动态卡双封'
+                          : platform === 'douyin'
+                          ? '自动切竖封/横封并避开AI参考图槽'
+                          : `自动延时选中 ${activeRatioLabel} 裁剪框`
+                      }）</span>
+                      <span>${coverBlobsMap.size ? `已共享 ${coverBlobsMap.size} 张` : '待选目录'}</span>
+                    </div>
+                    <div class="ppf-cover-box">
+                      ${
+                        activeThumbUrl
+                          ? `<img class="ppf-thumb" src="${activeThumbUrl}" alt="cover" />`
+                          : `<div class="ppf-thumb">${
+                              activeCover ? `${activeCover.ratio}\n选一次目录\n多端共享` : '选目录后\n自动配图'
+                            }</div>`
+                      }
+                      <div style="flex:1; display:flex; flex-direction:column; gap:7px; min-width:0;">
+                        <div class="ppf-row" id="ppf-cover-chips"></div>
+                        <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-inject-cover">
+                          ${injectBtnLabel}
+                        </button>
+                      </div>
+                    </div>
+                  </div>`
+                : ''
+            }
 
             <!-- 标题与备选 -->
             <div class="ppf-sec">
@@ -2208,7 +2696,7 @@
                   platform === 'weixin'
                     ? `短标题 (${activeTitle.length}/16字 · 7类白名单)`
                     : platform === 'douyin'
-                    ? `作品标题 (${activeTitle.length}/30字)`
+                    ? `作品标题 (${activeTitle.length}/${activeContentType === 'image_post' ? 20 : 30}字)`
                     : `标题 (${platform === 'xiaohongshu' ? `${xhsLen}/20字` : `${activeTitle.length}字`})`
                 }</span>
                 <div class="ppf-row-nowrap">
@@ -2255,7 +2743,7 @@
             <div class="ppf-sec">
               <div class="ppf-sec-hd">
                 <span>🏷️ ${
-                  platform === 'bilibili'
+                  platform === 'bilibili' || platform === 'youtube'
                     ? '普通标签（无#纯词）'
                     : platform === 'weixin'
                     ? '话题（一键填入已自动带入，也可点胶囊补加）'
@@ -2268,20 +2756,21 @@
               <div class="ppf-row" id="ppf-tags-wrap"></div>
             </div>
 
-            <!-- 合集 / 位置 / 置顶首评 -->
+            <!-- 合集 / 位置 / 置顶首评 / 平台子选项 -->
             <div class="ppf-sec">
-              <div class="ppf-sec-hd"><span>📌 合集 · 位置 · 置顶首评</span></div>
+              <div class="ppf-sec-hd"><span>📌 合集 · 首评 · 平台子选项清单</span></div>
               <div class="ppf-row">
                 ${
                   pData.collection && (platform === 'weixin' || platform === 'douyin')
-                    ? `<button class="ppf-btn" id="ppf-auto-col" title="视频上传完成后点击，自动在下拉框中精确匹配「${pData.collection}」">⚡ 自动选合集：${pData.collection}</button>`
+                    ? `<button class="ppf-btn" id="ppf-auto-col" title="上传完成后点击，自动在下拉框精确匹配「${pData.collection}」">⚡ 自动选合集：${pData.collection}</button>`
                     : ''
                 }
-                ${pData.collection ? `<button class="ppf-btn" id="ppf-copy-col">📋 复制合集</button>` : ''}
-                ${pData.location ? `<button class="ppf-btn" id="ppf-copy-loc">📍 复制位置：${pData.location}</button>` : ''}
+                ${pData.collection ? `<button class="ppf-btn" id="ppf-copy-col">📁 合集：${pData.collection}</button>` : ''}
+                ${pData.location ? `<button class="ppf-btn" id="ppf-copy-loc">📍 位置：${pData.location}</button>` : ''}
                 ${pData.pinnedComment ? `<button class="ppf-btn" id="ppf-copy-pin">💬 复制置顶首评</button>` : ''}
-                ${pData.dynamicText ? `<button class="ppf-btn" id="ppf-copy-dyn">✨ 复制B站动态语</button>` : ''}
+                ${pData.dynamicText ? `<button class="ppf-btn" id="ppf-copy-dyn">✨ 复制动态语</button>` : ''}
               </div>
+              <div class="ppf-row" id="ppf-opt-badges"></div>
             </div>
 
             <!-- 选项开关 -->
@@ -2402,20 +2891,82 @@
       shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapse;
       shadow.getElementById('ppf-sync-bridge').onclick = syncFromLocalBridge;
 
-      // 目录与文档导入
+      // 渲染平台子选项与合规徽章
+      const optBadgesWrap = shadow.getElementById('ppf-opt-badges');
+      if (optBadgesWrap && optBadges.length > 0) {
+        for (const item of optBadges) {
+          const badge = document.createElement('span');
+          badge.className = 'ppf-chip';
+          if (item.warn) {
+            badge.style.background = 'rgba(245, 158, 11, 0.16)';
+            badge.style.color = '#d97706';
+          }
+          badge.textContent = item.text;
+          if (item.copyVal) {
+            badge.title = '点击复制该项内容';
+            badge.onclick = async () => {
+              await safeCopy(String(item.copyVal));
+              setStatus(`📋 已复制：${item.text}`);
+            };
+          }
+          optBadgesWrap.appendChild(badge);
+        }
+      }
+
+      // 目录、JSON 粘贴与文档导入导出
       const inputDir = shadow.getElementById('ppf-input-dir');
       const inputMd = shadow.getElementById('ppf-input-md');
       shadow.getElementById('ppf-pick-dir').onclick = pickPackDirectory;
       shadow.getElementById('ppf-pick-md').onclick = () => inputMd.click();
 
+      shadow.getElementById('ppf-toggle-paste').onclick = () => {
+        showPasteDrawer = !showPasteDrawer;
+        render();
+      };
+      shadow.getElementById('ppf-export-json').onclick = async () => {
+        const jsonStr = exportPackToSpecJson(currentPack);
+        await safeCopy(jsonStr);
+        setStatus('📋 已将当前发布包导出为标准 PublishPack v1.0 JSON 并复制到剪贴板！');
+      };
+
+      const pasteCancel = shadow.getElementById('ppf-paste-cancel');
+      if (pasteCancel) {
+        pasteCancel.onclick = () => {
+          showPasteDrawer = false;
+          render();
+        };
+      }
+      const pasteConfirm = shadow.getElementById('ppf-paste-confirm');
+      if (pasteConfirm) {
+        pasteConfirm.onclick = () => {
+          const val = shadow.getElementById('ppf-paste-area')?.value || '';
+          if (!val.trim()) {
+            setStatus('⚠️ 请先粘贴 JSON 内容');
+            return;
+          }
+          try {
+            applyPackContent('pasted.publish.pack.json', val);
+            showPasteDrawer = false;
+            setStatus(`✅ 已成功解析并载入 PublishPack JSON：${currentPack.meta?.packTitle || ''}`);
+            render();
+          } catch (err) {
+            setStatus(`❌ JSON 解析失败：${err.message || err}`);
+          }
+        };
+      }
+
       inputDir.onchange = (e) => ingestFileEntries(e.target.files);
       inputMd.onchange = async (e) => {
         const f = e.target.files?.[0];
         if (!f) return;
-        const text = await f.text();
-        applyMarkdownToCurrentPack(f.name, text);
-        setStatus(`✅ 已手动更换发布包文档为：${f.name}`);
-        render();
+        try {
+          const text = await f.text();
+          applyPackContent(f.name, text);
+          setStatus(`✅ 已载入发布包文件：${f.name}`);
+          render();
+        } catch (err) {
+          setStatus(`❌ 解析文件失败：${err.message || err}`);
+        }
       };
 
       const mdSelect = shadow.getElementById('ppf-md-select');
@@ -2423,8 +2974,8 @@
         mdSelect.onchange = (e) => {
           const chosen = availableMdFiles[Number(e.target.value)];
           if (chosen) {
-            applyMarkdownToCurrentPack(chosen.name, chosen.text);
-            setStatus(`✅ 已切换至文档：${chosen.name}`);
+            applyPackContent(chosen.name, chosen.text);
+            setStatus(`✅ 已切换至文件：${chosen.name}`);
             render();
           }
         };
@@ -2444,7 +2995,7 @@
         const readEntry = (entry, prefix = '') =>
           new Promise((resolve) => {
             if (entry.isFile) {
-              if (!/\.(md|png|jpg|jpeg|webp)$/i.test(entry.name)) {
+              if (!/\.(json|md|png|jpg|jpeg|webp)$/i.test(entry.name)) {
                 resolve();
                 return;
               }
@@ -2488,28 +3039,44 @@
         }
       };
 
+      // 图文轮播批量注入
+      const injectSlidesBtn = shadow.getElementById('ppf-inject-slides');
+      if (injectSlidesBtn) {
+        injectSlidesBtn.onclick = async () => {
+          injectSlidesBtn.disabled = true;
+          try {
+            const res = await injectCarouselSlides(slidePaths, coverBlobsMap, (msg) => setStatus(msg));
+            setStatus((res.ok ? '✅ ' : '⚠️ ') + res.msg);
+          } finally {
+            injectSlidesBtn.disabled = false;
+          }
+        };
+      }
+
       // 封面注入
       const injectBtn = shadow.getElementById('ppf-inject-cover');
-      injectBtn.onclick = async () => {
-        if (!activeBlob || !activeCover) {
-          setStatus('⚠️ 请先点上方「📂 选择成品包目录」载入一次封面（四平台将自动共享）');
-          return;
-        }
-        injectBtn.disabled = true;
-        try {
-          const fileName = activeCover.relPath.split('/').pop() || 'cover.png';
-          const res = await injectCoverAndSelectCropRatio(
-            activeBlob,
-            fileName,
-            activeCover.ratio,
-            platform,
-            (progressMsg) => setStatus(progressMsg)
-          );
-          setStatus((res.ok ? '✅ ' : '⚠️ ') + res.msg);
-        } finally {
-          injectBtn.disabled = false;
-        }
-      };
+      if (injectBtn) {
+        injectBtn.onclick = async () => {
+          if (!activeBlob || !activeCover) {
+            setStatus('⚠️ 请先点上方「📂 选择成品包目录」载入一次封面（多平台将自动共享）');
+            return;
+          }
+          injectBtn.disabled = true;
+          try {
+            const fileName = activeCover.relPath.split('/').pop() || 'cover.png';
+            const res = await injectCoverAndSelectCropRatio(
+              activeBlob,
+              fileName,
+              activeCover.ratio,
+              platform,
+              (progressMsg) => setStatus(progressMsg)
+            );
+            setStatus((res.ok ? '✅ ' : '⚠️ ') + res.msg);
+          } finally {
+            injectBtn.disabled = false;
+          }
+        };
+      }
 
       // 标题切换、单项填入与复制
       const titleSelect = shadow.getElementById('ppf-title-select');
