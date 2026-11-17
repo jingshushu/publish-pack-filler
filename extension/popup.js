@@ -22,7 +22,8 @@ async function initPopup() {
 
     if (rawPack) {
       const pack = typeof rawPack === 'string' ? JSON.parse(rawPack) : rawPack;
-      titleEl.textContent = pack?.meta?.packTitle || '已加载发布包';
+      const acct = pack?.meta?.targetAccount ? `（👤 ${pack.meta.targetAccount}）` : '';
+      titleEl.textContent = (pack?.meta?.packTitle || '已加载发布包') + acct;
     } else {
       titleEl.textContent = '内置示例 · 《一座城的年轮 · 天津》';
     }

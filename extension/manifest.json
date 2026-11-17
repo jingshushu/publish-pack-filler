@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "万物有数 · 多平台发布包填表助手",
   "short_name": "发布包助手",
-  "version": "1.4.0",
-  "description": "支持飞书链接一键唤起 Finder 与发布页并自动透传成品包，兼容 PublishPack v1.0 JSON 与 Markdown，覆盖小红书、视频号、抖音、B站等平台安全预填与配图",
+  "version": "1.4.1",
+  "description": "支持飞书发布表「本地作品目录 + 分发账号」智能寻址唤起 Finder 与发布页并透传成品包，兼容 PublishPack v1.0 JSON 与 Markdown，覆盖小红书、视频号、抖音、B站等平台安全预填与配图",
   "permissions": [
     "storage",
     "unlimitedStorage"
@@ -22,7 +22,7 @@
     "http://localhost/*"
   ],
   "action": {
-    "default_title": "多平台发布包填表助手 (v1.4.0 · 飞书直连)",
+    "default_title": "多平台发布包填表助手 (v1.4.1 · 飞书直连)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

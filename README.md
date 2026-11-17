@@ -1,7 +1,7 @@
-# Publish Pack Filler · 多平台《发布包》开放协议、飞书直连与浏览器插件 (v1.4)
+# Publish Pack Filler · 多平台《发布包》开放协议、飞书直连与浏览器插件 (v1.4.1)
 
-一套打通 **「飞书多维表格管理 → 本地 Finder 定位视频 + 透传发布包 → 浏览器安全预填与配图」** 的多平台内容分发工具链：
-1. **飞书多维表格一键直连 (`127.0.0.1:8765/open`)**：在飞书里点一下公式超链接，自动唤起 macOS Finder 高亮选中主 `.mp4` 视频、将整套文案与高清封面直接透传进浏览器插件，并自动打开目标创作者后台（详见 [`docs/FEISHU_SETUP.md`](./docs/FEISHU_SETUP.md)）。
+一套打通 **「飞书多维表格管理 → 本地作品目录智能寻址 + Finder 定位视频 + 透传发布包 → 浏览器安全预填与配图」** 的多平台内容分发工具链：
+1. **飞书多维表格一键直连 (`127.0.0.1:8765/open`)**：支持飞书直接传纯目录名（如 `dir=20261016_特斯拉飞行汽车短视频`）与分发账号（如 `account=抖音·靖蜀黍`、`视频号·靖蜀黍.`），自动三级寻址定位本地/归档盘路径、唤起 macOS Finder 高亮选中主视频、将整套文案与配图零拖拽透传进插件，并打开对应平台发布后台且高亮防串号提示（详见 [`docs/FEISHU_SETUP.md`](./docs/FEISHU_SETUP.md)）。
 2. **开放标准协议 (`PublishPack Spec v1.0`)**：支持 **视频 (`video`)、图文轮播 (`image_post`)、专栏长文 (`article`)、短动态 (`post`)、播客音频 (`audio`)** 五大形态，采用「`default` 全局默认层 + `platforms.<id>` 平台覆写与 `options` 子选项」架构。
 3. **配套通用 AI Skill (`skills/publish-pack/`)**：适用于 Claude Code、Cursor、Antigravity、Codex（亦附网页版豆包 / Kimi / ChatGPT 通用转换提示词），将任意文稿/字幕/草稿自动转换为合规的 `publish.pack.json` 并通过门禁脚本校验。
 4. **Chrome / Edge 浏览器插件 & 油猴脚本**：原生解析 `publish.pack.json`（同时 100% 向后兼容旧版《发布包.md》），支持飞书无感透传、直接粘贴 JSON、选择成品包目录跨平台实时共享配图、一键拟人填表、视频封面比例自动匹配、图文轮播多图一键按序注入。
@@ -13,7 +13,7 @@
 ## 📦 一、安装浏览器插件
 
 ### 方式 1：Chrome / Edge 独立插件（推荐，免装油猴）
-1. 下载本仓库 [`releases/publish-pack-filler-chrome-v1.4.0.zip`](./releases/publish-pack-filler-chrome-v1.4.0.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
+1. 下载本仓库 [`releases/publish-pack-filler-chrome-v1.4.1.zip`](./releases/publish-pack-filler-chrome-v1.4.1.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
 2. 打开 `chrome://extensions/`（Edge 打开 `edge://extensions/`），开启右上角 **「开发者模式」**。
 3. 点击左上角 **「加载已解压的扩展程序」**，选择解压后的文件夹（内含 `manifest.json`）。
 

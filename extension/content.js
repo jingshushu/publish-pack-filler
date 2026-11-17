@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v1.4.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v1.4.1) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -343,6 +343,53 @@
     return { slot, ratio, variant, relPath, label: `款${variant} · ${ratio} (${baseName})` };
   }
 
+  function extractBulletValue(sectionText, labelRegex) {
+    if (!sectionText) return '';
+    const lines = sectionText.split('\n');
+    for (const line of lines) {
+      const m = line.match(/^\s*(?:[-*]|\d+\.)\s*(?:\*\*([^*]+)\*\*|([^：:\n]+))\s*[：:]\s*(.*)$/);
+      if (m) {
+        const key = (m[1] || m[2] || '').trim();
+        if (labelRegex.test(key)) return (m[3] || '').trim();
+      }
+    }
+    return '';
+  }
+
+  function extractSubheadingText(sectionText, subRegex) {
+    if (!sectionText) return '';
+    const normalized = sectionText.replace(/\r\n/g, '\n') + '\n### __END__\n';
+    const re = /^###\s+([^\n]+)\n([\s\S]*?)(?=^###\s+|^---\s*$)/gm;
+    let m;
+    while ((m = re.exec(normalized)) !== null) {
+      if (m[1].trim() === '__END__') break;
+      if (subRegex.test(m[1].trim())) {
+        return m[2].trim();
+      }
+    }
+    return '';
+  }
+
+  function extractBacktickTokens(text = '') {
+    const out = [];
+    const re = /`([^`\n]+)`/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const tok = m[1].replace(/^#+/, '').trim();
+      if (tok && !out.includes(tok)) out.push(tok);
+    }
+    return out;
+  }
+
+  function extractBlockquoteText(sectionText = '') {
+    return sectionText
+      .split('\n')
+      .filter((l) => /^\s*>/.test(l))
+      .map((l) => l.replace(/^\s*>\s?/, ''))
+      .join('\n')
+      .trim();
+  }
+
   function parsePublishPackMarkdown(mdText, options = {}) {
     const titleMatch = mdText.match(/^#\s+(.+)$/m);
     const packTitle = titleMatch ? titleMatch[1].trim() : (options.sourceLabel || '未命名发布包');
@@ -355,20 +402,22 @@
       const heading = sm[1].trim();
       const content = sm[2];
       if (heading === '__END__') break;
-      if (/00|基础|上传文件/.test(heading)) sections.meta = content;
-      else if (/01|小红书/.test(heading)) sections.xhs = content;
-      else if (/02|视频号/.test(heading)) sections.wx = content;
-      else if (/03|B\s*站|bilibili/i.test(heading)) sections.bili = content;
-      else if (/04|抖音/.test(heading)) sections.dy = content;
+      if (/00|基础|上传文件|封面\s*PK/i.test(heading)) sections.meta = (sections.meta ? `${sections.meta}\n` : '') + content;
+      else if (/01|小红书|\bXHS\b/i.test(heading)) sections.xhs = content;
+      else if (/02|视频号|\bSPH\b/i.test(heading)) sections.wx = content;
+      else if (/03|B\s*站|bilibili|\bBILI\b/i.test(heading)) sections.bili = content;
+      else if (/04|抖音|\bDY\b/i.test(heading)) sections.dy = content;
+      else if (/置顶评论/.test(heading)) sections.globalPinned = content;
     }
 
     const coverSet = new Map();
     const collectCovers = (text = '') => {
-      const re = /`([^`\n]*封面[^`\n]*\.(?:png|jpg|jpeg|webp))`|\(([^)\n]*封面[^)\n]*\.(?:png|jpg|jpeg|webp))\)/gi;
+      const re = /`([^`\n]*封面[^`\n]*\.(?:png|jpg|jpeg|webp))`|\(([^)\n]*封面[^)\n]*\.(?:png|jpg|jpeg|webp))\)|(?:^|\s|[：:])([^\s`()：:]*封面[^\s`()：:]*\.(?:png|jpg|jpeg|webp))/gim;
       let cm;
       while ((cm = re.exec(text)) !== null) {
-        const rel = (cm[1] || cm[2]).trim();
-        const normalizedRel = rel.startsWith('封面/') ? rel : (rel.includes('/') ? rel : `封面/${rel}`);
+        const rawRel = (cm[1] || cm[2] || cm[3] || '').trim().replace(/^(?:04_成片|04_发布与成片|成片)\//, '');
+        if (!rawRel) continue;
+        const normalizedRel = rawRel.startsWith('封面/') ? rawRel : (rawRel.includes('/') ? rawRel : `封面/${rawRel}`);
         if (!coverSet.has(normalizedRel)) {
           coverSet.set(normalizedRel, inferCoverMetaFromPath(normalizedRel));
         }
@@ -376,60 +425,98 @@
     };
     collectCovers(mdText);
 
-    // 01 小红书
+    const globalPinnedFallback = extractBlockquoteText(sections.globalPinned || '');
+
+    // 01 小红书（兼容万物有数代码块与靖蜀黍 SOP 列表/子标题）
     const xhsSec = sections.xhs || '';
-    const xhsTitle = extractCodeBlockAfter(xhsSec, /\*\*(?:主推)?标题[^*\n]*\*\*/) || extractInlineAfter(xhsSec, /\*\*(?:主推)?标题[^*\n]*\*\*/);
+    const xhsTitle =
+      extractCodeBlockAfter(xhsSec, /\*\*(?:主推)?标题[^*\n]*\*\*/) ||
+      extractInlineAfter(xhsSec, /\*\*(?:主推)?标题[^*\n]*\*\*/) ||
+      extractBulletValue(xhsSec, /^(?:主推|标题|推荐主标题)$/);
+    const xhsAltBullet = extractBulletValue(xhsSec, /^备选/);
     const xhsAltTitles = extractNumberedList(xhsSec, /备选标题/);
-    const xhsBodyRaw = extractCodeBlockAfter(xhsSec, /\*\*正文\*\*/);
+    if (!xhsAltTitles.length && xhsAltBullet) xhsAltTitles.push(xhsAltBullet);
+    const xhsBodyRaw =
+      extractCodeBlockAfter(xhsSec, /\*\*正文\*\*/) ||
+      extractSubheadingText(xhsSec, /^正文/) ||
+      extractBulletValue(xhsSec, /^正文/);
     const xhsTagLine = extractCodeBlockAfter(xhsSec, /\*\*话题标签\*\*/);
     const xhsTagsFromBlock = splitBodyAndHashtags(xhsTagLine).tags;
     const xhsSplit = splitBodyAndHashtags(xhsBodyRaw);
     const xhsTags = xhsTagsFromBlock.length ? xhsTagsFromBlock : xhsSplit.tags;
     const xhsCover = extractCoverAfter(xhsSec, /\*\*指定封面\*\*/) || '封面/封面_3x4_A.png';
     const xhsCollection = extractInlineAfter(xhsSec, /\*\*合集\*\*/);
-    const xhsPinned = extractCodeBlockAfter(xhsSec, /\*\*[^*\n]*置顶(?:首评|评论)[^*\n]*\*\*/);
+    const xhsPinned = extractCodeBlockAfter(xhsSec, /\*\*[^*\n]*置顶(?:首评|评论)[^*\n]*\*\*/) || globalPinnedFallback;
 
-    // 02 视频号
+    // 04 抖音（先解析抖音以便视频号缺省时智能回退）
+    const dySec = sections.dy || '';
+    const dyExplicitTitle = extractCodeBlockAfter(dySec, /\*\*作品标题[^*\n]*\*\*/);
+    const dyAltTitles = extractNumberedList(dySec, /备选标题/);
+    const dyMainBullet = extractBulletValue(dySec, /^(?:主推|标题)$/);
+    const dyAltBullet = extractBulletValue(dySec, /^备选/);
+    const dyDescRaw =
+      extractCodeBlockAfter(dySec, /\*\*作品描述[^*\n]*\*\*/) ||
+      extractCodeBlockAfter(dySec, /\*\*描述[^*\n]*\*\*/) ||
+      extractBulletValue(dySec, /^正文/) ||
+      dyMainBullet;
+    const dySplit = splitBodyAndHashtags(dyDescRaw);
+    if (!dyAltTitles.length && dyAltBullet) {
+      dyAltTitles.push(splitBodyAndHashtags(dyAltBullet).bodyOnly.slice(0, 30));
+    }
+    const dyFallbackTitle =
+      dyExplicitTitle ||
+      (dyMainBullet && !dyDescRaw.includes('\n') ? (dySplit.bodyOnly.split(/[！!？?。]/)[0] || '').slice(0, 30) : '') ||
+      xhsTitle ||
+      (dySplit.bodyOnly.split(/[！!？?。]/)[0] || '').slice(0, 30);
+    const dyCollection = extractInlineAfter(dySec, /\*\*合集\*\*/);
+    const dyLocation = extractInlineAfter(dySec, /\*\*位置\*\*/);
+    const dyCover = extractCoverAfter(dySec, /\*\*指定封面\*\*/);
+    const dyPinned = extractCodeBlockAfter(dySec, /\*\*置顶评论\*\*/) || globalPinnedFallback;
+
+    // 02 视频号（若文稿未单列视频号章节，自动回退复用抖音/小红书正文与短标题）
     const wxSec = sections.wx || '';
-    const wxShortRaw = extractCodeBlockAfter(wxSec, /\*\*短标题[^*\n]*\*\*/) || extractInlineAfter(wxSec, /\*\*短标题[^*\n]*\*\*/);
+    const wxShortRaw =
+      extractCodeBlockAfter(wxSec, /\*\*短标题[^*\n]*\*\*/) ||
+      extractInlineAfter(wxSec, /\*\*短标题[^*\n]*\*\*/) ||
+      extractBulletValue(wxSec, /^(?:短标题|标题)$/) ||
+      (!wxSec.trim() ? xhsTitle || dyFallbackTitle : '');
     const wxAltTitles = extractNumberedList(wxSec, /备选短标题/);
-    const wxDescRaw = extractCodeBlockAfter(wxSec, /\*\*描述正文\*\*/);
+    const wxDescRaw =
+      extractCodeBlockAfter(wxSec, /\*\*描述正文\*\*/) ||
+      extractBulletValue(wxSec, /^正文/) ||
+      (!wxSec.trim() ? dyDescRaw || xhsBodyRaw : '');
     const wxSplit = splitBodyAndHashtags(wxDescRaw);
     const wxCollection = extractInlineAfter(wxSec, /\*\*合集\*\*/);
     const wxLocation = extractInlineAfter(wxSec, /\*\*位置\*\*/);
-    const wxPinned = extractCodeBlockAfter(wxSec, /\*\*[^*\n]*置顶(?:首评|评论)[^*\n]*\*\*/);
+    const wxPinned = extractCodeBlockAfter(wxSec, /\*\*[^*\n]*置顶(?:首评|评论)[^*\n]*\*\*/) || globalPinnedFallback;
 
     // 03 B 站
     const biliSec = sections.bili || '';
-    const biliTitle = extractCodeBlockAfter(biliSec, /\*\*稿件标题[^*\n]*\*\*/);
+    const biliTitle =
+      extractCodeBlockAfter(biliSec, /\*\*稿件标题[^*\n]*\*\*/) ||
+      extractBulletValue(biliSec, /^(?:推荐主标题|主推|标题)$/);
     const biliAltTitles = extractNumberedList(biliSec, /备选标题/);
-    const biliBody = extractCodeBlockAfter(biliSec, /\*\*稿件简介[^*\n]*\*\*/);
+    const biliAltBullet = extractBulletValue(biliSec, /^备选/);
+    if (!biliAltTitles.length && biliAltBullet) biliAltTitles.push(biliAltBullet);
+    const biliBody =
+      extractCodeBlockAfter(biliSec, /\*\*稿件简介[^*\n]*\*\*/) ||
+      extractSubheadingText(biliSec, /^(?:简介正文|简介|正文)/) ||
+      extractBulletValue(biliSec, /^正文/);
     const biliTagsRaw = extractCodeBlockAfter(biliSec, /\*\*普通标签[^*\n]*\*\*/);
+    const biliTagSub = extractSubheadingText(biliSec, /^标签/);
     const biliTags = biliTagsRaw
-      .split(/[,，\n]/)
-      .map((s) => s.replace(/#/g, '').trim())
-      .filter(Boolean);
+      ? biliTagsRaw
+          .split(/[,，\n]/)
+          .map((s) => s.replace(/#/g, '').trim())
+          .filter(Boolean)
+      : extractBacktickTokens(biliTagSub);
     const biliCategory = extractInlineAfter(biliSec, /\*\*投稿分区\*\*/);
     const biliCollection = extractInlineAfter(biliSec, /\*\*合集\*\*/);
     const biliTopic = extractInlineAfter(biliSec, /\*\*活动话题[^*\n]*\*\*/);
     const biliDynamic = extractCodeBlockAfter(biliSec, /\*\*动态转发语\*\*/);
-    const biliPinned = extractCodeBlockAfter(biliSec, /\*\*置顶评论\*\*/);
+    const biliPinned = extractCodeBlockAfter(biliSec, /\*\*置顶评论\*\*/) || globalPinnedFallback;
     const biliCover4x3 = extractCoverAfter(biliSec, /推荐流列表封面/) || '';
     const biliCover16x9 = extractCoverAfter(biliSec, /播放页宽屏封面/) || '';
-
-    // 04 抖音
-    const dySec = sections.dy || '';
-    const dyExplicitTitle = extractCodeBlockAfter(dySec, /\*\*作品标题[^*\n]*\*\*/);
-    const dyAltTitles = extractNumberedList(dySec, /备选标题/);
-    const dyDescRaw =
-      extractCodeBlockAfter(dySec, /\*\*作品描述[^*\n]*\*\*/) ||
-      extractCodeBlockAfter(dySec, /\*\*描述[^*\n]*\*\*/);
-    const dySplit = splitBodyAndHashtags(dyDescRaw);
-    const dyFallbackTitle = dyExplicitTitle || xhsTitle || (dySplit.bodyOnly.split(/[！!？?。]/)[0] || '').slice(0, 30);
-    const dyCollection = extractInlineAfter(dySec, /\*\*合集\*\*/);
-    const dyLocation = extractInlineAfter(dySec, /\*\*位置\*\*/);
-    const dyCover = extractCoverAfter(dySec, /\*\*指定封面\*\*/);
-    const dyPinned = extractCodeBlockAfter(dySec, /\*\*置顶评论\*\*/);
 
     const metaSec = sections.meta || '';
     const videoFile = extractInlineAfter(metaSec, /\*\*唯一正片文件\*\*/);
@@ -2122,6 +2209,7 @@
         .ppf-pack-bar.dragover { border-color: ${pMeta.accent}; }
         .ppf-pack-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .ppf-pack-name { font-weight: 600; color: ${fg}; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .ppf-acct-bar { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 9px; border-radius: 7px; background: ${isLight ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.20)'}; color: ${isLight ? '#b45309' : '#fbbf24'}; font-size: 11.5px; font-weight: 600; border: 1px solid ${isLight ? 'rgba(245, 158, 11, 0.28)' : 'rgba(245, 158, 11, 0.35)'}; }
         .ppf-link-btn { background: none; border: none; color: ${pMeta.accent}; font-size: 11.5px; cursor: pointer; padding: 2px 4px; white-space: nowrap; font-weight: 500; }
         .ppf-link-btn:hover { text-decoration: underline; }
         .ppf-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -2368,18 +2456,37 @@
           }
           await saveCoversCrossPlatform(records);
         }
-        const fileName = data.packFile || data.mdFile || 'publish.pack.json';
+        const fileName = data.packFile || data.mdFile || '';
         const rawContent = data.content || data.markdown || '';
         if (rawContent) {
-          applyPackContent(fileName, rawContent, data.subMarkdowns || {});
+          applyPackContent(fileName || 'publish.pack.json', rawContent, data.subMarkdowns || {});
+        } else if (data.folderName) {
+          currentPack = {
+            meta: {
+              packTitle: data.folderName,
+              mdFileName: '（仅媒体目录）',
+              format: 'empty',
+              contentType: 'video',
+              baseDir: data.baseDir || '',
+              updatedAt: new Date().toISOString(),
+            },
+            covers: Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel)),
+            images: [],
+            platforms: {},
+          };
         }
         if (data.packVersion) {
           settings.lastBridgeVersion = data.packVersion;
           saveSettings(settings);
         }
         currentPack.meta.baseDir = data.baseDir || '';
+        currentPack.meta.targetAccount = data.targetAccount || '';
         savePackState(currentPack);
-        setStatus(`✅ 已从飞书本地桥接载入：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张配图就绪）`);
+        setStatus(
+          `✅ 已从飞书桥接载入：${currentPack.meta.packTitle}${
+            data.targetAccount ? ` · 目标账号【${data.targetAccount}】` : ''
+          }（${coverBlobsMap.size} 张配图就绪）`
+        );
         render();
       } catch {
         if (!silent) {
@@ -2613,6 +2720,14 @@
           <div class="ppf-body">
             <!-- 成品包一键载入区（原生兼容 PublishPack JSON + 旧版 Markdown + 直接粘贴 JSON） -->
             <div class="ppf-pack-bar" id="ppf-dropzone">
+              ${
+                currentPack.meta?.targetAccount
+                  ? `<div class="ppf-acct-bar" title="来自飞书发布表「分发账号」字段，请核对当前网页登录头像防止发错账号">
+                      <span>👤 调度账号：${currentPack.meta.targetAccount}</span>
+                      <span style="opacity:0.8; font-weight:500;">请核对登录头像</span>
+                    </div>`
+                  : ''
+              }
               <div class="ppf-pack-top">
                 <div class="ppf-pack-name" title="${currentPack.meta?.packTitle || ''}">
                   📦 ${currentPack.meta?.packTitle || '未加载发布包'}
@@ -3362,13 +3477,16 @@
           await saveCoversCrossPlatform(records);
         }
 
-        const fileName = data.packFile || data.mdFile || 'publish.pack.json';
+        const launchAccount = launchEl.getAttribute('data-account') || data.targetAccount || '';
+        const fileName = data.packFile || data.mdFile || '';
         const rawContent = data.content || data.markdown || '';
+        let parsed = null;
         if (rawContent) {
-          const isJson = /\.json$/i.test(fileName) || stripJsonCodeFence(rawContent).startsWith('{');
-          const parsed = isJson
-            ? parsePublishPackJson(rawContent, { fileName, sourceLabel: fileName, baseDir: data.baseDir || '' })
-            : parsePublishPackMarkdown(rawContent, { mdFileName: fileName, sourceLabel: fileName, baseDir: data.baseDir || '' });
+          const safeName = fileName || 'publish.pack.json';
+          const isJson = /\.json$/i.test(safeName) || stripJsonCodeFence(rawContent).startsWith('{');
+          parsed = isJson
+            ? parsePublishPackJson(rawContent, { fileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' })
+            : parsePublishPackMarkdown(rawContent, { mdFileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' });
 
           if (!isJson && data.subMarkdowns && typeof data.subMarkdowns === 'object') {
             for (const [subPath, subText] of Object.entries(data.subMarkdowns)) {
@@ -3387,7 +3505,25 @@
               }
             }
           }
+        } else if (data.folderName || records.length > 0) {
+          parsed = {
+            meta: {
+              packTitle: data.folderName || '已定位作品目录',
+              mdFileName: '（仅媒体目录）',
+              format: 'empty',
+              contentType: 'video',
+              baseDir: data.baseDir || '',
+              updatedAt: new Date().toISOString(),
+            },
+            covers: [],
+            images: [],
+            platforms: {},
+          };
+        }
 
+        if (parsed) {
+          parsed.meta = parsed.meta || {};
+          parsed.meta.targetAccount = launchAccount;
           if ((!parsed.covers || !parsed.covers.length) && records.length > 0 && parsed.meta?.contentType !== 'image_post') {
             parsed.covers = records.map((r) => inferCoverMetaFromPath(r.relPath));
           }
