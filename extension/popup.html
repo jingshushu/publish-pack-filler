@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>多平台发布包填表助手</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    body { width: 320px; padding: 14px; background: #ffffff; color: #1f2329; font-size: 13px; }
+    .hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .hd-title { font-size: 14.5px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #ff2442; }
+    .ver { font-size: 11px; color: #8f959e; background: #f2f3f5; padding: 2px 6px; border-radius: 5px; }
+    .pack-card { background: #f7f8fa; border: 1px solid rgba(31,35,41,0.08); border-radius: 10px; padding: 10px 11px; margin-bottom: 12px; }
+    .pack-label { font-size: 11px; color: #646a73; margin-bottom: 4px; }
+    .pack-name { font-size: 12.5px; font-weight: 600; color: #1f2329; line-height: 1.4; word-break: break-all; }
+    .pack-meta { font-size: 11.5px; color: #059669; margin-top: 5px; font-weight: 500; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+    .plat-btn { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 10px; border-radius: 9px; border: 1px solid rgba(31,35,41,0.1); background: #fff; color: #1f2329; font-size: 12.5px; font-weight: 600; cursor: pointer; text-decoration: none; transition: all 0.14s; }
+    .plat-btn:hover { background: #f7f8fa; transform: translateY(-1px); }
+    .full-btn { width: 100%; padding: 9px 12px; border-radius: 9px; border: none; background: #ff2442; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; margin-bottom: 8px; }
+    .full-btn:hover { filter: brightness(1.06); }
+    .sec-btn { width: 100%; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(31,35,41,0.12); background: #fff; color: #1f2329; font-size: 12px; font-weight: 500; cursor: pointer; }
+    .sec-btn:hover { background: #f2f3f5; }
+    .tip { font-size: 11px; color: #8f959e; line-height: 1.45; margin-top: 10px; border-top: 1px solid rgba(31,35,41,0.08); padding-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="hd">
+    <div class="hd-title"><span class="dot"></span><span>多平台发布包助手</span></div>
+    <span class="ver">v1.2.0</span>
+  </div>
+
+  <div class="pack-card">
+    <div class="pack-label">📦 当前跨平台共享发布包</div>
+    <div class="pack-name" id="pack-title">读取中...</div>
+    <div class="pack-meta" id="pack-covers">正在检查已缓存封面...</div>
+  </div>
+
+  <button class="full-btn" id="open-all">🚀 一键同时打开四平台发布后台</button>
+
+  <div class="grid">
+    <button class="plat-btn" data-url="https://creator.xiaohongshu.com/publish/publish?source=official">📕 小红书</button>
+    <button class="plat-btn" data-url="https://channels.weixin.qq.com/platform">💚 微信视频号</button>
+    <button class="plat-btn" data-url="https://creator.douyin.com/creator-micro/content/upload">🎵 抖音</button>
+    <button class="plat-btn" data-url="https://member.bilibili.com/platform/upload/video/frame">📺 B 站</button>
+  </div>
+
+  <button class="sec-btn" id="toggle-panel">↔️ 展开 / 收起当前网页右侧工作台 (Alt+S)</button>
+
+  <div class="tip">
+    💡 进入任意创作者后台后，右侧自动展示工作台。选一次「成品包目录」，四平台标签页实时同步全部文案与封面。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
