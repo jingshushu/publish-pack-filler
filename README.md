@@ -1,4 +1,4 @@
-# Publish Pack Filler · 多平台《发布包》开放协议、飞书直连与浏览器插件 (v1.4.1)
+# 全平台半自动发布助手 (Publish Pack Filler · v1.5.0)
 
 一套打通 **「飞书多维表格管理 → 本地作品目录智能寻址 + Finder 定位视频 + 透传发布包 → 浏览器安全预填与配图」** 的多平台内容分发工具链：
 1. **飞书多维表格一键直连 (`127.0.0.1:8765/open`)**：支持飞书直接传纯目录名（如 `dir=20261016_特斯拉飞行汽车短视频`）与分发账号（如 `account=抖音·靖蜀黍`、`视频号·靖蜀黍.`），自动三级寻址定位本地/归档盘路径、唤起 macOS Finder 高亮选中主视频、将整套文案与配图零拖拽透传进插件，并打开对应平台发布后台且高亮防串号提示（详见 [`docs/FEISHU_SETUP.md`](./docs/FEISHU_SETUP.md)）。
@@ -13,7 +13,7 @@
 ## 📦 一、安装浏览器插件
 
 ### 方式 1：Chrome / Edge 独立插件（推荐，免装油猴）
-1. 下载本仓库 [`releases/publish-pack-filler-chrome-v1.4.1.zip`](./releases/publish-pack-filler-chrome-v1.4.1.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
+1. 下载本仓库 [`releases/publish-pack-filler-chrome-v1.5.0.zip`](./releases/publish-pack-filler-chrome-v1.5.0.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
 2. 打开 `chrome://extensions/`（Edge 打开 `edge://extensions/`），开启右上角 **「开发者模式」**。
 3. 点击左上角 **「加载已解压的扩展程序」**，选择解压后的文件夹（内含 `manifest.json`）。
 

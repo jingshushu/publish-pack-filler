@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         万物有数 · 多平台发布包安全填表助手 (Publish Pack Filler)
+// @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      1.4.1
-// @description  支持飞书发布表「本地作品目录 + 分发账号」智能寻址唤起 Finder 与发布页并透传成品包，兼容 PublishPack v1.0 JSON 与 Markdown，覆盖小红书、视频号、抖音、B站等平台安全预填与配图
+// @version      1.5.0
+// @description  全平台半自动发布助手：支持飞书目录智能寻址与多端共享成品包，覆盖小红书、视频号、抖音、B站等平台封面比例自适应注入与拟人填表
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
 // @match        https://creator.douyin.com/*
@@ -261,10 +261,10 @@
   }
 
   const PLATFORM_META = {
-    xiaohongshu: { name: '小红书', accent: '#ff2442', preferredRatios: ['3:4', '4:3', '1:1'] },
-    douyin: { name: '抖音', accent: '#fe2c55', preferredRatios: ['3:4', '9:16', '4:3', '16:9'] },
-    weixin: { name: '微信视频号', accent: '#07c160', preferredRatios: ['3:4', '4:3'] },
-    bilibili: { name: 'B 站', accent: '#00aeec', preferredRatios: ['4:3', '16:9'] },
+    xiaohongshu: { name: '小红书', accent: '#ff2442', preferredRatios: ['3:4', '9:16', '4:3', '1:1', '16:9'] },
+    douyin: { name: '抖音', accent: '#fe2c55', preferredRatios: ['3:4', '9:16', '16:9', '4:3'] },
+    weixin: { name: '微信视频号', accent: '#07c160', preferredRatios: ['3:4', '4:3', '9:16', '16:9'] },
+    bilibili: { name: 'B 站', accent: '#00aeec', preferredRatios: ['16:9', '4:3', '3:4', '9:16'] },
     kuaishou: { name: '快手', accent: '#ff4906', preferredRatios: ['3:4', '9:16', '16:9'] },
     weixin_mp: { name: '公众号/小绿书', accent: '#07c160', preferredRatios: ['16:9', '3:4', '1:1'] },
     zhihu: { name: '知乎', accent: '#1772f6', preferredRatios: ['16:9', '4:3'] },
@@ -1847,26 +1847,194 @@
     return { ok: false, msg: '当前平台请手动粘贴合集名' };
   }
 
-  async function fillBilibiliTagPills(tags = []) {
-    const tagInput = findFirstVisible([
+  function locateBilibiliTagContext() {
+    // 1. 直接按 2025/2026 B站标签框多种 placeholder（初始为「按回车键Enter创建标签」，自动带入标签后变为「还可以添加X个标签」）与容器类名定位
+    let tagInput = findFirstVisible([
       'input[placeholder*="按回车键Enter创建标签"]',
       'input[placeholder*="创建标签"]',
+      'input[placeholder*="还可以添加"][placeholder*="标签"]',
+      'input[placeholder*="添加标签"]',
+      'input[placeholder*="输入标签"]',
       '.tag-input-wrp input',
+      '.content-tag-v2-container input',
+      '[class*="tag-input" i] input:not([type="hidden"]):not([type="file"])',
+      '[class*="label-input" i] input:not([type="hidden"]):not([type="file"])',
     ]);
-    if (!tagInput) return { ok: false, reason: '未找到 B 站标签输入框' };
 
-    const win = tagInput.ownerDocument?.defaultView || window;
-    for (const rawTag of tags.slice(0, 10)) {
-      const cleanTag = rawTag.replace(/#/g, '').trim();
-      if (!cleanTag) continue;
-      await humanFillTextInput(tagInput, cleanTag);
-      const enterInit = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
+    let rowContainer = null;
+    if (tagInput) {
+      rowContainer =
+        tagInput.closest?.('.tag-wrp, .content-tag-v2-container, .form-item, [class*="tag-container" i], [class*="form-item" i]') ||
+        tagInput.parentElement?.parentElement ||
+        tagInput.parentElement;
+      return { tagInput, rowContainer };
+    }
+
+    // 2. 结构兜底：通过表单左侧「*标签 / 标签」标题行定位同行内的输入框（彻底免疫类名与 placeholder 改版）
+    const labels = queryDeepAll('p, span, div, label');
+    const tagLabel = labels.find((el) => {
+      if (!isVisible(el)) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width > 160 || r.height > 60) return false;
+      const t = (el.textContent || '').replace(/[\s*:：]/g, '');
+      return t === '标签';
+    });
+
+    if (tagLabel) {
+      let cur = tagLabel.parentElement;
+      for (let d = 0; d < 4 && cur; d++) {
+        const r = cur.getBoundingClientRect();
+        if (r.width >= 340 && r.height <= 360) {
+          rowContainer = cur;
+          break;
+        }
+        cur = cur.parentElement;
+      }
+      if (rowContainer) {
+        const cands = queryDeepAll(
+          'input[type="text"], input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]), [contenteditable="true"]',
+          rowContainer
+        ).filter((el) => isVisible(el));
+        tagInput = cands[0] || null;
+      }
+    }
+
+    return { tagInput, rowContainer };
+  }
+
+  async function fillBilibiliTagPills(tags = [], { clearExisting = true } = {}) {
+    const cleanTargetTags = tags
+      .map((t) => String(t || '').replace(/#/g, '').trim())
+      .filter(Boolean)
+      .slice(0, 10);
+    if (!cleanTargetTags.length) return { ok: false, reason: '无有效标签' };
+
+    let { tagInput, rowContainer } = locateBilibiliTagContext();
+    if (!rowContainer && !tagInput) {
+      return { ok: false, reason: '未找到 B 站标签框（请先上传视频展开投稿表单）' };
+    }
+
+    // 读取当前已存在的标签胶囊，必要时先清理视频上传自动带入的无关杂项标签（腾出 10 个名额）
+    const getPillElements = (scope) => {
+      if (!scope) return [];
+      const pills = queryDeepAll(
+        '.label-item-v2-container, .label-item-container, .tag-pre-wrp > div, [class*="label-item-v2" i], [class*="tag-item" i]',
+        scope
+      ).filter((el) => {
+        if (!isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 24 && r.width < 260 && r.height >= 18 && r.height <= 48;
+      });
+      return pills;
+    };
+
+    const extractPillText = (pillEl) =>
+      (pillEl.textContent || '')
+        .replace(/[×✕✖xX]$/g, '')
+        .trim();
+
+    if (clearExisting && rowContainer) {
+      const existingPills = getPillElements(rowContainer);
+      for (const pill of existingPills) {
+        const txt = extractPillText(pill);
+        if (txt && !cleanTargetTags.includes(txt)) {
+          const closeBtn =
+            pill.querySelector('.close, [class*="close" i], [class*="del" i], i, svg') ||
+            Array.from(pill.children).find((ch) => ch.tagName === 'I' || ch.tagName === 'SVG');
+          if (closeBtn) {
+            closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+            await humanSleep(90, 160);
+          }
+        }
+      }
+    }
+
+    // 清理后重新获取一次输入框（防止之前满 10 个时 input 被隐藏，删掉后重新显示）
+    ({ tagInput, rowContainer } = locateBilibiliTagContext());
+    if (!tagInput) {
+      return { ok: false, reason: 'B站标签已满 10 个或未找到输入框，请手动删减后再试' };
+    }
+
+    const existingTexts = new Set(rowContainer ? getPillElements(rowContainer).map(extractPillText).filter(Boolean) : []);
+    let addedCount = 0;
+
+    for (const cleanTag of cleanTargetTags) {
+      if (existingTexts.has(cleanTag)) {
+        addedCount++;
+        continue;
+      }
+      ({ tagInput, rowContainer } = locateBilibiliTagContext());
+      if (!tagInput) break;
+
+      const doc = tagInput.ownerDocument || document;
+      const win = doc.defaultView || window;
+
+      try {
+        tagInput.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      } catch {
+        // ignore
+      }
+      await humanMouseClick(tagInput);
+      tagInput.focus();
+      await humanSleep(70, 130);
+
+      if (tagInput.isContentEditable) {
+        await clearRichEditor(tagInput);
+        await insertTextIntoEditor(tagInput, cleanTag);
+      } else {
+        const proto = Object.getPrototypeOf(tagInput);
+        const nativeSetter =
+          Object.getOwnPropertyDescriptor(proto, 'value')?.set ||
+          Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')?.set;
+        if (nativeSetter) nativeSetter.call(tagInput, '');
+        else tagInput.value = '';
+        tagInput.dispatchEvent(new win.InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+
+        if (nativeSetter) nativeSetter.call(tagInput, cleanTag);
+        else tagInput.value = cleanTag;
+        tagInput.dispatchEvent(
+          new win.InputEvent('input', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            inputType: 'insertText',
+            data: cleanTag,
+          })
+        );
+        tagInput.dispatchEvent(new win.Event('change', { bubbles: true, composed: true }));
+      }
+
+      // 给 Vue 响应式 v-model 留足同步时间后再敲回车提交标签
+      await humanSleep(140, 240);
+
+      const enterInit = {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        charCode: 13,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      };
       tagInput.dispatchEvent(new win.KeyboardEvent('keydown', enterInit));
       tagInput.dispatchEvent(new win.KeyboardEvent('keypress', enterInit));
       tagInput.dispatchEvent(new win.KeyboardEvent('keyup', enterInit));
-      await humanSleep(340, 580);
+
+      await humanSleep(220, 360);
+
+      // 若回车监听挂在外层包装器上导致输入框仍有残留字符，向父容器补发一次回车
+      if (!tagInput.isContentEditable && tagInput.value && tagInput.value.trim() === cleanTag && tagInput.parentElement) {
+        tagInput.parentElement.dispatchEvent(new win.KeyboardEvent('keydown', enterInit));
+        tagInput.parentElement.dispatchEvent(new win.KeyboardEvent('keyup', enterInit));
+        await humanSleep(140, 220);
+      }
+
+      existingTexts.add(cleanTag);
+      addedCount++;
     }
-    return { ok: true };
+
+    return { ok: addedCount > 0, count: addedCount };
   }
 
   // ==================== 四大平台表单输入框精准定位器（2026 实测对齐） ====================
@@ -1944,9 +2112,10 @@
         ]),
         bodyEditor: findFirstVisible([
           '.ql-editor[contenteditable="true"]',
+          '.archive-info-editor [contenteditable="true"]',
+          'div[contenteditable="true"][placeholder*="填写更全面的相关信息"]',
           'textarea[placeholder*="填写更全面的相关信息"]',
           'textarea[placeholder*="简介"]',
-          'div[contenteditable="true"]',
         ]),
       };
     }
@@ -2100,13 +2269,36 @@
     xStorageSet(STORAGE_KEY_PACK, JSON.stringify(pack));
   }
 
+  function mergeCoversWithBlobs(existingCovers = [], blobsMap = new Map(), isImagePost = false) {
+    if (isImagePost && (!existingCovers || existingCovers.length === 0)) {
+      return [];
+    }
+    const merged = Array.isArray(existingCovers) ? [...existingCovers] : [];
+    for (const relPath of blobsMap.keys()) {
+      const base = relPath.split('/').pop();
+      const already = merged.some((c) => c.relPath === relPath || (c.relPath && c.relPath.split('/').pop() === base));
+      if (!already) {
+        merged.push(inferCoverMetaFromPath(relPath));
+      }
+    }
+    return merged;
+  }
+
+  function getThumbBoxDimensions(ratio = '3:4') {
+    if (ratio === '16:9') return { w: 112, h: 63 };
+    if (ratio === '4:3') return { w: 100, h: 75 };
+    if (ratio === '1:1') return { w: 76, h: 76 };
+    if (ratio === '9:16') return { w: 56, h: 99 };
+    return { w: 68, h: 90 };
+  }
+
   async function loadSettings() {
     const defaults = {
       theme: 'light',
       layoutMode: 'dock',
       pushPage: true,
       collapsed: false,
-      width: 384,
+      width: 368,
       height: Math.min(840, Math.max(560, window.innerHeight - 80)),
       floatTop: 64,
       floatRight: 20,
@@ -2114,7 +2306,7 @@
       autoTopicEnter: false,
       bridgeUrl: BRIDGE_DEFAULT_URL,
       lastBridgeVersion: '',
-      selectedCoverSlot: '',
+      selectedCoverByPlat: {},
       selectedTitleIdx: -1,
     };
     try {
@@ -2122,6 +2314,9 @@
       if (raw) {
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
         const merged = { ...defaults, ...parsed };
+        if (!merged.selectedCoverByPlat || typeof merged.selectedCoverByPlat !== 'object') {
+          merged.selectedCoverByPlat = {};
+        }
         if (merged.bridgeUrl === 'http://127.0.0.1:18765') {
           merged.bridgeUrl = BRIDGE_DEFAULT_URL;
         }
@@ -2146,29 +2341,92 @@
     let availableMdFiles = [];
     let coverBlobsMap = await loadCoversCrossPlatform();
 
+    // 确保所有已缓存配图全部合入封面池，并按真实像素宽高更新比例（即使文件名未带 16x9/3x4 也能精准识别！）
+    async function hydrateCoversFromBlobs() {
+      if (!coverBlobsMap.size) return false;
+      const isImgPost = currentPack.meta?.contentType === 'image_post';
+      const beforeCount = (currentPack.covers || []).length;
+      currentPack.covers = mergeCoversWithBlobs(currentPack.covers, coverBlobsMap, isImgPost);
+      let changed = currentPack.covers.length !== beforeCount;
+      for (const c of currentPack.covers) {
+        const blob = findBlobFlexible(coverBlobsMap, c.relPath);
+        if (blob && !c._ratioVerified) {
+          const realRatio = await detectImageBlobRatio(blob, c.ratio);
+          if (realRatio && realRatio !== c.ratio) {
+            c.ratio = realRatio;
+            changed = true;
+          }
+          c._ratioVerified = true;
+        }
+      }
+      if (changed) {
+        savePackState(currentPack);
+      }
+      return changed;
+    }
+
     function syncPagePushMargin() {
       const shouldPush = settings.layoutMode === 'dock' && settings.pushPage && !settings.collapsed;
+      const docEl = document.documentElement;
+      const bodyEl = document.body;
+      // 彻底弃用会导致 width:100% 页面横向溢出与遮挡滚动条的 marginRight，改用 border-box + paddingRight + fixed 容器让位
+      if (docEl.style.marginRight) docEl.style.marginRight = '';
+
       if (shouldPush) {
-        document.documentElement.style.marginRight = `${settings.width}px`;
-        document.documentElement.style.transition = 'margin-right 0.18s ease';
-      } else if (document.documentElement.style.marginRight) {
-        document.documentElement.style.marginRight = '';
+        docEl.style.boxSizing = 'border-box';
+        docEl.style.paddingRight = `${settings.width}px`;
+        docEl.style.minWidth = '0px';
+        if (bodyEl) {
+          if (bodyEl.dataset.ppfOrigMinW === undefined) {
+            bodyEl.dataset.ppfOrigMinW = bodyEl.style.minWidth || '';
+          }
+          bodyEl.style.minWidth = '0px';
+          bodyEl.style.maxWidth = '100%';
+        }
+        // 兼容内部使用 position:fixed; right:0 自建滚动区的 SPA 框架（确保其右侧滚动条不被面板遮盖）
+        const fixedShells = document.querySelectorAll('body > div, body > main, #app > div');
+        for (const el of fixedShells) {
+          if (el === hostEl) continue;
+          const cs = window.getComputedStyle(el);
+          if (cs.position !== 'fixed') continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.45 && Math.abs(window.innerWidth - rect.right) <= 20) {
+            if (el.dataset.ppfOrigRight === undefined) {
+              el.dataset.ppfOrigRight = el.style.right || '';
+            }
+            el.style.right = `${settings.width}px`;
+          }
+        }
+      } else {
+        if (docEl.style.paddingRight) docEl.style.paddingRight = '';
+        if (docEl.style.minWidth === '0px') docEl.style.minWidth = '';
+        if (bodyEl && bodyEl.dataset.ppfOrigMinW !== undefined) {
+          bodyEl.style.minWidth = bodyEl.dataset.ppfOrigMinW;
+          bodyEl.style.maxWidth = '';
+          delete bodyEl.dataset.ppfOrigMinW;
+        }
+        const shifted = document.querySelectorAll('[data-ppf-orig-right]');
+        for (const el of shifted) {
+          el.style.right = el.dataset.ppfOrigRight;
+          delete el.dataset.ppfOrigRight;
+        }
       }
     }
 
     const hostEl = document.createElement('aside');
-    document.documentElement.appendChild(hostEl);
+    (document.body || document.documentElement).appendChild(hostEl);
     const shadow = hostEl.attachShadow({ mode: 'closed' });
 
     const styleEl = document.createElement('style');
     shadow.appendChild(styleEl);
 
     const rootWrap = document.createElement('div');
+    rootWrap.className = 'ppf-root';
     shadow.appendChild(rootWrap);
 
     let statusText =
       platform === 'weixin'
-        ? '视频号就绪 · 支持自动点开 3:4 主页卡 / 4:3 动态卡注入封面（注意从首页点「发表视频」进入）'
+        ? '视频号就绪 · 请点页面「发表视频」并拖入视频，再点下方一键填表或注入双封面'
         : platform === 'douyin'
         ? '抖音就绪 · 打开封面弹窗后点注入将自动切换横/竖封面并避开 AI 参考图槽'
         : '就绪 · 打开封面编辑框后点「注入封面」将自动匹配裁剪比例';
@@ -2217,48 +2475,47 @@
 
       styleEl.textContent = `
         * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
-        .ppf-shell { position: relative; width: 100%; height: 100%; pointer-events: auto; display: flex; }
-        .ppf-wrap { width: 100%; height: 100%; display: flex; flex-direction: column; background: ${bg}; color: ${fg}; border: 1px solid ${border}; border-radius: ${radius}; box-shadow: ${shadowCss}; backdrop-filter: blur(16px); overflow: hidden; font-size: 13px; }
+        .ppf-root { width: 100%; height: 100%; max-height: 100%; display: flex; min-height: 0; }
+        .ppf-shell { position: relative; width: 100%; height: 100%; min-height: 0; pointer-events: auto; display: flex; }
+        .ppf-wrap { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; background: ${bg}; color: ${fg}; border: 1px solid ${border}; border-radius: ${radius}; box-shadow: ${shadowCss}; backdrop-filter: blur(16px); overflow: hidden; font-size: 13px; }
         .ppf-ear { position: absolute; left: -26px; top: 50%; transform: translateY(-50%); width: 26px; height: 68px; background: ${bg}; color: ${subFg}; border: 1px solid ${border}; border-right: none; border-radius: 10px 0 0 10px; box-shadow: -4px 2px 12px rgba(0,0,0,0.08); display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; font-size: 13px; font-weight: 700; pointer-events: auto; }
         .ppf-ear:hover { color: ${pMeta.accent}; }
-        .ppf-collapsed-tab { pointer-events: auto; display: flex; align-items: center; gap: 5px; padding: 10px 10px 10px 12px; background: ${bg}; color: ${fg}; border: 1px solid ${border}; border-right: none; border-radius: 12px 0 0 12px; box-shadow: -4px 4px 16px rgba(0,0,0,0.12); cursor: pointer; user-select: none; font-size: 12.5px; font-weight: 600; writing-mode: vertical-rl; letter-spacing: 2px; }
+        .ppf-collapsed-tab { pointer-events: auto; display: flex; align-items: center; gap: 5px; padding: 10px 10px 10px 12px; background: ${bg}; color: ${fg}; border: 1px solid ${border}; border-right: none; border-radius: 12px 0 0 12px; box-shadow: -4px 4px 16px rgba(0,0,0,0.12); cursor: pointer; user-select: none; font-size: 12.5px; font-weight: 600; writing-mode: vertical-rl; letter-spacing: 2px; align-self: center; }
         .ppf-dot { width: 8px; height: 8px; border-radius: 50%; background: ${pMeta.accent}; display: inline-block; }
         .ppf-resize-w { position: absolute; left: -4px; top: 0; width: 8px; height: 100%; cursor: ew-resize; z-index: 10; }
         .ppf-resize-s { position: absolute; left: 0; bottom: -4px; width: 100%; height: 8px; cursor: ns-resize; z-index: 10; }
         .ppf-resize-sw { position: absolute; left: 0; bottom: 0; width: 16px; height: 16px; cursor: nesw-resize; z-index: 12; display: flex; align-items: flex-end; justify-content: flex-start; padding: 2px; color: ${subFg}; font-size: 10px; opacity: 0.6; user-select: none; }
-        .ppf-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 13px; background: ${headBg}; border-bottom: 1px solid ${border}; cursor: ${settings.layoutMode === 'float' ? 'move' : 'default'}; user-select: none; flex-shrink: 0; }
-        .ppf-head-title { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13.5px; }
-        .ppf-badge { padding: 2px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; background: ${pMeta.accent}; color: #fff; }
-        .ppf-icon-btn { background: transparent; border: 1px solid transparent; color: ${subFg}; cursor: pointer; font-size: 13px; padding: 3px 6px; border-radius: 6px; line-height: 1; }
+        .ppf-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: ${headBg}; border-bottom: 1px solid ${border}; cursor: ${settings.layoutMode === 'float' ? 'move' : 'default'}; user-select: none; flex-shrink: 0; gap: 6px; }
+        .ppf-head-title { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; }
+        .ppf-badge { padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: ${pMeta.accent}; color: #fff; flex-shrink: 0; }
+        .ppf-icon-btn { background: transparent; border: 1px solid transparent; color: ${subFg}; cursor: pointer; font-size: 13px; padding: 3px 5px; border-radius: 6px; line-height: 1; }
         .ppf-icon-btn:hover { background: ${btnHover}; color: ${fg}; border-color: ${border}; }
-        .ppf-body { padding: 12px 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; flex: 1; }
-        .ppf-pack-bar { background: ${secBg}; border: 1.5px dashed ${border}; border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; }
+        .ppf-copy-icon { background: transparent; border: none; color: ${subFg}; opacity: 0.55; cursor: pointer; font-size: 12.5px; padding: 3px 5px; border-radius: 5px; line-height: 1; transition: opacity 0.14s, background 0.14s; }
+        .ppf-copy-icon:hover { opacity: 1; background: ${btnHover}; color: ${fg}; }
+        .ppf-body { padding: 11px 13px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; flex: 1 1 0%; min-height: 0; }
+        .ppf-pack-bar { background: ${secBg}; border: 1.5px dashed ${border}; border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
         .ppf-pack-bar.dragover { border-color: ${pMeta.accent}; }
-        .ppf-pack-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .ppf-pack-name { font-weight: 600; color: ${fg}; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-        .ppf-acct-bar { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 9px; border-radius: 7px; background: ${isLight ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.20)'}; color: ${isLight ? '#b45309' : '#fbbf24'}; font-size: 11.5px; font-weight: 600; border: 1px solid ${isLight ? 'rgba(245, 158, 11, 0.28)' : 'rgba(245, 158, 11, 0.35)'}; }
-        .ppf-link-btn { background: none; border: none; color: ${pMeta.accent}; font-size: 11.5px; cursor: pointer; padding: 2px 4px; white-space: nowrap; font-weight: 500; }
-        .ppf-link-btn:hover { text-decoration: underline; }
+        .ppf-pack-name { font-weight: 600; color: ${fg}; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
         .ppf-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-        .ppf-row-nowrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
-        .ppf-btn { background: ${btnBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 7px; padding: 5px 10px; font-size: 12px; cursor: pointer; font-weight: 500; white-space: nowrap; transition: all 0.14s; }
+        .ppf-row-nowrap { display: flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; }
+        .ppf-btn { background: ${btnBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 7px; padding: 5px 9px; font-size: 12px; cursor: pointer; font-weight: 500; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; transition: all 0.14s; }
         .ppf-btn:hover { background: ${btnHover}; }
-        .ppf-btn-accent { background: ${pMeta.accent}; border-color: transparent; color: #fff; font-weight: 600; padding: 8px 13px; font-size: 12.5px; }
+        .ppf-btn-accent { background: ${pMeta.accent}; border-color: transparent; color: #fff; font-weight: 600; padding: 7px 11px; font-size: 12.5px; }
         .ppf-btn-accent:hover { filter: brightness(1.06); background: ${pMeta.accent}; }
         .ppf-btn-block { width: 100%; justify-content: center; display: inline-flex; align-items: center; gap: 5px; }
-        .ppf-sec { background: ${secBg}; border: 1px solid ${border}; border-radius: 10px; padding: 10px 11px; display: flex; flex-direction: column; gap: 7px; }
-        .ppf-sec-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: ${subFg}; font-size: 11.5px; font-weight: 600; }
-        .ppf-sec-hd > span:first-child { flex: 1; min-width: 0; }
-        .ppf-preview { font-size: 12.5px; color: ${fg}; line-height: 1.52; min-height: 40px; max-height: 130px; resize: vertical; overflow-y: auto; white-space: pre-wrap; word-break: break-word; background: ${inputBg}; border: 1px solid ${border}; padding: 7px 9px; border-radius: 7px; }
-        .ppf-chip { padding: 3.5px 9px; border-radius: 999px; background: ${chipBg}; color: ${chipFg}; border: 1px solid transparent; font-size: 11.5px; cursor: pointer; white-space: nowrap; font-weight: 500; }
+        .ppf-sec { background: ${secBg}; border: 1px solid ${border}; border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; flex-shrink: 0; }
+        .ppf-sec-hd { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: ${subFg}; font-size: 11.5px; font-weight: 600; }
+        .ppf-sec-hd > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ppf-preview { font-size: 12.5px; color: ${fg}; line-height: 1.52; min-height: 38px; max-height: 130px; resize: vertical; overflow-y: auto; white-space: pre-wrap; word-break: break-word; background: ${inputBg}; border: 1px solid ${border}; padding: 7px 9px; border-radius: 7px; }
+        .ppf-chip { padding: 3px 8px; border-radius: 999px; background: ${chipBg}; color: ${chipFg}; border: 1px solid transparent; font-size: 11.5px; cursor: pointer; white-space: nowrap; font-weight: 500; }
         .ppf-chip:hover { filter: brightness(0.95); }
         .ppf-chip.active { background: ${pMeta.accent}; color: #fff; font-weight: 600; }
-        .ppf-cover-box { display: flex; gap: 11px; align-items: center; }
-        .ppf-thumb { width: 68px; height: 90px; border-radius: 7px; background: ${inputBg}; border: 1px solid ${border}; object-fit: cover; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: ${subFg}; font-size: 10.5px; text-align: center; padding: 4px; }
+        .ppf-cover-box { display: flex; gap: 10px; align-items: center; }
+        .ppf-thumb { border-radius: 6px; background: ${inputBg}; border: 1px solid ${border}; object-fit: cover; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: ${subFg}; font-size: 10.5px; text-align: center; padding: 3px; white-space: pre-line; }
         .ppf-warn { color: #d97706; font-size: 11.5px; line-height: 1.4; }
-        .ppf-status { font-size: 12px; color: ${statusFg}; min-height: 18px; line-height: 1.42; font-weight: 500; }
-        .ppf-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: ${subFg}; cursor: pointer; user-select: none; }
-        .ppf-foot { font-size: 11px; color: ${subFg}; border-top: 1px solid ${border}; padding-top: 7px; display: flex; justify-content: space-between; align-items: center; }
+        .ppf-status { font-size: 12px; color: ${statusFg}; min-height: 18px; line-height: 1.42; font-weight: 500; flex-shrink: 0; }
+        .ppf-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: ${subFg}; cursor: pointer; user-select: none; }
+        .ppf-foot { font-size: 11px; color: ${subFg}; border-top: 1px solid ${border}; padding-top: 7px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         select.ppf-select { background: ${inputBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 7px; padding: 5px 8px; font-size: 12px; width: 100%; }
       `;
     }
@@ -2272,12 +2529,15 @@
         const scoreA = ia === -1 ? 99 : ia;
         const scoreB = ib === -1 ? 99 : ib;
         if (scoreA !== scoreB) return scoreA - scoreB;
-        return a.variant.localeCompare(b.variant);
+        return (a.variant || 'A').localeCompare(b.variant || 'A');
       });
 
-      let active =
-        sorted.find((c) => c.slot === settings.selectedCoverSlot) ||
+      // 按当前平台独立记忆封面选择，互不串台；未手选时自动匹配当前平台首选比例（如 B站默认 16:9，小红书/抖音/视频号默认 3:4）
+      const userPickedRel = settings.selectedCoverByPlat?.[platform] || '';
+      const active =
+        (userPickedRel && sorted.find((c) => c.relPath === userPickedRel || c.slot === userPickedRel)) ||
         sorted.find((c) => c.variant === 'A' && c.ratio === preferred[0]) ||
+        sorted.find((c) => c.ratio === preferred[0]) ||
         sorted[0] ||
         null;
 
@@ -2286,12 +2546,16 @@
 
     function formatCoverChipLabel(c) {
       if (platform === 'weixin') {
-        if (c.ratio === '3:4') return `款${c.variant} (3:4主页卡)`;
-        if (c.ratio === '4:3') return `款${c.variant} (4:3动态卡)`;
+        if (c.ratio === '3:4') return `款${c.variant} (3:4主页)`;
+        if (c.ratio === '4:3') return `款${c.variant} (4:3动态)`;
       }
       if (platform === 'douyin') {
-        if (c.ratio === '3:4' || c.ratio === '9:16') return `款${c.variant} (${c.ratio}竖封)`;
-        if (c.ratio === '4:3' || c.ratio === '16:9') return `款${c.variant} (${c.ratio}横封)`;
+        if (c.ratio === '3:4' || c.ratio === '9:16') return `款${c.variant} (${c.ratio}竖)`;
+        if (c.ratio === '4:3' || c.ratio === '16:9') return `款${c.variant} (${c.ratio}横)`;
+      }
+      if (platform === 'bilibili') {
+        if (c.ratio === '16:9') return `款${c.variant} (16:9横封)`;
+        if (c.ratio === '4:3') return `款${c.variant} (4:3列表)`;
       }
       return `款${c.variant} (${c.ratio})`;
     }
@@ -2308,10 +2572,6 @@
           sourceLabel: fileName,
           baseDir: currentPack.meta?.baseDir || '',
         });
-        // 若 JSON 中未显式列出 covers 但目录里扫到了封面图，自动补齐
-        if ((!parsed.covers || !parsed.covers.length) && coverBlobsMap.size > 0 && parsed.meta.contentType !== 'image_post') {
-          parsed.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
-        }
       } else {
         parsed = parsePublishPackMarkdown(rawText, {
           mdFileName: fileName,
@@ -2336,15 +2596,15 @@
             parsed.platforms.bilibili.body = subData.body;
           }
         }
+      }
 
-        if (coverBlobsMap.size > 0) {
-          parsed.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
-        }
+      if (coverBlobsMap.size > 0) {
+        parsed.covers = mergeCoversWithBlobs(parsed.covers, coverBlobsMap, parsed.meta?.contentType === 'image_post');
       }
 
       currentPack = parsed;
       settings.selectedTitleIdx = -1;
-      settings.selectedCoverSlot = '';
+      settings.selectedCoverByPlat = {};
       saveSettings(settings);
       savePackState(currentPack);
     }
@@ -2421,14 +2681,13 @@
         const best = packCandidates[0];
         applyPackContent(best.name, best.text, subMdTextMap);
       } else if (imageFiles.length > 0) {
-        currentPack.covers = Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel));
+        currentPack.covers = mergeCoversWithBlobs(currentPack.covers, coverBlobsMap, false);
         savePackState(currentPack);
       }
 
+      await hydrateCoversFromBlobs();
       setStatus(
-        `✅ 已自动载入《${currentPack.meta?.mdFileName || '发布包'}》(${
-          currentPack.meta?.format === 'json' ? 'PublishPack JSON' : 'Markdown'
-        }) 与 ${coverBlobsMap.size} 张图片`
+        `✅ 已载入《${currentPack.meta?.mdFileName || '发布包'}》与 ${coverBlobsMap.size} 张配图`
       );
       render();
     }
@@ -2507,13 +2766,9 @@
           saveSettings(settings);
         }
         currentPack.meta.baseDir = data.baseDir || '';
-        currentPack.meta.targetAccount = data.targetAccount || '';
+        await hydrateCoversFromBlobs();
         savePackState(currentPack);
-        setStatus(
-          `✅ 已从飞书桥接载入：${currentPack.meta.packTitle}${
-            data.targetAccount ? ` · 目标账号【${data.targetAccount}】` : ''
-          }（${coverBlobsMap.size} 张配图就绪）`
-        );
+        setStatus(`✅ 已同步：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张配图）`);
         render();
       } catch {
         if (!silent) {
@@ -2602,8 +2857,13 @@
       }
 
       if (platform === 'bilibili' && pData.tags?.length) {
-        const tagRes = await fillBilibiliTagPills(pData.tags);
-        if (tagRes.ok) filledParts.push(`${Math.min(10, pData.tags.length)}个标签`);
+        const tagRes = await fillBilibiliTagPills(pData.tags, { clearExisting: true });
+        if (tagRes.ok) {
+          filledParts.push(`${tagRes.count || Math.min(10, pData.tags.length)}个标签`);
+        } else if (tagRes.reason) {
+          setStatus(`⚠️ 标题/简介已填，但标签未完成：${tagRes.reason}`);
+          return;
+        }
       } else if ((platform === 'xiaohongshu' || platform === 'douyin') && bodyEditor && pData.tags?.length) {
         if (settings.autoTopicEnter) {
           setStatus(`⏳ 正在拟人逐个绑定 ${pData.tags.length} 个 #蓝字话题...`);
@@ -2645,8 +2905,8 @@
       if (settings.collapsed) {
         const tab = document.createElement('div');
         tab.className = 'ppf-collapsed-tab';
-        tab.title = '点击展开多平台发布包助手（快捷键 Alt+S）';
-        tab.innerHTML = `<span class="ppf-dot"></span><span>发布包助手</span>`;
+        tab.title = '点击展开全平台半自动发布助手（快捷键 Alt+S）';
+        tab.innerHTML = `<span class="ppf-dot"></span><span>全平台半自动发布助手</span>`;
         tab.onclick = () => {
           settings.collapsed = false;
           saveSettings(settings);
@@ -2658,7 +2918,6 @@
 
       const pData = currentPack.platforms?.[platform] || {};
       const activeContentType = pData.contentType || currentPack.meta?.contentType || 'video';
-      const cTypeBadge = CONTENT_TYPE_LABELS[activeContentType] || '🎬 内容';
       const { active: activeCover, sortedCovers } = resolvePlatformCoverOptions();
 
       const activeTitle =
@@ -2703,13 +2962,14 @@
       const wxDirtyWarn =
         platform === 'weixin' && pData.shortTitleRaw && pData.shortTitleRaw !== pData.shortTitleClean;
       const activeRatioLabel = activeCover ? activeCover.ratio : pMeta.preferredRatios[0];
+      const thumbDim = getThumbBoxDimensions(activeRatioLabel);
 
       const injectBtnLabel =
         platform === 'douyin'
-          ? `⚡ 注入抖音${activeRatioLabel === '3:4' || activeRatioLabel === '9:16' ? '竖封面' : '横封面'} (${activeRatioLabel})`
+          ? `⚡ 注入${activeRatioLabel === '3:4' || activeRatioLabel === '9:16' ? '竖封' : '横封'} (${activeRatioLabel})`
           : platform === 'weixin'
-          ? `⚡ 注入视频号${activeRatioLabel === '3:4' ? ' 3:4 主页卡' : ' 4:3 动态卡'}`
-          : `⚡ 注入封面并自动选 ${activeRatioLabel} 比例`;
+          ? `⚡ 注入${activeRatioLabel === '3:4' ? ' 3:4 主页卡' : ' 4:3 动态卡'}`
+          : `⚡ 注入封面 (${activeRatioLabel})`;
 
       const shell = document.createElement('div');
       shell.className = 'ppf-shell';
@@ -2727,8 +2987,7 @@
           <div class="ppf-head" id="ppf-drag-handle">
             <div class="ppf-head-title">
               <span class="ppf-badge">${pMeta.name}</span>
-              <span>发布包助手</span>
-              <span style="font-size:11px; opacity:0.75; font-weight:500;">${cTypeBadge}</span>
+              <span style="overflow:hidden; text-overflow:ellipsis;">全平台半自动发布助手</span>
             </div>
             <div class="ppf-row-nowrap">
               <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换 浅色纯白 / 深色暗夜 皮肤">
@@ -2739,43 +2998,17 @@
               }">
                 ${settings.layoutMode === 'dock' ? '🪟' : '📌'}
               </button>
-              <button class="ppf-icon-btn" id="ppf-sync-bridge" title="从本地 serve_pack.py 同步（可选）">🔄</button>
+              <button class="ppf-icon-btn" id="ppf-sync-bridge" title="从本地飞书桥接服务同步">🔄</button>
               <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">❯</button>
             </div>
           </div>
 
           <div class="ppf-body">
-            <!-- 成品包一键载入区（原生兼容 PublishPack JSON + 旧版 Markdown + 直接粘贴 JSON） -->
+            <!-- 精简成品包栏 -->
             <div class="ppf-pack-bar" id="ppf-dropzone">
-              ${
-                currentPack.meta?.targetAccount
-                  ? `<div class="ppf-acct-bar" title="来自飞书发布表「分发账号」字段，请核对当前网页登录头像防止发错账号">
-                      <span>👤 调度账号：${currentPack.meta.targetAccount}</span>
-                      <span style="opacity:0.8; font-weight:500;">请核对登录头像</span>
-                    </div>`
-                  : ''
-              }
-              <div class="ppf-pack-top">
-                <div class="ppf-pack-name" title="${currentPack.meta?.packTitle || ''}">
-                  📦 ${currentPack.meta?.packTitle || '未加载发布包'}
-                </div>
-                <div class="ppf-row-nowrap">
-                  <button class="ppf-link-btn" id="ppf-toggle-paste" title="直接粘贴 AI 生成的 PublishPack JSON">粘贴JSON</button>
-                  <button class="ppf-link-btn" id="ppf-export-json" title="将当前发布包复制为标准 PublishPack v1.0 JSON">导出JSON</button>
-                  <button class="ppf-link-btn" id="ppf-pick-md" title="手动选择单份 .json 或 .md 发布包文件">更换文件</button>
-                </div>
+              <div class="ppf-pack-name" title="${currentPack.meta?.packTitle || ''}">
+                📦 ${currentPack.meta?.packTitle || '未加载发布包'}
               </div>
-              ${
-                showPasteDrawer
-                  ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
-                      <textarea id="ppf-paste-area" class="ppf-preview" style="min-height:92px; font-family:monospace; font-size:11.5px;" placeholder='在此粘贴符合 PublishPack v1.0 标准的 JSON（支持直接粘贴带 \`\`\`json 代码块的 AI 回复）...'></textarea>
-                      <div class="ppf-row" style="justify-content:flex-end;">
-                        <button class="ppf-btn" id="ppf-paste-cancel">取消</button>
-                        <button class="ppf-btn ppf-btn-accent" id="ppf-paste-confirm" style="padding:5px 12px;">✅ 解析并载入</button>
-                      </div>
-                    </div>`
-                  : ''
-              }
               ${
                 availableMdFiles.length > 1
                   ? `<select class="ppf-select" id="ppf-md-select" title="检测到目录内多份发布包文件，可随时切换">
@@ -2784,53 +3017,61 @@
                           (m, idx) =>
                             `<option value="${idx}" ${
                               m.name === currentPack.meta?.mdFileName ? 'selected' : ''
-                            }>📄 当前采用：${m.name}</option>`
+                            }>📄 ${m.name}</option>`
                         )
                         .join('')}
                     </select>`
                   : ''
               }
-              <button class="ppf-btn ppf-btn-block" id="ppf-pick-dir">
-                📂 选择成品包目录（自动识别 publish.pack.json / 发布包.md 与配图）
-              </button>
+              <div style="display:flex; gap:6px; align-items:center;">
+                <button class="ppf-btn" id="ppf-pick-dir" style="flex:1; display:inline-flex; justify-content:center; align-items:center; gap:4px;" title="选择含文案与封面的作品目录（或直接把文件夹拖进来）">
+                  📂 选成品包目录
+                </button>
+                <button class="ppf-btn" id="ppf-pick-md" title="单独更换 .json 或 .md 文案文件">换文件</button>
+                <button class="ppf-btn" id="ppf-toggle-paste" title="直接粘贴 AI 生成的 PublishPack JSON">粘贴JSON</button>
+              </div>
+              ${
+                showPasteDrawer
+                  ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+                      <textarea id="ppf-paste-area" class="ppf-preview" style="min-height:84px; font-family:monospace; font-size:11.5px;" placeholder='粘贴 PublishPack JSON（支持带 \`\`\`json 代码块）...'></textarea>
+                      <div class="ppf-row" style="justify-content:flex-end;">
+                        <button class="ppf-btn" id="ppf-paste-cancel">取消</button>
+                        <button class="ppf-btn ppf-btn-accent" id="ppf-paste-confirm" style="padding:5px 12px;">✅ 载入</button>
+                      </div>
+                    </div>`
+                  : ''
+              }
               <input type="file" id="ppf-input-dir" webkitdirectory directory multiple style="display:none" />
               <input type="file" id="ppf-input-md" accept=".json,.md,.markdown,.txt" style="display:none" />
             </div>
 
             ${
               activeContentType === 'image_post' && slidePaths.length > 0
-                ? `<!-- 图文轮播模式批量配图区 -->
-                  <div class="ppf-sec">
+                ? `<div class="ppf-sec">
                     <div class="ppf-sec-hd">
-                      <span>🖼️ 图文轮播卡片（共 ${slidePaths.length} 张 · 已缓存 ${readySlideCount} 张）</span>
+                      <span>🖼️ 图文轮播（${slidePaths.length} 张 · 已缓存 ${readySlideCount} 张）</span>
                     </div>
                     <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-inject-slides">
-                      ⚡ 按顺序一键注入全部 ${slidePaths.length} 张轮播图
+                      ⚡ 按序注入全部 ${slidePaths.length} 张轮播图
                     </button>
                   </div>`
                 : ''
             }
 
-            <!-- 封面注入区（视频/专栏模式下展示，或图文有独立封面时展示） -->
+            <!-- 封面比例自适应预览与注入区 -->
             ${
               activeContentType !== 'image_post' || sortedCovers.length > 0
                 ? `<div class="ppf-sec">
                     <div class="ppf-sec-hd">
-                      <span>🖼️ 封面注入（${
-                        platform === 'weixin'
-                          ? '支持 3:4 主页卡 + 4:3 动态卡双封'
-                          : platform === 'douyin'
-                          ? '自动切竖封/横封并避开AI参考图槽'
-                          : `自动延时选中 ${activeRatioLabel} 裁剪框`
-                      }）</span>
-                      <span>${coverBlobsMap.size ? `已共享 ${coverBlobsMap.size} 张` : '待选目录'}</span>
+                      <span>🖼️ 封面（已按${pMeta.name}默认识别 ${activeRatioLabel}）</span>
+                      <span style="flex-shrink:0;">${coverBlobsMap.size ? `共 ${coverBlobsMap.size} 张` : '待选目录'}</span>
                     </div>
                     <div class="ppf-cover-box">
                       ${
                         activeThumbUrl
-                          ? `<img class="ppf-thumb" src="${activeThumbUrl}" alt="cover" />`
-                          : `<div class="ppf-thumb">${
-                              activeCover ? `${activeCover.ratio}\n选一次目录\n多端共享` : '选目录后\n自动配图'
+                          ? `<img class="ppf-thumb" style="width:${thumbDim.w}px; height:${thumbDim.h}px;" src="${activeThumbUrl}" alt="cover" />`
+                          : `<div class="ppf-thumb" style="width:${thumbDim.w}px; height:${thumbDim.h}px;">${
+                              activeCover ? `${activeCover.ratio}\n待载入图` : '选目录\n自动配图'
                             }</div>`
                       }
                       <div style="flex:1; display:flex; flex-direction:column; gap:7px; min-width:0;">
@@ -2849,14 +3090,14 @@
               <div class="ppf-sec-hd">
                 <span>✏️ ${
                   platform === 'weixin'
-                    ? `短标题 (${activeTitle.length}/16字 · 7类白名单)`
+                    ? `短标题 (${activeTitle.length}/16字)`
                     : platform === 'douyin'
                     ? `作品标题 (${activeTitle.length}/${activeContentType === 'image_post' ? 20 : 30}字)`
                     : `标题 (${platform === 'xiaohongshu' ? `${xhsLen}/20字` : `${activeTitle.length}字`})`
                 }</span>
                 <div class="ppf-row-nowrap">
                   <button class="ppf-btn" id="ppf-fill-title-only">填入</button>
-                  <button class="ppf-btn" id="ppf-copy-title">📋 复制</button>
+                  <button class="ppf-copy-icon" id="ppf-copy-title" title="复制标题">📋</button>
                 </div>
               </div>
               ${
@@ -2888,24 +3129,27 @@
       } 字）</span>
                 <div class="ppf-row-nowrap">
                   <button class="ppf-btn" id="ppf-fill-body-only">填入</button>
-                  <button class="ppf-btn" id="ppf-copy-body">📋 复制</button>
+                  <button class="ppf-copy-icon" id="ppf-copy-body" title="复制正文">📋</button>
                 </div>
               </div>
-              <div class="ppf-preview" style="min-height: 76px;">${pData.body || '（空）'}</div>
+              <div class="ppf-preview" style="min-height: 72px;">${pData.body || '（空）'}</div>
             </div>
 
             <!-- 话题 / 标签 -->
             <div class="ppf-sec">
               <div class="ppf-sec-hd">
                 <span>🏷️ ${
-                  platform === 'bilibili' || platform === 'youtube'
+                  platform === 'bilibili'
+                    ? `标签（共 ${(pData.tags || []).length} 个 · 点胶囊可单加）`
+                    : platform === 'youtube'
                     ? '普通标签（无#纯词）'
                     : platform === 'weixin'
-                    ? '话题（一键填入已自动带入，也可点胶囊补加）'
-                    : '话题（点胶囊唤醒下拉 → 按回车变真蓝字）'
+                    ? '话题（点胶囊可追加）'
+                    : '话题（点胶囊唤醒下拉 → 按回车）'
                 }</span>
                 <div class="ppf-row-nowrap">
-                  <button class="ppf-btn" id="ppf-copy-tags">📋 全复制</button>
+                  ${platform === 'bilibili' ? `<button class="ppf-btn" id="ppf-fill-tags-only">填入</button>` : ''}
+                  <button class="ppf-copy-icon" id="ppf-copy-tags" title="复制全部标签">📋</button>
                 </div>
               </div>
               <div class="ppf-row" id="ppf-tags-wrap"></div>
@@ -2913,24 +3157,24 @@
 
             <!-- 合集 / 位置 / 置顶首评 / 平台子选项 -->
             <div class="ppf-sec">
-              <div class="ppf-sec-hd"><span>📌 合集 · 首评 · 平台子选项清单</span></div>
+              <div class="ppf-sec-hd"><span>📌 合集 · 首评 · 辅助项</span></div>
               <div class="ppf-row">
                 ${
                   pData.collection && (platform === 'weixin' || platform === 'douyin')
                     ? `<button class="ppf-btn" id="ppf-auto-col" title="上传完成后点击，自动在下拉框精确匹配「${pData.collection}」">⚡ 自动选合集：${pData.collection}</button>`
                     : ''
                 }
-                ${pData.collection ? `<button class="ppf-btn" id="ppf-copy-col">📁 合集：${pData.collection}</button>` : ''}
-                ${pData.location ? `<button class="ppf-btn" id="ppf-copy-loc">📍 位置：${pData.location}</button>` : ''}
-                ${pData.pinnedComment ? `<button class="ppf-btn" id="ppf-copy-pin">💬 复制置顶首评</button>` : ''}
-                ${pData.dynamicText ? `<button class="ppf-btn" id="ppf-copy-dyn">✨ 复制动态语</button>` : ''}
+                ${pData.collection ? `<button class="ppf-btn" id="ppf-copy-col" title="点击复制合集名">📁 ${pData.collection}</button>` : ''}
+                ${pData.location ? `<button class="ppf-btn" id="ppf-copy-loc" title="点击复制位置">📍 ${pData.location}</button>` : ''}
+                ${pData.pinnedComment ? `<button class="ppf-btn" id="ppf-copy-pin" title="点击复制置顶评论">💬 置顶首评</button>` : ''}
+                ${pData.dynamicText ? `<button class="ppf-btn" id="ppf-copy-dyn" title="点击复制动态语">✨ 动态语</button>` : ''}
               </div>
               <div class="ppf-row" id="ppf-opt-badges"></div>
             </div>
 
             <!-- 选项开关 -->
             <div class="ppf-row" style="justify-content:space-between;">
-              <label class="ppf-toggle" title="右侧停靠时自动将网页主体左移，不遮挡右侧面板">
+              <label class="ppf-toggle" title="右侧停靠时自动收缩网页宽度，不遮挡左侧模块与滚动条">
                 <input type="checkbox" id="ppf-chk-push" ${settings.pushPage ? 'checked' : ''} ${
         settings.layoutMode !== 'dock' ? 'disabled' : ''
       } />
@@ -2950,19 +3194,21 @@
               }
             </div>
 
-            <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-run-all" style="padding: 10px 14px; font-size: 13.5px;">
+            <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-run-all" style="padding: 10px 14px; font-size: 13.5px; flex-shrink: 0;">
               ${
                 settings.clipboardOnlyMode
                   ? '📋 一键复制本平台全套文案'
                   : platform === 'weixin'
                   ? '✨ 一键填入描述 + #话题 + 短标题'
+                  : platform === 'bilibili'
+                  ? '✨ 一键填入标题 + 简介 + 标签'
                   : '✨ 一键填入标题与正文'
               }
             </button>
 
             <div class="ppf-status" id="ppf-status-line">${statusText}</div>
             <div class="ppf-foot">
-              <span>🛡️ 拟人延时防检测 · 不自动点发布</span>
+              <span>🛡️ 拟人延时 · 不自动点发布</span>
               <span>左边缘可拖宽 · Alt+S 收起</span>
             </div>
           </div>
@@ -2971,17 +3217,18 @@
 
       rootWrap.appendChild(shell);
 
-      // 渲染封面切换胶囊
+      // 渲染封面切换胶囊（按当前平台独立保存选中项，切到其它平台不会互相干扰）
       const coverChipsWrap = shadow.getElementById('ppf-cover-chips');
       if (coverChipsWrap) {
         for (const c of sortedCovers) {
           const chip = document.createElement('span');
-          const isCurrent = activeCover && c.slot === activeCover.slot;
+          const isCurrent = activeCover && c.relPath === activeCover.relPath;
           chip.className = `ppf-chip ${isCurrent ? 'active' : ''}`;
           chip.textContent = formatCoverChipLabel(c);
           chip.title = c.relPath;
           chip.onclick = () => {
-            settings.selectedCoverSlot = c.slot;
+            settings.selectedCoverByPlat = settings.selectedCoverByPlat || {};
+            settings.selectedCoverByPlat[platform] = c.relPath;
             const vIdx = ['B', 'C', 'D'].indexOf(c.variant);
             if (vIdx >= 0 && pData.altTitles?.[vIdx]) {
               settings.selectedTitleIdx = vIdx;
@@ -2995,7 +3242,7 @@
         }
       }
 
-      // 渲染话题胶囊（小红书/抖音唤醒下拉按回车；视频号直接敲入 ` #话题 ` 激活；B站复制）
+      // 渲染话题/标签胶囊（B站点胶囊直接填入单个标签；小红书/抖音唤醒下拉；视频号敲入 #话题）
       const tagsWrap = shadow.getElementById('ppf-tags-wrap');
       if (tagsWrap && Array.isArray(pData.tags)) {
         for (const tag of pData.tags) {
@@ -3003,9 +3250,19 @@
           chip.className = 'ppf-chip';
           chip.textContent = platform === 'bilibili' ? tag : `#${tag}`;
           chip.onclick = async () => {
-            if (settings.clipboardOnlyMode || platform === 'bilibili') {
+            if (settings.clipboardOnlyMode) {
               await safeCopy(platform === 'bilibili' ? tag : `#${tag}`);
               setStatus(`📋 已复制标签：${tag}`);
+              return;
+            }
+            if (platform === 'bilibili') {
+              const res = await fillBilibiliTagPills([tag], { clearExisting: false });
+              if (res.ok) {
+                setStatus(`✅ 已向 B 站添加标签：${tag}`);
+              } else {
+                await safeCopy(tag);
+                setStatus(`⚠️ ${res.reason || '未找到标签框'}，已复制「${tag}」到剪贴板`);
+              }
               return;
             }
             const { bodyEditor } = locatePlatformFields(platform);
@@ -3077,11 +3334,6 @@
       shadow.getElementById('ppf-toggle-paste').onclick = () => {
         showPasteDrawer = !showPasteDrawer;
         render();
-      };
-      shadow.getElementById('ppf-export-json').onclick = async () => {
-        const jsonStr = exportPackToSpecJson(currentPack);
-        await safeCopy(jsonStr);
-        setStatus('📋 已将当前发布包导出为标准 PublishPack v1.0 JSON 并复制到剪贴板！');
       };
 
       const pasteCancel = shadow.getElementById('ppf-paste-cancel');
@@ -3277,6 +3529,22 @@
         await safeCopy(pData.body || '');
         setStatus('📋 正文已复制');
       };
+      const fillTagsOnlyBtn = shadow.getElementById('ppf-fill-tags-only');
+      if (fillTagsOnlyBtn) {
+        fillTagsOnlyBtn.onclick = async () => {
+          if (!pData.tags?.length) {
+            setStatus('⚠️ 当前发布包没有标签');
+            return;
+          }
+          setStatus('⏳ 正在向 B 站填入标签...');
+          const res = await fillBilibiliTagPills(pData.tags, { clearExisting: true });
+          if (res.ok) {
+            setStatus(`✅ 已向 B 站填入 ${res.count || Math.min(10, pData.tags.length)} 个标签`);
+          } else {
+            setStatus(`⚠️ ${res.reason || '填入标签失败'}`);
+          }
+        };
+      }
       shadow.getElementById('ppf-copy-tags').onclick = async () => {
         const str = (pData.tags || [])
           .map((t) => (platform === 'bilibili' ? t : `#${t}`))
@@ -3441,16 +3709,21 @@
         if (changes[STORAGE_KEY_PACK]) {
           currentPack = await loadPackState();
           coverBlobsMap = await loadCoversCrossPlatform();
-          setStatus(`🔄 已实时同步新发布包：${currentPack.meta?.packTitle || ''}`);
+          await hydrateCoversFromBlobs();
+          setStatus(`🔄 已同步发布包：${currentPack.meta?.packTitle || ''}`);
           needRender = true;
         } else if (Object.keys(changes).some((k) => k.startsWith(CROSS_COVER_PREFIX))) {
           coverBlobsMap = await loadCoversCrossPlatform();
+          await hydrateCoversFromBlobs();
           needRender = true;
         }
         if (needRender) render();
       });
     }
 
+    hydrateCoversFromBlobs().then((changed) => {
+      if (changed) render();
+    });
     render();
 
     // 若本地 8765 飞书桥接服务刚切换过新作品且尚未同步，在扩展后台静默自动拉取最新一期（创作者网页本身零网络痕迹）
@@ -3550,16 +3823,23 @@
 
         if (parsed) {
           parsed.meta = parsed.meta || {};
-          parsed.meta.targetAccount = launchAccount;
-          if ((!parsed.covers || !parsed.covers.length) && records.length > 0 && parsed.meta?.contentType !== 'image_post') {
-            parsed.covers = records.map((r) => inferCoverMetaFromPath(r.relPath));
+          if (records.length > 0 && parsed.meta?.contentType !== 'image_post') {
+            const recMap = new Map(records.map((r) => [r.relPath, r.blob]));
+            parsed.covers = mergeCoversWithBlobs(parsed.covers, recMap, false);
+            for (const c of parsed.covers) {
+              const b = findBlobFlexible(recMap, c.relPath);
+              if (b) {
+                c.ratio = await detectImageBlobRatio(b, c.ratio);
+                c._ratioVerified = true;
+              }
+            }
           }
           await xStorageSet(STORAGE_KEY_PACK, JSON.stringify(parsed));
 
           const curSettings = await loadSettings();
           curSettings.lastBridgeVersion = data.packVersion || '';
           curSettings.selectedTitleIdx = -1;
-          curSettings.selectedCoverSlot = '';
+          curSettings.selectedCoverByPlat = {};
           await xStorageSet(STORAGE_KEY_SETTINGS, JSON.stringify(curSettings));
         }
         setLaunchMsg(`✅ 透传完成（含 ${records.length} 张配图）！正在前往目标发布后台...`);
@@ -3569,15 +3849,26 @@
       setLaunchMsg('✅ Finder 已打开，正在前往目标发布后台...');
     }
 
-    if (targetUrls.length === 1) {
-      window.location.replace(targetUrls[0]);
-    } else if (targetUrls.length > 1) {
+    const navigateNoReferrer = (url) => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.rel = 'noreferrer noopener';
+      a.referrerPolicy = 'no-referrer';
+      document.body.appendChild(a);
+      a.click();
+    };
+
+    if (targetUrls.length >= 1) {
+      // Chrome 插件模式下：由后台 Service Worker 执行原生 chrome.tabs.create 并关闭本跳板页，
+      // 确保目标页面请求头为 Sec-Fetch-Site: none、零 Referer、history.length === 1，与浏览器书签点击进入完全一致！
       if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ type: 'PPF_OPEN_EXTRA_TABS', urls: targetUrls.slice(1) }, () => {
-          window.location.replace(targetUrls[0]);
+        chrome.runtime.sendMessage({ type: 'PPF_NAVIGATE_CLEAN_TABS', urls: targetUrls }, (resp) => {
+          if (!resp || !resp.ok) {
+            navigateNoReferrer(targetUrls[0]);
+          }
         });
       } else {
-        window.location.replace(targetUrls[0]);
+        navigateNoReferrer(targetUrls[0]);
       }
     } else {
       setLaunchMsg('✅ Finder 已定位文件，且新作品已同步至所有已打开的发布页面！可关闭此标签页。');

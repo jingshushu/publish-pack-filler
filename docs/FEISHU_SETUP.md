@@ -1,4 +1,4 @@
-# 飞书多维表格 → 本地作品目录智能寻址 + Finder 定位视频 + 透传插件 配置指南 (v1.4.1)
+# 全平台半自动发布助手 · 飞书多维表格智能寻址与发布调度指南 (v1.5.0)
 
 通过本机回环 Python 服务（`127.0.0.1:8765`），实现在飞书多维表格里**点一下公式按钮**，0.4 秒内同步完成四件事：
 1. **纯作品目录名智能转化真实路径**：飞书只需存纯目录名（如 `20261016_特斯拉飞行汽车短视频` 或 `20261117_天津城市变迁`），本地脚本自动按 **「品牌提示优先 → `2 AH领域/*/04_作品` → `1 AH项目` → `01_选题库` → `4 AH归档` → 归档挂载盘」** 三级寻址定位；
@@ -94,11 +94,11 @@ IF(
 
 ### 1. `account`（分发账号）自动识别映射表
 
-| 飞书 `[分发账号]` 示例值 | 自动识别平台 (`site`) | 自动打开的创作者后台 URL | 品牌目录提示 |
+| 飞书 `[分发账号]` 示例值 | 自动识别平台 (`site`) | 自动打开的创作者后台 URL（原生新标签页打开，零 Referer 痕迹） | 品牌目录提示 |
 |---|---|---|---|
 | `抖音·靖蜀黍` | `dy`（抖音） | `https://creator.douyin.com/creator-micro/content/upload` | 优先匹配 `靖蜀黍` |
-| `视频号·靖蜀黍.`（自动清掉末尾 `.`） | `wx`（微信视频号） | `https://channels.weixin.qq.com/platform` | 优先匹配 `靖蜀黍` |
-| `小红书·万物皆有数` | `xhs`（小红书） | `https://creator.xiaohongshu.com/publish/publish?source=official` | 优先匹配 `万物有数` |
+| `视频号·靖蜀黍.`（自动清掉末尾 `.`） | `wx`（微信视频号） | `https://channels.weixin.qq.com/platform/post/list` | 优先匹配 `靖蜀黍` |
+| `小红书·万物皆有数` | `xhs`（小红书） | `https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video` | 优先匹配 `万物有数` |
 | `B站·靖蜀黍` / `哔哩哔哩·万物有数` | `bili`（B 站） | `https://member.bilibili.com/platform/upload/video/frame` | 按账号后缀匹配 |
 | `快手·xxx` / `公众号·xxx` / `知乎·xxx` / `YouTube·xxx` | `ks` / `mp` / `zhihu` / `yt` | 对应官方创作者后台 | 按账号后缀匹配 |
 

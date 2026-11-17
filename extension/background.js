@@ -41,6 +41,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'PPF_NAVIGATE_CLEAN_TABS' && Array.isArray(msg.urls) && msg.urls.length > 0) {
+    // 使用浏览器级原生新建标签页 (chrome.tabs.create，不传 openerTabId)：
+    // 确保请求头为 Sec-Fetch-Site: none、零 Referer、window.opener === null、history.length === 1，
+    // 与用户在浏览器书签栏/地址栏手动打开创作者后台 100% 一致，绝不带入 127.0.0.1 跳转痕迹。
+    const baseIndex = _sender?.tab?.index;
+    const launchTabId = _sender?.tab?.id;
+    (async () => {
+      for (let i = 0; i < msg.urls.length; i++) {
+        const createProps = { url: msg.urls[i], active: i === 0 };
+        if (typeof baseIndex === 'number') {
+          createProps.index = baseIndex + i + 1;
+        }
+        await chrome.tabs.create(createProps);
+      }
+      if (typeof launchTabId === 'number') {
+        try {
+          await chrome.tabs.remove(launchTabId);
+        } catch {
+          // ignore if tab already closed
+        }
+      }
+      sendResponse({ ok: true });
+    })().catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
   if (msg.type === 'PPF_OPEN_EXTRA_TABS' && Array.isArray(msg.urls)) {
     Promise.all(msg.urls.map((url) => chrome.tabs.create({ url, active: false })))
       .then(() => sendResponse({ ok: true }))

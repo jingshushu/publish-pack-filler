@@ -5,9 +5,9 @@ const STORAGE_KEY_SETTINGS = 'ppf_settings_v2';
 const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
 
 const URLS = [
-  'https://creator.xiaohongshu.com/publish/publish?source=official',
-  'https://channels.weixin.qq.com/platform',
   'https://creator.douyin.com/creator-micro/content/upload',
+  'https://channels.weixin.qq.com/platform/post/list',
+  'https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video',
   'https://member.bilibili.com/platform/upload/video/frame',
 ];
 
@@ -22,8 +22,7 @@ async function initPopup() {
 
     if (rawPack) {
       const pack = typeof rawPack === 'string' ? JSON.parse(rawPack) : rawPack;
-      const acct = pack?.meta?.targetAccount ? `（👤 ${pack.meta.targetAccount}）` : '';
-      titleEl.textContent = (pack?.meta?.packTitle || '已加载发布包') + acct;
+      titleEl.textContent = pack?.meta?.packTitle || '已加载发布包';
     } else {
       titleEl.textContent = '内置示例 · 《一座城的年轮 · 天津》';
     }

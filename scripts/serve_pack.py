@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Publish Pack Filler · 飞书直连本地调度与路径转化服务 (v1.4.1)
+Publish Pack Filler · 全平台半自动发布助手本地调度服务 (v1.5.0)
 默认监听 http://127.0.0.1:8765（仅本机回环，零外网暴露、零 CORS 通配泄露）。
 
 核心能力：
@@ -50,12 +50,12 @@ DEFAULT_BRAND_HINTS = {
 }
 
 SITE_URLS: dict[str, tuple[str, str]] = {
-    "xhs": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official"),
-    "xiaohongshu": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official"),
-    "wx": ("微信视频号", "https://channels.weixin.qq.com/platform"),
-    "weixin": ("微信视频号", "https://channels.weixin.qq.com/platform"),
-    "weixin_channels": ("微信视频号", "https://channels.weixin.qq.com/platform"),
-    "sph": ("微信视频号", "https://channels.weixin.qq.com/platform"),
+    "xhs": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video"),
+    "xiaohongshu": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video"),
+    "wx": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
+    "weixin": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
+    "weixin_channels": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
+    "sph": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
     "dy": ("抖音", "https://creator.douyin.com/creator-micro/content/upload"),
     "douyin": ("抖音", "https://creator.douyin.com/creator-micro/content/upload"),
     "bili": ("B 站", "https://member.bilibili.com/platform/upload/video/frame"),
@@ -84,9 +84,9 @@ PLATFORM_KEYWORD_RULES: list[tuple[tuple[str, ...], str]] = [
 ]
 
 ALL_FOUR_URLS = [
-    "https://creator.xiaohongshu.com/publish/publish?source=official",
-    "https://channels.weixin.qq.com/platform",
     "https://creator.douyin.com/creator-micro/content/upload",
+    "https://channels.weixin.qq.com/platform/post/list",
+    "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video",
     "https://member.bilibili.com/platform/upload/video/frame",
 ]
 
@@ -441,6 +441,7 @@ def build_launchpad_html(
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="referrer" content="no-referrer" />
   <title>正在调度发布 · {esc_acct or esc_site}</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }}
@@ -474,7 +475,7 @@ def build_launchpad_html(
       ⏳ 正在将发布包与配图透传至浏览器插件...
     </div>
     <div class="btns">
-      {f'<a class="btn" href="{html.escape(primary_url)}">立即前往 {esc_site} 发布页 →</a>' if primary_url else ''}
+      {f'<a class="btn" id="ppf-fallback-link" href="{html.escape(primary_url)}" rel="noreferrer noopener" referrerpolicy="no-referrer">立即前往 {esc_site} 发布页 →</a>' if primary_url else ''}
     </div>
   </div>
   <script>
@@ -483,13 +484,18 @@ def build_launchpad_html(
       const el = document.getElementById('ppf-feishu-launchpad');
       if (el && el.getAttribute('data-ext-handled') === '1') return;
       if (urls.length === 1) {{
-        window.location.replace(urls[0]);
+        const a = document.createElement('a');
+        a.href = urls[0];
+        a.rel = 'noreferrer noopener';
+        a.referrerPolicy = 'no-referrer';
+        document.body.appendChild(a);
+        a.click();
       }} else if (urls.length > 1) {{
         document.getElementById('ppf-sync-msg').textContent = '✅ 本地发布包已就绪！请启用 Chrome 插件以支持四端齐开。';
       }} else {{
         document.getElementById('ppf-sync-msg').textContent = '✅ Finder 已定位打开作品目录！';
       }}
-    }}, 650);
+    }}, 900);
   </script>
 </body>
 </html>"""
@@ -515,6 +521,7 @@ def make_handler(state: BridgeState):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(raw)
 
@@ -676,7 +683,7 @@ def make_handler(state: BridgeState):
             self._send_json(
                 {
                     "service": "PublishPack Feishu Local Bridge",
-                    "version": "1.4.1",
+                    "version": "1.5.0",
                     "status": "running",
                     "workspaceRoot": str(state.workspace_root),
                     "fallbackRoots": [str(r) for r in state.fallback_roots],
@@ -718,7 +725,7 @@ def main() -> None:
     )
 
     print("=" * 70)
-    print("🚀 PublishPack · 飞书直连调度服务已启动 (v1.4.1)")
+    print("🚀 全平台半自动发布助手 · 飞书直连调度服务已启动 (v1.5.0)")
     print(f"📁 主工作空间     : {state.workspace_root}")
     if state.fallback_roots:
         print(f"🗄️ 归档兜底盘     : {', '.join(str(r) for r in state.fallback_roots)}")
