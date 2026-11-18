@@ -43,6 +43,8 @@ const lastAccountByPlat = {
 let lastExportHint = { platform: '', account: '', section: '', period: '', ts: 0 };
 let exportHintQueue = [];
 let recentGenericDataCount = { ts: 0, count: 0 };
+const managedCreatorDownloadIds = new Set();
+let autoArchiveTimer = null;
 
 chrome.storage.local.get('ppf_last_accounts_by_plat_v1', (res) => {
   try {
@@ -95,6 +97,9 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
       const platKey = detectCreatorPlatformFromDownload(item);
       if (!platKey) return;
+      if (typeof item.id === 'number') {
+        managedCreatorDownloadIds.add(item.id);
+      }
 
       // 若已是标准命名格式则仅去重覆盖，不二次包裹
       if (/^W\d{2}_\d{8}导出_/.test(baseName)) {
@@ -179,6 +184,43 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       // 出错时放行浏览器原始文件名，绝不阻断下载
     }
   });
+
+  // 下载阶段自动前置归档：报表落盘完成的瞬间，自动通过本地桥接移入对应账号 /05_数据复盘/数据导出/ 统一同步管理！
+  if (chrome.downloads.onChanged) {
+    chrome.downloads.onChanged.addListener((delta) => {
+      if (!delta || !managedCreatorDownloadIds.has(delta.id)) return;
+      if (delta.state?.current === 'complete') {
+        managedCreatorDownloadIds.delete(delta.id);
+        if (autoArchiveTimer) clearTimeout(autoArchiveTimer);
+        autoArchiveTimer = setTimeout(async () => {
+          try {
+            const res = await fetch(`${BRIDGE_BASE}/api/archive-downloads`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json; charset=utf-8' },
+              body: JSON.stringify({ brand: 'auto', hours: 2, move: true }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              if (data?.ok && data.archived_count > 0) {
+                chrome.storage.local.set({
+                  ppf_last_auto_archive_v1: {
+                    ts: Date.now(),
+                    count: data.archived_count,
+                    destDir: data.dest_dir || '',
+                    files: data.files || [],
+                  },
+                });
+              }
+            }
+          } catch {
+            // 若本机桥接未开启，则保留在 ~/Downloads，待复盘阶段由 ingest-review 第0步自动前置归档兜底
+          }
+        }, 1200);
+      } else if (delta.state?.current === 'interrupted') {
+        managedCreatorDownloadIds.delete(delta.id);
+      }
+    });
+  }
 }
 
 function flattenDataCenterUrls(plats) {

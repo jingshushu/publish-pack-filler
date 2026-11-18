@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      1.7.0
+// @version      1.7.1
 // @description  全平台半自动发布与四端数据安全采集助手：导表/发布双面板分家、账号/作品极简双键、12h防重二次确认、发前沙箱护盾同步飞书防撞车
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -3221,13 +3221,13 @@
         const res = await gmPostJson(`${settings.bridgeUrl}/api/archive-downloads`, {
           brand: brandArg,
           hours: 24,
-          move: false,
+          move: true,
         });
         if (res && res.ok) {
           if (res.archived_count > 0) {
-            setStatus(`🎉 已归档 ${res.archived_count} 份报表至 ${res.dest_dir}！直接跟 AI 说「清洗数据入飞书」`);
+            setStatus(`🎉 已统一移入归档 ${res.archived_count} 份报表至 ${res.dest_dir}！`);
           } else {
-            setStatus('ℹ️ 最近 24 小时 ~/Downloads 中未发现待归档的四平台导出表');
+            setStatus('✅ 所有新导出的报表均已归档在对应账号 /05_数据复盘/数据导出/ 中');
           }
         }
       } catch (err) {
@@ -4915,6 +4915,12 @@
         if (changes[STORAGE_KEY_EXPORT_CACHE]) {
           await loadExportCache();
           needRender = true;
+        }
+        if (changes.ppf_last_auto_archive_v1?.newValue) {
+          const info = changes.ppf_last_auto_archive_v1.newValue;
+          if (info?.count > 0) {
+            setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
+          }
         }
         if (changes[STORAGE_KEY_PACK]) {
           currentPack = await loadPackState();

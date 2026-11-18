@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v1.7.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v1.7.1) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -3194,13 +3194,13 @@
         const res = await gmPostJson(`${settings.bridgeUrl}/api/archive-downloads`, {
           brand: brandArg,
           hours: 24,
-          move: false,
+          move: true,
         });
         if (res && res.ok) {
           if (res.archived_count > 0) {
-            setStatus(`🎉 已归档 ${res.archived_count} 份报表至 ${res.dest_dir}！直接跟 AI 说「清洗数据入飞书」`);
+            setStatus(`🎉 已统一移入归档 ${res.archived_count} 份报表至 ${res.dest_dir}！`);
           } else {
-            setStatus('ℹ️ 最近 24 小时 ~/Downloads 中未发现待归档的四平台导出表');
+            setStatus('✅ 所有新导出的报表均已归档在对应账号 /05_数据复盘/数据导出/ 中');
           }
         }
       } catch (err) {
@@ -4888,6 +4888,12 @@
         if (changes[STORAGE_KEY_EXPORT_CACHE]) {
           await loadExportCache();
           needRender = true;
+        }
+        if (changes.ppf_last_auto_archive_v1?.newValue) {
+          const info = changes.ppf_last_auto_archive_v1.newValue;
+          if (info?.count > 0) {
+            setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
+          }
         }
         if (changes[STORAGE_KEY_PACK]) {
           currentPack = await loadPackState();
