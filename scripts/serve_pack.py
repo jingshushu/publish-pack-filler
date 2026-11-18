@@ -289,6 +289,7 @@ class BridgeState:
         self.pack_version = str(int(time.time() * 1000))
         self.last_finder_target = ""
         self.last_finder_ts = 0.0
+        self.collect_queue: list[dict] = []
 
     def all_allowed_roots(self) -> list[Path]:
         roots = [self.workspace_root]
@@ -537,13 +538,37 @@ def make_handler(state: BridgeState):
                 self._send_html("<h3>✅ Finder 下载文件夹已打开</h3>")
                 return
 
-            # 1. 飞书调度入口：支持 ?dir=20261016_xxx&account=抖音·靖蜀黍 或 ?path=...&site=...
+            # 1. 飞书调度入口：支持 ?dir=20261016_xxx&account=抖音·靖蜀黍 或 ?path=<导出表相对路径>
             if parsed.path == "/open":
                 raw_dir = (qs.get("dir") or qs.get("path") or [""])[0]
                 raw_pack = (qs.get("pack") or [""])[0]
                 raw_account = (qs.get("account") or qs.get("acct") or [""])[0]
                 raw_site = (qs.get("site") or [""])[0]
                 open_finder = ((qs.get("finder") or ["1"])[0] or "1").strip() not in ("0", "false", "no")
+
+                # 1a. 若 path 直接指向允许工作空间内的具体文件（如飞书 D/E 表的「📊 打开本地原表」指向 .xlsx/.csv），直接在 Finder 高亮该原表！
+                cleaned_file_rel = normalize_feishu_cell_text(raw_dir).lstrip("/\\")
+                if cleaned_file_rel and ".." not in Path(cleaned_file_rel).parts:
+                    for root in state.all_allowed_roots():
+                        cand_file = (root / cleaned_file_rel).resolve()
+                        if cand_file.is_file():
+                            try:
+                                state.assert_inside_allowed_roots(cand_file)
+                                if sys.platform == "darwin":
+                                    subprocess.Popen(["open", "-R", str(cand_file)])
+                                self._send_html(
+                                    f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>本地原表已定位</title></head>"
+                                    f"<body style='font-family:-apple-system,sans-serif;padding:36px;background:#f7f8fa;color:#1f2329;'>"
+                                    f"<div style='max-width:560px;margin:0 auto;background:#fff;padding:24px 28px;border-radius:14px;box-shadow:0 4px 20px rgba(0,0,0,0.06);'>"
+                                    f"<h2 style='margin:0 0 12px;color:#059669;'>📊 已在 Finder 定位本地原始数据表</h2>"
+                                    f"<p style='font-size:14px;line-height:1.6;word-break:break-all;'><b>文件名：</b>{html.escape(cand_file.name)}<br>"
+                                    f"<b>相对路径：</b>{html.escape(cleaned_file_rel)}</p>"
+                                    f"<p style='margin-top:14px;font-size:12.5px;color:#646a73;'>已在 macOS Finder 中自动高亮选中该文件，可直接双击用 Excel / Numbers 打开查阅。此标签页可随时关闭。</p>"
+                                    f"</div></body></html>"
+                                )
+                                return
+                            except PermissionError:
+                                break
 
                 site_key, account_label, brand_hint = parse_dispatch_account(
                     raw_account=raw_account,
@@ -680,18 +705,173 @@ def make_handler(state: BridgeState):
                 self.wfile.write(data)
                 return
 
+            # 5. 四端创作者数据中心采集指令队列查询（供 Chrome 插件后台接收器轮询）
+            if parsed.path == "/api/collect":
+                pending = [j for j in state.collect_queue if not j.get("acked")]
+                self._send_json({"ok": True, "pending": pending})
+                return
+
+            # 6. 发布前同平台同账号排期防撞查询（查询飞书 C 发布记录表最近已发 & 待发定时帖）
+            if parsed.path == "/api/schedule-check":
+                cli_bin = Path.home() / "Code" / "aihub-feishu" / "bin" / "aihub-feishu"
+                if not cli_bin.is_file():
+                    self._send_json({"ok": False, "error": f"未找到 aihub-feishu: {cli_bin}"}, status=500)
+                    return
+                plat = (qs.get("platform") or [""])[0]
+                acct = (qs.get("account") or state.active_target_account or "auto")
+                if isinstance(acct, list):
+                    acct = acct[0] if acct else "auto"
+                work = (qs.get("work") or [str(state.active_project_dir or state.active_pack_dir or "")])[0]
+                title = (qs.get("title") or [""])[0]
+                planned_at = (qs.get("plannedAt") or [""])[0]
+                cmd = [
+                    str(cli_bin),
+                    "check-schedule",
+                    "--platform",
+                    str(plat),
+                    "--account",
+                    str(acct),
+                    "--work",
+                    str(work),
+                    "--title",
+                    str(title),
+                    "--planned-at",
+                    str(planned_at),
+                    "--json",
+                ]
+                try:
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+                    out_str = (proc.stdout or "").strip()
+                    if out_str:
+                        self._send_json(json.loads(out_str))
+                    else:
+                        self._send_json({"ok": False, "error": (proc.stderr or "empty output").strip()}, status=500)
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                return
+
             self._send_json(
                 {
                     "service": "PublishPack Feishu Local Bridge",
-                    "version": "1.5.0",
+                    "version": "1.7.0",
                     "status": "running",
                     "workspaceRoot": str(state.workspace_root),
                     "fallbackRoots": [str(r) for r in state.fallback_roots],
                     "activePackDir": str(state.active_pack_dir) if state.active_pack_dir else None,
                     "activeTargetAccount": state.active_target_account,
                     "packVersion": state.pack_version,
+                    "pendingCollectJobs": len([j for j in state.collect_queue if not j.get("acked")]),
                 }
             )
+
+        def do_POST(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            length = int(self.headers.get("Content-Length") or 0)
+            raw_body = self.rfile.read(length).decode("utf-8", errors="ignore") if length > 0 else "{}"
+            try:
+                body = json.loads(raw_body) if raw_body else {}
+            except Exception:
+                body = {}
+
+            if parsed.path == "/api/collect":
+                data_urls_map = {
+                    "xhs": "https://creator.xiaohongshu.com/statistics/data-analysis?source=official",
+                    "wx": "https://channels.weixin.qq.com/platform/statistic/post",
+                    "bili": "https://member.bilibili.com/platform/data-up/video",
+                    "dy": "https://creator.douyin.com/creator-micro/data-center/operation",
+                }
+                plats = body.get("platforms") or ["xhs", "wx", "bili", "dy"]
+                urls = [data_urls_map[p] for p in plats if p in data_urls_map]
+                job = {
+                    "jobId": f"col_{int(time.time() * 1000)}",
+                    "brand": body.get("brand") or "",
+                    "platforms": plats,
+                    "urls": urls,
+                    "autoExport": bool(body.get("auto_export", True)),
+                    "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "acked": False,
+                }
+                state.collect_queue.append(job)
+                state.collect_queue = state.collect_queue[-20:]
+                self._send_json({"ok": True, "jobId": job["jobId"], "urls": urls})
+                return
+
+            if parsed.path == "/api/collect/ack":
+                jid = body.get("jobId") or ""
+                for j in state.collect_queue:
+                    if j["jobId"] == jid or jid == "all":
+                        j["acked"] = True
+                self._send_json({"ok": True})
+                return
+
+            if parsed.path == "/api/archive-downloads":
+                cli_bin = Path.home() / "Code" / "aihub-feishu" / "bin" / "aihub-feishu"
+                if not cli_bin.is_file():
+                    self._send_json({"ok": False, "error": f"未找到 aihub-feishu: {cli_bin}"}, status=500)
+                    return
+                brand_arg = str(body.get("brand") or "auto").strip() or "auto"
+                hours_arg = str(float(body.get("hours") or 24.0))
+                cmd = [str(cli_bin), "collect-downloads", "--brand", brand_arg, "--hours", hours_arg, "--json"]
+                if body.get("move"):
+                    cmd.append("--move")
+                try:
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+                    out_str = (proc.stdout or "").strip()
+                    if proc.returncode == 0 and out_str:
+                        self._send_json(json.loads(out_str))
+                    else:
+                        self._send_json(
+                            {"ok": False, "error": (proc.stderr or out_str or f"exit {proc.returncode}").strip()},
+                            status=500,
+                        )
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                return
+
+            if parsed.path == "/api/record-publish":
+                cli_bin = Path.home() / "Code" / "aihub-feishu" / "bin" / "aihub-feishu"
+                if not cli_bin.is_file():
+                    self._send_json({"ok": False, "error": f"未找到 aihub-feishu: {cli_bin}"}, status=500)
+                    return
+                plat = str(body.get("platform") or "").strip()
+                acct = str(body.get("account") or state.active_target_account or "auto").strip() or "auto"
+                mode = "scheduled" if body.get("mode") == "scheduled" else "immediate"
+                planned_at = str(body.get("plannedAt") or "").strip()
+                work = str(body.get("work") or state.active_project_dir or state.active_pack_dir or "").strip()
+                title = str(body.get("title") or "").strip()
+                post_body = str(body.get("body") or "").strip()
+                cmd = [
+                    str(cli_bin),
+                    "record-publish",
+                    "--platform",
+                    plat,
+                    "--account",
+                    acct,
+                    "--mode",
+                    mode,
+                    "--planned-at",
+                    planned_at,
+                    "--work",
+                    work,
+                    "--title",
+                    title,
+                    "--body",
+                    post_body,
+                ]
+                if body.get("force"):
+                    cmd.append("--force")
+                try:
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+                    out_str = (proc.stdout or "").strip()
+                    if out_str:
+                        self._send_json(json.loads(out_str))
+                    else:
+                        self._send_json({"ok": False, "error": (proc.stderr or "empty output").strip()}, status=500)
+                except Exception as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=500)
+                return
+
+            self._send_json({"error": "未知路由"}, status=404)
 
     return PackBridgeHandler
 

@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v1.5.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v1.7.0) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -17,6 +17,8 @@
 
   const STORAGE_KEY_PACK = 'ppf_current_pack_v1';
   const STORAGE_KEY_SETTINGS = 'ppf_settings_v2';
+  const STORAGE_KEY_EXPORT_CACHE = 'ppf_export_cache_v1';
+  const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
   const IDB_NAME = 'ppf_local_covers_v1';
@@ -2178,7 +2180,44 @@
       GM_xmlhttpRequest({
         method: 'GET',
         url,
-        timeout: 3500,
+        timeout: 20000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            try {
+              resolve(JSON.parse(res.responseText));
+            } catch (e) {
+              reject(e);
+            }
+          } else {
+            reject(new Error(`HTTP ${res.status}`));
+          }
+        },
+        onerror: () => reject(new Error('未启动')),
+        ontimeout: () => reject(new Error('超时')),
+      });
+    });
+  }
+
+  function gmPostJson(url, body = {}) {
+    if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
+      return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ type: 'PPF_BRIDGE_POST', url, body }, (resp) => {
+          if (resp && resp.ok) resolve(resp.data);
+          else reject(new Error(resp?.error || '桥接请求失败'));
+        });
+      });
+    }
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('不支持桥接请求'));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url,
+        data: JSON.stringify(body || {}),
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        timeout: 20000,
         onload: (res) => {
           if (res.status >= 200 && res.status < 300) {
             try {
@@ -2281,6 +2320,7 @@
       lastBridgeVersion: '',
       selectedCoverByPlat: {},
       selectedTitleIdx: -1,
+      exportAccountOverride: 'auto',
     };
     try {
       const raw = await xStorageGet(STORAGE_KEY_SETTINGS, '');
@@ -2339,7 +2379,8 @@
     }
 
     function syncPagePushMargin() {
-      const shouldPush = settings.layoutMode === 'dock' && settings.pushPage && !settings.collapsed;
+      const isDataPage = getDataCenterContext().isDataMode;
+      const shouldPush = !isDataPage && settings.layoutMode === 'dock' && settings.pushPage && !settings.collapsed;
       const docEl = document.documentElement;
       const bodyEl = document.body;
       // 彻底弃用会导致 width:100% 页面横向溢出与遮挡滚动条的 marginRight，改用 border-box + paddingRight + fixed 容器让位
@@ -2397,6 +2438,11 @@
     rootWrap.className = 'ppf-root';
     shadow.appendChild(rootWrap);
 
+    // 独立于右侧面板的「发布按钮沙箱浮层护盾」（位于同一 closed ShadowRoot 内，对宿主网页 DOM 100% 零修改）
+    const shieldWrap = document.createElement('div');
+    shieldWrap.className = 'ppf-shield-host';
+    shadow.appendChild(shieldWrap);
+
     let statusText =
       platform === 'weixin'
         ? '视频号就绪 · 请点页面「发表视频」并拖入视频，再点下方一键填表或注入双封面'
@@ -2413,9 +2459,16 @@
 
     function applyHostGeometry() {
       syncPagePushMargin();
+      const isDataPage = getDataCenterContext().isDataMode;
       if (settings.collapsed) {
         hostEl.style.cssText =
           'all: initial; position: fixed; z-index: 2147483646; top: 42%; right: 0; pointer-events: none;';
+        return;
+      }
+      if (isDataPage) {
+        // 数据中心页使用独立紧凑型小面板（不占满全屏高度、不展示底部填表项）
+        const dataW = 328;
+        hostEl.style.cssText = `all: initial; position: fixed; z-index: 2147483646; top: ${settings.floatTop || 64}px; right: 16px; width: ${dataW}px; height: auto; pointer-events: none;`;
         return;
       }
       if (settings.layoutMode === 'dock') {
@@ -2531,6 +2584,929 @@
         if (c.ratio === '4:3') return `款${c.variant} (4:3列表)`;
       }
       return `款${c.variant} (${c.ratio})`;
+    }
+
+    let exportCacheMap = {};
+    let pendingExportConfirm = null; // { dimension: 'account'|'works', lastTs, agoStr, lastFile }
+    let scheduleRadarState = {
+      loading: false,
+      loadedAt: 0,
+      summary: '⏳ 正在连接飞书检查本号最近排期...',
+      hasConflict: false,
+      accountName: '',
+      goldenWindows: [],
+      lastPublished: null,
+      futureScheduled: [],
+      bridgeOffline: false,
+    };
+    let shieldState = {
+      unlockedSig: '',
+      manuallyDismissed: false,
+      syncing: false,
+      conflictPopover: null, // { summary, conflicts, mode, plannedAt, title, body }
+      syncedLabel: '',
+      manualTimeOverride: '',
+    };
+
+    async function loadExportCache() {
+      try {
+        const raw = await xStorageGet(STORAGE_KEY_EXPORT_CACHE, {});
+        exportCacheMap = (typeof raw === 'string' ? JSON.parse(raw) : raw) || {};
+      } catch {
+        exportCacheMap = {};
+      }
+      return exportCacheMap;
+    }
+
+    async function markExportCache(dimension, fileName = '') {
+      const acct = detectLoggedInAccountShort() || '创作者账号';
+      const key = `${platform}|${acct}|${dimension}`;
+      exportCacheMap[key] = {
+        ts: Date.now(),
+        fileName,
+      };
+      await xStorageSet(STORAGE_KEY_EXPORT_CACHE, exportCacheMap);
+    }
+
+    function getExportCacheEntry(dimension) {
+      const acct = detectLoggedInAccountShort() || '创作者账号';
+      return (
+        exportCacheMap[`${platform}|${acct}|${dimension}`] ||
+        exportCacheMap[`${platform}|创作者账号|${dimension}`] ||
+        null
+      );
+    }
+
+    function formatRelativeTime(ts) {
+      if (!ts) return '未导出';
+      const diffMs = Math.max(0, Date.now() - Number(ts));
+      const mins = Math.floor(diffMs / 60000);
+      if (mins < 1) return '刚刚';
+      if (mins < 60) return `${mins}分钟前`;
+      const hrs = diffMs / 3600000;
+      if (hrs < 24) return `${hrs.toFixed(1)}小时前`;
+      const days = Math.floor(hrs / 24);
+      return `${days}天前`;
+    }
+
+    function formatClockHM(ts) {
+      const d = new Date(Number(ts));
+      return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(
+        d.getHours()
+      ).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+
+    // 类正态分布拟人随机等待（Bates 3阶中心极限定理采样，消除机械固定间隔特征）
+    function humanGaussianSleep(minMs, maxMs) {
+      const g = (Math.random() + Math.random() + Math.random()) / 3;
+      const jitter = Math.round(minMs + g * (maxMs - minMs));
+      return new Promise((r) => setTimeout(r, jitter));
+    }
+
+    function getDataCenterContext(href = location.href) {
+      const u = href || '';
+      if (u.includes('creator.xiaohongshu.com/statistics/account')) {
+        return { isDataMode: true, pageKind: 'xhs_account', pageTitle: '小红书 · 账号概览' };
+      }
+      if (u.includes('creator.xiaohongshu.com/statistics')) {
+        return { isDataMode: true, pageKind: 'xhs_works', pageTitle: '小红书 · 笔记数据' };
+      }
+      if (u.includes('creator.douyin.com/creator-micro/data-center/operation')) {
+        return { isDataMode: true, pageKind: 'dy_operation', pageTitle: '抖音 · 数据中心' };
+      }
+      if (u.includes('creator.douyin.com/creator-micro/data-center') || u.includes('creator.douyin.com/creator-micro/data/stats')) {
+        return { isDataMode: true, pageKind: 'dy_works', pageTitle: '抖音 · 作品数据' };
+      }
+      if (u.includes('creator.douyin.com/creator-micro/content/manage')) {
+        return { isDataMode: true, pageKind: 'dy_manage', pageTitle: '抖音 · 作品管理', isDouyinManage: true };
+      }
+      if (u.includes('channels.weixin.qq.com/platform/statistic/follower')) {
+        return { isDataMode: true, pageKind: 'wx_account', pageTitle: '视频号 · 关注者数据' };
+      }
+      if (u.includes('channels.weixin.qq.com/platform/statistic')) {
+        return { isDataMode: true, pageKind: 'wx_post', pageTitle: '视频号 · 动态数据' };
+      }
+      if (u.includes('member.bilibili.com/platform/data-up') || u.includes('member.bilibili.com/platform/upload-manager')) {
+        return { isDataMode: true, pageKind: 'bili_data', pageTitle: 'B站 · 数据中心' };
+      }
+      return { isDataMode: false, pageKind: '', pageTitle: '' };
+    }
+
+    function detectLoggedInAccountShort() {
+      if (settings.exportAccountOverride && settings.exportAccountOverride !== 'auto') {
+        return settings.exportAccountOverride;
+      }
+      const selectors = [
+        '.finder-nickname',
+        '[class*="nickname" i]',
+        '[class*="user-name" i]',
+        '[class*="username" i]',
+        '[class*="account-name" i]',
+        '[class*="author-name" i]',
+        '[class*="creator-name" i]',
+        '[class*="user-info" i]',
+        'header',
+        'aside',
+      ];
+      let combined = '';
+      for (const sel of selectors) {
+        const els = queryDeepAll(sel);
+        for (const el of els.slice(0, 12)) {
+          if (!el || hostEl.contains?.(el)) continue;
+          const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t && t.length <= 260) combined += ' ' + t;
+        }
+      }
+      if (/万物有数|万物皆有数|数见万象/.test(combined)) return '万物有数';
+      if (/靖蜀黍|flyloy|flylog/i.test(combined)) return '靖蜀黍';
+      if (/工程检测/.test(combined)) return '工程检测科普';
+
+      const nickEls = queryDeepAll('.finder-nickname, [class*="nickname" i], [class*="user-name" i], [class*="account-name" i]');
+      for (const el of nickEls) {
+        if (!isVisible(el) || hostEl.contains?.(el)) continue;
+        const clean = (el.textContent || '').replace(/\s+/g, '').replace(/[\\/:*?"<>|]+/g, '').trim();
+        if (clean.length >= 2 && clean.length <= 14 && !/创作|中心|服务|首页|登录|退出|消息|数据/.test(clean)) {
+          return clean;
+        }
+      }
+      return '';
+    }
+
+    function detectActivePeriodLabel(nearEl = null) {
+      const checkRoot = nearEl?.closest?.('section, [class*="card" i], [class*="module" i], [class*="panel" i]') || document;
+      const activeSelectors = [
+        '[class*="active" i]',
+        '[class*="checked" i]',
+        '[class*="selected" i]',
+        '[aria-selected="true"]',
+        '.semi-radio-addon-buttonRadio-checked',
+        '.d-radio-button--checked',
+        '.ant-radio-button-wrapper-checked',
+        '.semi-select-selection-text',
+      ];
+      for (const sel of activeSelectors) {
+        const nodes = queryDeepAll(sel, checkRoot === document ? null : checkRoot);
+        for (const n of nodes) {
+          if (!isVisible(n) || hostEl.contains?.(n)) continue;
+          const txt = (n.textContent || '').replace(/\s+/g, '').trim();
+          const m = txt.match(/近(\d+)[天日]|过去(\d+)[天日]|^(\d+)[天日]$/);
+          if (m) {
+            const days = m[1] || m[2] || m[3];
+            return `近${days}日`;
+          }
+        }
+      }
+      return '';
+    }
+
+    function inferNearbySectionTitle(btnEl) {
+      let cur = btnEl;
+      for (let depth = 0; depth < 7 && cur && cur !== document.body; depth++) {
+        const headings = cur.querySelectorAll?.(
+          'h1, h2, h3, h4, [class*="title" i], [class*="header" i], [class*="card-head" i]'
+        );
+        if (headings && headings.length > 0) {
+          for (const h of headings) {
+            if (h === btnEl || h.contains?.(btnEl)) continue;
+            const txt = (h.textContent || '').replace(/\s+/g, '').trim();
+            if (txt.length >= 2 && txt.length <= 28 && !/导出|下载/.test(txt)) {
+              return txt;
+            }
+          }
+        }
+        cur = cur.parentElement || cur.getRootNode?.()?.host || null;
+      }
+      return '';
+    }
+
+    function pushExportHintToBackground({ btnEl = null, sectionOverride = '', dimension = '', enqueue = false } = {}) {
+      if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) return '';
+      const acct = detectLoggedInAccountShort();
+      const section = sectionOverride || (btnEl ? inferNearbySectionTitle(btnEl) : '');
+      const period = detectActivePeriodLabel(btnEl);
+      try {
+        chrome.runtime.sendMessage({
+          type: 'PPF_SET_EXPORT_HINT',
+          platform,
+          account: acct,
+          section,
+          period,
+          dimension,
+          enqueue,
+        });
+      } catch {
+        // ignore
+      }
+      return acct;
+    }
+
+    function findVisibleExportButtons() {
+      const exportKw = /^(?:导出数据|导出表格|导出明细|导出列表|导出报表|导出Excel|下载数据|下载明细|下载表格|下载报表|下载Excel|数据导出|导出|下载)$/i;
+      const nodes = queryDeepAll('button, a, [role="button"], .weui-desktop-btn, [class*="export" i], [class*="download" i], span, div');
+      const found = [];
+      const seen = new Set();
+
+      for (const el of nodes) {
+        if (!el || el === hostEl || hostEl.contains?.(el)) continue;
+        if (!isVisible(el)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 24 || rect.width > 280 || rect.height < 16 || rect.height > 68) continue;
+
+        const rawTxt = (el.textContent || '').replace(/\s+/g, '').trim();
+        if (!exportKw.test(rawTxt)) continue;
+
+        const clickable =
+          el.closest?.('button, a, [role="button"], .weui-desktop-btn, .d-button, .semi-button, .ant-btn, .el-button') || el;
+        if (!isVisible(clickable) || seen.has(clickable)) continue;
+        const cRect = clickable.getBoundingClientRect();
+        if (cRect.width > 300 || cRect.height > 76) continue;
+
+        seen.add(clickable);
+        found.push({
+          el: clickable,
+          label: rawTxt,
+          section: inferNearbySectionTitle(clickable),
+          top: cRect.top,
+        });
+      }
+      found.sort((a, b) => a.top - b.top);
+      return found;
+    }
+
+    // 针对 B站 member.bilibili.com/platform/data-up/video「近期稿件对比」右上角无文字纯图标导出按钮 [📤]
+    function findBilibiliRecentWorksExportButton() {
+      const all = queryDeepAll('div, span, h2, h3, h4, p');
+      const titleNode = all.find((el) => {
+        if (!el || hostEl.contains?.(el)) return false;
+        const t = (el.textContent || '').replace(/\s+/g, '').trim();
+        return t === '近期稿件对比' && el.children.length === 0;
+      });
+      if (!titleNode) return null;
+
+      let bar = titleNode.parentElement;
+      for (let i = 0; i < 5 && bar && bar !== document.body; i++) {
+        const r = bar.getBoundingClientRect();
+        if (r.width >= 420 && r.height >= 24 && r.height <= 120) {
+          break;
+        }
+        bar = bar.parentElement;
+      }
+      if (!bar) return null;
+
+      const barRect = bar.getBoundingClientRect();
+      // 1. 若有显式导出文字或 title 属性优先匹配
+      const direct = Array.from(bar.querySelectorAll('button, a, [role="button"], div, span')).find((el) => {
+        if (!isVisible(el)) return false;
+        const attr = `${el.getAttribute('title') || ''} ${el.getAttribute('aria-label') || ''} ${(el.textContent || '').trim()}`;
+        return /导出|下载/.test(attr) && el.getBoundingClientRect().width <= 140;
+      });
+      if (direct) return direct;
+
+      // 2. 匹配「近期稿件对比」头部栏最右侧的方形图标按钮（[历史累积数据] [柱状图] [全屏] [📤导出数据]）
+      const iconBtns = Array.from(bar.querySelectorAll('button, [role="button"], [class*="icon" i], [class*="btn" i], span, div'))
+        .filter((el) => {
+          if (!isVisible(el)) return false;
+          const r = el.getBoundingClientRect();
+          if (r.left < barRect.left + barRect.width * 0.65) return false;
+          if (r.width < 22 || r.width > 54 || r.height < 22 || r.height > 50) return false;
+          const txt = (el.textContent || '').replace(/\s+/g, '').trim();
+          return txt === '' && Boolean(el.querySelector('svg, i, img') || el.tagName === 'BUTTON');
+        });
+      const leafIcons = iconBtns.filter((n) => !iconBtns.some((o) => o !== n && n.contains(o)));
+      if (leafIcons.length > 0) {
+        leafIcons.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+        return leafIcons[leafIcons.length - 1];
+      }
+      return null;
+    }
+
+    function triggerBrowserCsvDownload(csvRows, filenamePrefix) {
+      const esc = (v) => {
+        const s = String(v ?? '').replace(/\r?\n/g, ' ').trim();
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csvText = '\uFEFF' + csvRows.map((r) => r.map(esc).join(',')).join('\n') + '\n';
+      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const d = new Date();
+      const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${ymd}_${filenamePrefix}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+      }, 1000);
+      return a.download;
+    }
+
+    function exportDomFallbackCsv(ctx) {
+      if (platform === 'douyin' && ctx?.isDouyinManage) {
+        const cards = queryDeepAll(
+          '[class*="video-card" i], [class*="content-item" i], [class*="item-card" i], [class*="work-card" i], [class*="manage" i] > div'
+        ).filter((el) => {
+          if (!isVisible(el) || hostEl.contains?.(el)) return false;
+          const r = el.getBoundingClientRect();
+          if (r.height < 60 || r.height > 340 || r.width < 360) return false;
+          const t = el.textContent || '';
+          return /(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}|\d{1,2}月\d{1,2}日)\s*\d{1,2}:\d{2}/.test(t);
+        });
+
+        const leafCards = cards.filter((c) => !cards.some((other) => other !== c && c.contains(other)));
+        if (leafCards.length > 0) {
+          const rows = [['作品名称', '发布时间', '审核状态', '播放量', '完播率', '平均播放时长', '点赞量', '评论量', '收藏量', '分享量', '粉丝增量']];
+          const nowYear = new Date().getFullYear();
+          for (const card of leafCards) {
+            const fullText = (card.innerText || card.textContent || '').trim();
+            const lines = fullText.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+            const timeMatch = fullText.match(/(?:(\d{4})[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s*(\d{1,2}:\d{2})/);
+            let pubTime = '';
+            if (timeMatch) {
+              const y = timeMatch[1] || String(nowYear);
+              pubTime = `${y}-${timeMatch[2].padStart(2, '0')}-${timeMatch[3].padStart(2, '0')} ${timeMatch[4]}`;
+            }
+            let audit = '公开';
+            if (/不适宜公开|仅自己可见|审核未通过|未通过/.test(fullText)) {
+              audit = (fullText.match(/不适宜公开|仅自己可见|审核未通过|未通过/) || ['异常'])[0];
+            } else if (/好友可见|互关朋友可见/.test(fullText)) {
+              audit = '好友可见';
+            }
+            const titleLine =
+              lines.find(
+                (l) =>
+                  l.length >= 4 &&
+                  !/^(?:公开|仅自己可见|不适宜公开|置顶|编辑|删除|数据分析|权限设置|查看评论|\d+(?:\.\d+)?[wW万]?)$/.test(l) &&
+                  !/(?:\d{4}[-/.年]|\d{1,2}月\d{1,2}日)\s*\d{1,2}:\d{2}/.test(l)
+              ) || lines[0] || '无标题';
+
+            const grabStat = (kwRe) => {
+              const m = fullText.match(kwRe);
+              return m ? m[1] : '';
+            };
+            const numsAfterTime = fullText
+              .replace(/^[\s\S]*?(?:\d{1,2}:\d{2})/, '')
+              .match(/\b\d+(?:\.\d+)?[wW万]?\b/g) || [];
+            const play = grabStat(/(?:播放|观看)[^\d]{0,4}(\d+(?:\.\d+)?[wW万]?)/) || numsAfterTime[0] || '0';
+            const like = grabStat(/(?:点赞|喜欢)[^\d]{0,4}(\d+(?:\.\d+)?[wW万]?)/) || numsAfterTime[1] || '0';
+            const comm = grabStat(/评论[^\d]{0,4}(\d+(?:\.\d+)?[wW万]?)/) || numsAfterTime[2] || '0';
+            const fav = grabStat(/收藏[^\d]{0,4}(\d+(?:\.\d+)?[wW万]?)/) || numsAfterTime[3] || '0';
+            const share = grabStat(/分享[^\d]{0,4}(\d+(?:\.\d+)?[wW万]?)/) || numsAfterTime[4] || '0';
+
+            rows.push([titleLine, pubTime, audit, play, '', '', like, comm, fav, share, '0']);
+          }
+          const fname = triggerBrowserCsvDownload(rows, '抖音_作品列表导出');
+          return { ok: true, count: leafCards.length, fileName: fname };
+        }
+      }
+      return { ok: false, count: 0, fileName: '' };
+    }
+
+    // 核心安全导表执行器：严格区分 dimension = 'account'（账号）与 'works'（作品），内置 12h 防重二次确认
+    async function runDimensionExport(dimension, { force = false } = {}) {
+      await loadExportCache();
+      const prevEntry = getExportCacheEntry(dimension);
+      if (!force && prevEntry?.ts && Date.now() - Number(prevEntry.ts) < EXPORT_DEDUP_WINDOW_MS) {
+        pendingExportConfirm = {
+          dimension,
+          lastTs: prevEntry.ts,
+          agoStr: formatRelativeTime(prevEntry.ts),
+          clockStr: formatClockHM(prevEntry.ts),
+          lastFile: prevEntry.fileName || '',
+        };
+        render();
+        return false;
+      }
+      pendingExportConfirm = null;
+
+      const ctx = getDataCenterContext();
+      const btns = findVisibleExportButtons();
+
+      // ==================== 1. 导出「账号」数据 ====================
+      if (dimension === 'account') {
+        if (platform === 'xiaohongshu') {
+          if (ctx.pageKind !== 'xhs_account') {
+            setStatus('💡 当前不在「账号概览」页；请先在左侧菜单点「账号概览」再点此导出账号 4 表');
+            return false;
+          }
+          const subNames = ['观看', '互动', '涨粉', '发布'];
+          const tabCands = queryDeepAll('[role="tab"], .d-tab, li, span, div').filter((el) => {
+            if (!isVisible(el) || hostEl.contains?.(el)) return false;
+            const r = el.getBoundingClientRect();
+            return r.width >= 32 && r.width <= 180 && r.height >= 20 && r.height <= 56;
+          });
+          let count = 0;
+          for (let i = 0; i < subNames.length; i++) {
+            const kw = subNames[i];
+            const hitTab = tabCands.find((el) => {
+              const t = (el.textContent || '').replace(/\s+/g, '').trim();
+              return t === `${kw}数据` || t === kw;
+            });
+            if (hitTab) {
+              setStatus(`⏳ 小红书账号存档 (${i + 1}/4)：切换「${kw}数据」（拟人随机延时中）...`);
+              await humanMouseClick(hitTab);
+              await humanGaussianSleep(1650, 2950);
+            }
+            const curBtns = findVisibleExportButtons();
+            if (curBtns.length > 0) {
+              pushExportHintToBackground({ btnEl: curBtns[0].el, sectionOverride: `${kw}数据`, dimension: 'account', enqueue: true });
+              await humanMouseClick(curBtns[0].el);
+              count++;
+              if (i + 1 < subNames.length) {
+                await humanGaussianSleep(2100, 4100);
+              }
+            }
+          }
+          if (count > 0) {
+            await markExportCache('account');
+            setStatus(`✅ 已按随机拟人间隔导出小红书账号 ${count} 张表并自动重命名！`);
+            render();
+            return true;
+          }
+          setStatus('⚠️ 未在当前页找到小红书导出按钮');
+          return false;
+        }
+
+        if (platform === 'douyin') {
+          // 精准只点「作品数据 / 粉丝数据」区域导出按钮，拉黑底下「投稿总结 / 投稿列表」那两张残缺 data.xlsx！
+          const validBtn =
+            btns.find((b) => /作品数据|粉丝数据|数据总览/.test(b.section) && !/投稿总结|投稿列表/.test(b.section)) ||
+            btns.find((b) => !/投稿总结|投稿列表/.test(b.section));
+          if (!validBtn) {
+            setStatus('💡 请在左侧进入「数据中心」概览页，再点「📊 账号」导出短视频全量指标');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: validBtn.el, dimension: 'account', enqueue: true });
+          await humanMouseClick(validBtn.el);
+          await markExportCache('account');
+          setStatus('✅ 已导出抖音账号周期指标并自动重命名！');
+          render();
+          return true;
+        }
+
+        if (platform === 'bilibili') {
+          const trendBtn = btns.find((b) => !/收益|充电|稿件对比/.test(b.section));
+          if (!trendBtn) {
+            setStatus('💡 未找到 B站账号趋势导出按钮（请确认位于「数据中心」顶部趋势区）');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: trendBtn.el, sectionOverride: '播放互动趋势', dimension: 'account', enqueue: true });
+          await humanMouseClick(trendBtn.el);
+          await markExportCache('account');
+          setStatus('✅ 已导出 B站账号趋势表并自动重命名！');
+          render();
+          return true;
+        }
+
+        if (platform === 'weixin') {
+          if (btns.length === 0) {
+            setStatus('💡 请在左侧点「关注者数据」或「动态数据-动态分析」再导出账号表');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: btns[0].el, dimension: 'account', enqueue: true });
+          await humanMouseClick(btns[0].el);
+          await markExportCache('account');
+          setStatus('✅ 已导出视频号账号表并自动重命名！');
+          render();
+          return true;
+        }
+      }
+
+      // ==================== 2. 导出「作品」数据 ====================
+      if (dimension === 'works') {
+        if (platform === 'xiaohongshu') {
+          if (ctx.pageKind !== 'xhs_works') {
+            setStatus('💡 当前不在「笔记数据」页；请在左侧点「内容分析 / 笔记数据」再导作品明细表');
+            return false;
+          }
+          if (btns.length === 0) {
+            setStatus('⚠️ 未找到小红书「导出数据」按钮');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: btns[0].el, sectionOverride: '笔记列表明细表', dimension: 'works', enqueue: true });
+          await humanMouseClick(btns[0].el);
+          await markExportCache('works');
+          setStatus('✅ 已导出小红书《笔记列表明细表》并自动重命名！');
+          render();
+          return true;
+        }
+
+        if (platform === 'douyin') {
+          if (ctx.isDouyinManage && btns.length === 0) {
+            pushExportHintToBackground({ sectionOverride: '作品列表导出', dimension: 'works', enqueue: true });
+            const fb = exportDomFallbackCsv(ctx);
+            if (fb.ok) {
+              await markExportCache('works', fb.fileName);
+              setStatus(`✅ 已导出抖音作品管理列表 (${fb.count} 条) 并自动重命名！`);
+              render();
+              return true;
+            }
+          }
+          // 检查是否还停留在「数据总览 / 运营数据」首页（右上角有「查看所有作品」且表头无完播率/5s完播率）
+          const hasViewAllWorksLink = queryDeepAll('a, span, div').some(
+            (el) => isVisible(el) && /^查看所有作品/.test((el.textContent || '').replace(/\s+/g, '').trim())
+          );
+          const thText = queryDeepAll('th, [class*="thead" i]').map((e) => e.textContent || '').join(' ');
+          const isFull16ColTable = /审核状态|封面点击率|粉丝增量|收藏量/.test(thText);
+
+          if (ctx.pageKind === 'dy_operation' && hasViewAllWorksLink && !isFull16ColTable) {
+            setStatus('💡 请先手点页面右上角「查看所有作品 >」展开全量作品列表，再点「🎬 作品」导 16 列完整明细（已自动避开底部残缺表）');
+            return false;
+          }
+
+          const workBtn = btns.find((b) => !/投稿总结/.test(b.section)) || btns[0];
+          if (!workBtn) {
+            setStatus('💡 请先点入「查看所有作品 >」或「作品数据」列表页，再点「🎬 作品」导出');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: workBtn.el, sectionOverride: '作品列表导出', dimension: 'works', enqueue: true });
+          await humanMouseClick(workBtn.el);
+          await markExportCache('works');
+          setStatus('✅ 已导出抖音《作品列表导出》并自动重命名！');
+          render();
+          return true;
+        }
+
+        if (platform === 'bilibili') {
+          const biliIconBtn = findBilibiliRecentWorksExportButton();
+          if (biliIconBtn) {
+            const br = biliIconBtn.getBoundingClientRect();
+            if (br.top < 0 || br.bottom > window.innerHeight) {
+              biliIconBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              await humanGaussianSleep(550, 880);
+            }
+            pushExportHintToBackground({ btnEl: biliIconBtn, sectionOverride: '近期稿件对比', dimension: 'works', enqueue: true });
+            await humanMouseClick(biliIconBtn);
+            await markExportCache('works');
+            setStatus('✅ 已点击 B站「近期稿件对比」右上导出图标并自动重命名！');
+            render();
+            return true;
+          }
+          setStatus('💡 请在左侧进入「稿件数据」(data-up/video) 向下看「近期稿件对比」模块再点导出');
+          return false;
+        }
+
+        if (platform === 'weixin') {
+          if (ctx.pageKind === 'wx_account') {
+            setStatus('💡 当前是「关注者数据」；请在左侧点「动态数据 → 单篇动态」再导作品明细');
+            return false;
+          }
+          const tableText = queryDeepAll('th, thead').map((e) => e.textContent || '').join(' ');
+          const activeTabsText = queryDeepAll('[class*="active" i], [aria-selected="true"]')
+            .filter((e) => isVisible(e))
+            .map((e) => (e.textContent || '').trim())
+            .join(' ');
+          const isSinglePostView = /视频描述|完播率/.test(tableText) || /单篇动态/.test(activeTabsText);
+          if (!isSinglePostView) {
+            setStatus('💡 当前停在按天趋势视图；请先手点页面上方「单篇动态」Tab，再点「🎬 作品」导出！');
+            return false;
+          }
+          if (btns.length === 0) {
+            setStatus('⚠️ 未找到视频号单篇动态「导出数据」按钮');
+            return false;
+          }
+          pushExportHintToBackground({ btnEl: btns[0].el, sectionOverride: '动态数据明细', dimension: 'works', enqueue: true });
+          await humanMouseClick(btns[0].el);
+          await markExportCache('works');
+          setStatus('✅ 已导出视频号《动态数据明细》并自动重命名！');
+          render();
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    async function runArchiveDownloadsToAihub() {
+      setStatus('⏳ 正在将 ~/Downloads 新导出的报表去重归档至 AIHub 对应账号目录...');
+      const brandMap = {
+        万物有数: '万物皆有数',
+        靖蜀黍: '靖蜀黍·个人IP',
+        工程检测科普: '工程检测科普',
+      };
+      const acct = detectLoggedInAccountShort();
+      const brandArg =
+        settings.exportAccountOverride !== 'auto' && brandMap[settings.exportAccountOverride]
+          ? brandMap[settings.exportAccountOverride]
+          : brandMap[acct] || 'auto';
+      try {
+        const res = await gmPostJson(`${settings.bridgeUrl}/api/archive-downloads`, {
+          brand: brandArg,
+          hours: 24,
+          move: false,
+        });
+        if (res && res.ok) {
+          if (res.archived_count > 0) {
+            setStatus(`🎉 已归档 ${res.archived_count} 份报表至 ${res.dest_dir}！直接跟 AI 说「清洗数据入飞书」`);
+          } else {
+            setStatus('ℹ️ 最近 24 小时 ~/Downloads 中未发现待归档的四平台导出表');
+          }
+        }
+      } catch (err) {
+        setStatus(`💡 本地桥接未开 (${err?.message || '8765'})：文件留在 ~/Downloads 即可，跟 AI 说「清洗数据入飞书」会自动归档！`);
+      }
+    }
+
+    // ==================== 发布页：只读探测发布按钮与定时时间 + 飞书排期防撞沙箱护盾 ====================
+    function locateNativePublishButton() {
+      if (getDataCenterContext().isDataMode) return null;
+      const u = location.href;
+      // 仅在四平台真实上传/发布路由生效
+      const isPubRoute =
+        u.includes('creator.xiaohongshu.com/publish') ||
+        u.includes('creator.douyin.com/creator-micro/content/upload') ||
+        u.includes('creator.douyin.com/creator-micro/content/post') ||
+        u.includes('channels.weixin.qq.com/platform/post') ||
+        u.includes('member.bilibili.com/platform/upload');
+      if (!isPubRoute) return null;
+
+      const labelRe =
+        platform === 'weixin'
+          ? /^(?:发表|定时发表)$/
+          : platform === 'bilibili'
+          ? /^(?:立即投稿|定时投稿|提交稿件)$/
+          : /^(?:发布|定时发布|立即发布)$/;
+
+      const cands = queryDeepAll('button, [role="button"], .weui-desktop-btn');
+      const hits = [];
+      for (const el of cands) {
+        if (!el || el === hostEl || hostEl.contains?.(el)) continue;
+        if (!isVisible(el)) continue;
+        const r = el.getBoundingClientRect();
+        // 排除顶部导航栏（如左上角「发布作品」菜单）或过小/过大容器
+        if (r.top < 140 || r.left < 180 || r.width < 64 || r.width > 280 || r.height < 28 || r.height > 66) continue;
+        const txt = (el.textContent || '').replace(/\s+/g, '').trim();
+        if (!labelRe.test(txt)) continue;
+        // 排除单选框 label（如「立即发布」radio 文字本身不是 button）
+        if (el.querySelector?.('input[type="radio"], input[type="checkbox"]')) continue;
+        hits.push({ el, rect: r, text: txt });
+      }
+      if (!hits.length) return null;
+      // 优先选择位于页面较下方的主提交按钮
+      hits.sort((a, b) => b.rect.top - a.rect.top);
+      return hits[0];
+    }
+
+    function detectPagePublishModeAndTime() {
+      if (shieldState.manualTimeOverride) {
+        return { mode: 'scheduled', plannedAt: shieldState.manualTimeOverride, source: '手动指定' };
+      }
+      // 只读扫描页面上可见的定时时间输入框（四平台均仅在开启「定时发布」时才挂载/显示日期时间选择器！）
+      const inputs = queryDeepAll('input');
+      const nowYear = new Date().getFullYear();
+      let foundDatePart = '';
+      let foundTimePart = '';
+
+      for (const inp of inputs) {
+        if (!isVisible(inp) || hostEl.contains?.(inp)) continue;
+        const val = (inp.value || inp.getAttribute('value') || '').trim();
+        if (!val) continue;
+        const fullMatch = val.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s+(\d{1,2}:\d{2})/);
+        if (fullMatch) {
+          const y = fullMatch[1] || String(nowYear);
+          const m = fullMatch[2].padStart(2, '0');
+          const d = fullMatch[3].padStart(2, '0');
+          return { mode: 'scheduled', plannedAt: `${y}-${m}-${d} ${fullMatch[4]}`, source: '页面定时框' };
+        }
+        const dateOnly = val.match(/^(202\d)[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+        if (dateOnly) {
+          foundDatePart = `${dateOnly[1]}-${dateOnly[2].padStart(2, '0')}-${dateOnly[3].padStart(2, '0')}`;
+        }
+        const timeOnly = val.match(/^(\d{1,2}:\d{2})(?::\d{2})?$/);
+        if (timeOnly) {
+          foundTimePart = timeOnly[1];
+        }
+      }
+      if (foundDatePart && foundTimePart) {
+        return { mode: 'scheduled', plannedAt: `${foundDatePart} ${foundTimePart}`, source: '页面定时框' };
+      }
+
+      // 兼容非 input 文本型日期选择器（如视频号/Semi Popover 渲染在 span 里的时间文本）
+      const schedContainers = queryDeepAll('[class*="schedule" i], [class*="timer" i], [class*="timing" i], .semi-datepicker, .el-date-editor, .weui-desktop-picker');
+      for (const box of schedContainers) {
+        if (!isVisible(box) || hostEl.contains?.(box)) continue;
+        const txt = (box.textContent || '').replace(/\s+/g, ' ').trim();
+        const m = txt.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s*(\d{1,2}:\d{2})/);
+        if (m) {
+          const y = m[1] || String(nowYear);
+          return {
+            mode: 'scheduled',
+            plannedAt: `${y}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')} ${m[4]}`,
+            source: '页面定时组件',
+          };
+        }
+      }
+
+      return { mode: 'immediate', plannedAt: '', source: '立即发布' };
+    }
+
+    function readCurrentFormTitleAndBody() {
+      const pData = currentPack.platforms?.[platform] || {};
+      const { titleInput, bodyEditor, shortTitleInput } = locatePlatformFields(platform);
+      let actualTitle = '';
+      if (platform === 'weixin' && shortTitleInput?.value) {
+        actualTitle = shortTitleInput.value.trim();
+      } else if (titleInput?.value) {
+        actualTitle = titleInput.value.trim();
+      }
+      if (!actualTitle) {
+        actualTitle =
+          platform === 'weixin'
+            ? pData.shortTitleClean || pData.shortTitleRaw || currentPack.meta?.packTitle || ''
+            : pData.title || currentPack.meta?.packTitle || '';
+      }
+
+      let actualBody = '';
+      if (bodyEditor) {
+        actualBody = (bodyEditor.value ?? bodyEditor.innerText ?? bodyEditor.textContent ?? '').trim();
+      }
+      if (!actualBody) {
+        actualBody = pData.body || '';
+      }
+      return { actualTitle, actualBody };
+    }
+
+    async function refreshFeishuScheduleRadar(silent = true) {
+      if (getDataCenterContext().isDataMode) return;
+      scheduleRadarState.loading = true;
+      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
+      const work = currentPack.meta?.baseDir || currentPack.meta?.packTitle || '';
+      const schedInfo = detectPagePublishModeAndTime();
+      const qs = new URLSearchParams({
+        platform,
+        account: acct,
+        work,
+        plannedAt: schedInfo.plannedAt || '',
+      });
+      try {
+        const res = await gmRequestJson(`${settings.bridgeUrl}/api/schedule-check?${qs.toString()}`);
+        if (res && res.ok) {
+          scheduleRadarState = {
+            loading: false,
+            loadedAt: Date.now(),
+            summary: res.summary || '🟢 已同步飞书排期状态',
+            hasConflict: Boolean(res.has_conflict),
+            accountName: res.account_name || '',
+            goldenWindows: res.golden_windows || [],
+            lastPublished: res.last_published || null,
+            futureScheduled: res.future_scheduled || [],
+            bridgeOffline: false,
+          };
+          if (!silent) setStatus(res.summary);
+          render();
+        }
+      } catch {
+        scheduleRadarState.loading = false;
+        scheduleRadarState.bridgeOffline = true;
+        scheduleRadarState.summary = 'ℹ️ 本地桥接(8765)未启动：启动 serve_pack.py 后自动检查同账号 6h 撞车排期';
+        if (!silent) render();
+      }
+    }
+
+    async function syncPublishToFeishuAndUnlock({ force = false } = {}) {
+      if (shieldState.syncing) return;
+      shieldState.syncing = true;
+      updatePublishShieldOverlay();
+
+      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
+      const schedInfo = detectPagePublishModeAndTime();
+      const { actualTitle, actualBody } = readCurrentFormTitleAndBody();
+      const work = currentPack.meta?.baseDir || currentPack.meta?.packTitle || '';
+      const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
+
+      setStatus('⏳ 正在向飞书校验同号排期并同步本次发布时间...');
+      try {
+        const res = await gmPostJson(`${settings.bridgeUrl}/api/record-publish`, {
+          platform,
+          account: acct,
+          mode: schedInfo.mode,
+          plannedAt: schedInfo.plannedAt,
+          work,
+          title: actualTitle,
+          body: actualBody,
+          force,
+        });
+
+        shieldState.syncing = false;
+        if (res?.needs_confirm) {
+          shieldState.conflictPopover = {
+            summary: res.summary || '🚨 检测到 6 小时内存在排期冲突！',
+            conflicts: res.conflicts || [],
+            mode: schedInfo.mode,
+            plannedAt: schedInfo.plannedAt,
+          };
+          setStatus(res.summary || '🚨 排期冲突，请确认或修改定时发布时间');
+          updatePublishShieldOverlay();
+          render();
+          return false;
+        }
+
+        if (res?.saved) {
+          shieldState.conflictPopover = null;
+          shieldState.unlockedSig = curSig;
+          shieldState.syncedLabel =
+            schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
+          scheduleRadarState.summary = res.summary || '✅ 已写入飞书 C 发布记录表';
+          scheduleRadarState.hasConflict = false;
+          setStatus(`${res.summary} · 护盾已解锁，请亲手点击原网页「发布」按钮！`);
+          updatePublishShieldOverlay();
+          render();
+          return true;
+        }
+      } catch (err) {
+        shieldState.syncing = false;
+        setStatus(`⚠️ 无法连接飞书桥接 (8765: ${err?.message || err})；可启动 serve_pack.py 重试，或点护盾右侧 × 临时解锁`);
+        updatePublishShieldOverlay();
+      }
+      return false;
+    }
+
+    // 实时对齐原生「发布」按钮几何坐标（位于 closed ShadowRoot 内部，宿主网页 DOM 零接触、零事件拦截）
+    function updatePublishShieldOverlay() {
+      const target = locateNativePublishButton();
+      if (!target) {
+        if (shieldWrap.innerHTML !== '') shieldWrap.innerHTML = '';
+        return;
+      }
+
+      const schedInfo = detectPagePublishModeAndTime();
+      const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
+      const isUnlocked = shieldState.manuallyDismissed || (shieldState.unlockedSig && shieldState.unlockedSig === curSig);
+      const r = target.rect;
+
+      // 已同步解锁状态：护盾完全让开（pointer-events: none），仅在按钮上方轻浮一行不挡鼠标的绿字提示
+      if (isUnlocked) {
+        shieldWrap.innerHTML = `
+          <div style="position:fixed; left:${Math.max(8, Math.round(r.left - 4))}px; top:${Math.max(
+          8,
+          Math.round(r.top - 26)
+        )}px; z-index:2147483647; pointer-events:none; background:rgba(5,150,105,0.94); color:#fff; font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; white-space:nowrap; box-shadow:0 3px 10px rgba(5,150,105,0.25);">
+            ✅ ${shieldState.manuallyDismissed ? '已临时移开护盾' : `已同步飞书(${shieldState.syncedLabel})`} · 请亲手点下方「${target.text}」
+          </div>
+        `;
+        return;
+      }
+
+      const modeTag = schedInfo.mode === 'scheduled' ? `⏰ 定时 ${schedInfo.plannedAt.slice(5)}` : '⚡ 立即发布';
+      const w = Math.max(Math.round(r.width + 8), 196);
+      const h = Math.max(Math.round(r.height + 6), 38);
+      const left = Math.max(8, Math.round(r.left - 4));
+      const top = Math.max(8, Math.round(r.top - 3));
+
+      const conflictHtml = shieldState.conflictPopover
+        ? `<div style="position:fixed; left:${Math.max(8, left - 24)}px; top:${Math.max(
+            12,
+            top - 122
+          )}px; width:310px; z-index:2147483647; pointer-events:auto; background:#fff1f2; border:1.5px solid #e11d48; color:#9f1239; border-radius:10px; padding:10px 11px; box-shadow:0 10px 28px rgba(225,29,72,0.24); font-size:12px; line-height:1.45;">
+            <div style="font-weight:700; margin-bottom:6px;">${shieldState.conflictPopover.summary}</div>
+            <div style="display:flex; gap:6px; justify-content:flex-end;">
+              <button id="ppf-shield-cancel-conf" style="background:#fff; color:#1f2329; border:1px solid rgba(0,0,0,0.15); border-radius:6px; padding:4px 9px; font-size:11.5px; cursor:pointer; font-weight:600;">去改定时时间</button>
+              <button id="ppf-shield-force-conf" style="background:#e11d48; color:#fff; border:none; border-radius:6px; padding:4px 9px; font-size:11.5px; cursor:pointer; font-weight:700;">已知风险·仍同步解锁</button>
+            </div>
+          </div>`
+        : '';
+
+      shieldWrap.innerHTML = `
+        ${conflictHtml}
+        <div style="position:fixed; left:${left}px; top:${top}px; width:${w}px; height:${h}px; z-index:2147483647; pointer-events:auto; display:flex; align-items:stretch; border-radius:8px; overflow:hidden; box-shadow:0 4px 16px rgba(5,150,105,0.34); border:1.5px solid #047857; background:linear-gradient(135deg, #059669, #047857);">
+          <button id="ppf-shield-sync-btn" style="flex:1; background:transparent; color:#fff; border:none; padding:0 9px; font-size:12px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; white-space:nowrap;" title="先将本次发布方式与时间写入飞书 C 发布记录表并校验 6h 排期冲突，随后自动露底由您亲手点发布">
+            ${shieldState.syncing ? '⏳ 校验同步中...' : `🔒 同步飞书解锁 (${modeTag})`}
+          </button>
+          <button id="ppf-shield-dismiss-btn" style="width:24px; background:rgba(0,0,0,0.16); color:rgba(255,255,255,0.85); border:none; border-left:1px solid rgba(255,255,255,0.2); font-size:12px; cursor:pointer; display:flex; align-items:center; justify-content:center;" title="临时移开护盾（离线时跳过飞书同步）">×</button>
+        </div>
+      `;
+
+      const syncBtn = shieldWrap.querySelector('#ppf-shield-sync-btn');
+      if (syncBtn) {
+        syncBtn.onclick = (e) => {
+          e.stopPropagation();
+          syncPublishToFeishuAndUnlock({ force: false });
+        };
+      }
+      const disBtn = shieldWrap.querySelector('#ppf-shield-dismiss-btn');
+      if (disBtn) {
+        disBtn.onclick = (e) => {
+          e.stopPropagation();
+          shieldState.manuallyDismissed = true;
+          updatePublishShieldOverlay();
+        };
+      }
+      const cancelConf = shieldWrap.querySelector('#ppf-shield-cancel-conf');
+      if (cancelConf) {
+        cancelConf.onclick = (e) => {
+          e.stopPropagation();
+          shieldState.conflictPopover = null;
+          updatePublishShieldOverlay();
+        };
+      }
+      const forceConf = shieldWrap.querySelector('#ppf-shield-force-conf');
+      if (forceConf) {
+        forceConf.onclick = (e) => {
+          e.stopPropagation();
+          syncPublishToFeishuAndUnlock({ force: true });
+        };
+      }
     }
 
     let showPasteDrawer = false;
@@ -2875,19 +3851,211 @@
       buildStyles();
       rootWrap.innerHTML = '';
 
+      const dataCtx = getDataCenterContext();
+      if (dataCtx.isDataMode) {
+        if (shieldWrap.innerHTML !== '') shieldWrap.innerHTML = '';
+      } else {
+        updatePublishShieldOverlay();
+      }
+
       if (settings.collapsed) {
+        const wrapCol = document.createElement('div');
+        wrapCol.style.cssText = 'display:flex; flex-direction:column; align-items:flex-end; gap:6px; pointer-events:auto;';
+        if (dataCtx.isDataMode) {
+          const mkMiniBtn = (label, dim) => {
+            const b = document.createElement('button');
+            b.style.cssText =
+              'padding:8px 11px; background:#059669; color:#fff; border:none; border-radius:10px 0 0 10px; font-size:12px; font-weight:700; cursor:pointer; box-shadow:-4px 4px 12px rgba(5,150,105,0.26); white-space:nowrap;';
+            b.textContent = label;
+            b.onclick = async (ev) => {
+              ev.stopPropagation();
+              settings.collapsed = false;
+              saveSettings(settings);
+              render();
+              await runDimensionExport(dim, { force: false });
+            };
+            return b;
+          };
+          wrapCol.appendChild(mkMiniBtn('📊 账号', 'account'));
+          wrapCol.appendChild(mkMiniBtn('🎬 作品', 'works'));
+        }
         const tab = document.createElement('div');
         tab.className = 'ppf-collapsed-tab';
-        tab.title = '点击展开全平台半自动发布助手（快捷键 Alt+S）';
-        tab.innerHTML = `<span class="ppf-dot"></span><span>全平台半自动发布助手</span>`;
+        tab.title = '点击展开面板（快捷键 Alt+S）';
+        tab.innerHTML = `<span class="ppf-dot" style="${dataCtx.isDataMode ? 'background:#059669;' : ''}"></span><span>${
+          dataCtx.isDataMode ? '数据导出助手' : '半自动发布助手'
+        }</span>`;
         tab.onclick = () => {
           settings.collapsed = false;
           saveSettings(settings);
           render();
         };
-        rootWrap.appendChild(tab);
+        wrapCol.appendChild(tab);
+        rootWrap.appendChild(wrapCol);
         return;
       }
+
+      // ==================== 独立面板一：纯「数据安全导出面板」（完全隐藏底部填表组件） ====================
+      if (dataCtx.isDataMode) {
+        const autoAcct = detectLoggedInAccountShort();
+        const curOverride = settings.exportAccountOverride || 'auto';
+        const acctCache = getExportCacheEntry('account');
+        const worksCache = getExportCacheEntry('works');
+        const acctSub = acctCache?.ts ? `上次：${formatRelativeTime(acctCache.ts)}` : '上次：未导出';
+        const worksSub = worksCache?.ts ? `上次：${formatRelativeTime(worksCache.ts)}` : '上次：未导出';
+        const dimLabel = pendingExportConfirm?.dimension === 'account' ? '账号' : '作品';
+
+        const dataShell = document.createElement('div');
+        dataShell.className = 'ppf-shell';
+        dataShell.innerHTML = `
+          <div class="ppf-ear" id="ppf-ear-collapse" title="贴边收起面板 (Alt+S)">❯</div>
+          <div class="ppf-wrap" style="border-radius:14px; border:1.5px solid rgba(5,150,105,0.32);">
+            <div class="ppf-head" id="ppf-data-drag" style="cursor:move;">
+              <div class="ppf-head-title">
+                <span class="ppf-badge" style="background:#059669;">📊 数据导出</span>
+                <span style="overflow:hidden; text-overflow:ellipsis;">${dataCtx.pageTitle}</span>
+              </div>
+              <div class="ppf-row-nowrap">
+                <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换深浅皮肤">${
+                  settings.theme === 'light' ? '🌙' : '☀️'
+                }</button>
+                <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">❯</button>
+              </div>
+            </div>
+
+            <div class="ppf-body" style="gap:9px; padding:11px 12px;">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11.5px; opacity:0.8; font-weight:600;">归属账号重命名：</span>
+                <select id="ppf-export-acct" class="ppf-select" style="width:auto; flex:1; font-weight:600; padding:4px 7px;">
+                  <option value="auto" ${curOverride === 'auto' ? 'selected' : ''}>自动识别${
+          autoAcct && curOverride === 'auto' ? ` (${autoAcct})` : ''
+        }</option>
+                  <option value="万物有数" ${curOverride === '万物有数' ? 'selected' : ''}>万物有数</option>
+                  <option value="靖蜀黍" ${curOverride === '靖蜀黍' ? 'selected' : ''}>靖蜀黍</option>
+                  <option value="工程检测科普" ${curOverride === '工程检测科普' ? 'selected' : ''}>工程检测科普</option>
+                </select>
+              </div>
+
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                <button class="ppf-btn" id="ppf-btn-exp-account" style="background:#059669; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
+                  <span style="font-size:14px; font-weight:700;">📊 账号</span>
+                  <span style="font-size:10.5px; opacity:0.9; font-weight:400;">${acctSub}</span>
+                </button>
+                <button class="ppf-btn" id="ppf-btn-exp-works" style="background:#0284c7; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
+                  <span style="font-size:14px; font-weight:700;">🎬 作品</span>
+                  <span style="font-size:10.5px; opacity:0.9; font-weight:400;">${worksSub}</span>
+                </button>
+              </div>
+
+              ${
+                pendingExportConfirm
+                  ? `<div style="background:#fffbeb; border:1.5px solid #f59e0b; color:#92400e; border-radius:9px; padding:8px 10px; font-size:11.5px; line-height:1.45;">
+                      <div style="font-weight:700; margin-bottom:5px;">
+                        ⚠️ 12小时防重提醒：「${dimLabel}」在 ${pendingExportConfirm.agoStr}（${pendingExportConfirm.clockStr}）刚导出过，确定重新导出吗？
+                      </div>
+                      <div style="display:flex; justify-content:flex-end; gap:6px;">
+                        <button class="ppf-btn" id="ppf-exp-conf-cancel" style="padding:3px 9px; font-size:11.5px;">取消</button>
+                        <button class="ppf-btn" id="ppf-exp-conf-ok" style="background:#d97706; color:#fff; border:none; padding:3px 10px; font-size:11.5px; font-weight:700;">确认重导</button>
+                      </div>
+                    </div>`
+                  : ''
+              }
+
+              <button class="ppf-btn ppf-btn-block" id="ppf-archive-dl" style="border-color:rgba(5,150,105,0.4); color:#059669; font-weight:600; padding:6px 10px;">
+                📂 归档 ~/Downloads 报表到 AIHub
+              </button>
+
+              <div class="ppf-status" id="ppf-status-line" style="font-size:11.5px;">${
+                statusText.includes('就绪') ? '🛡️ 安全单点导出 · 下载落盘自动重命名' : statusText
+              }</div>
+            </div>
+          </div>
+        `;
+        rootWrap.appendChild(dataShell);
+
+        const toggleCollapseData = () => {
+          settings.collapsed = true;
+          saveSettings(settings);
+          render();
+        };
+        shadow.getElementById('ppf-collapse-btn').onclick = toggleCollapseData;
+        shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapseData;
+        shadow.getElementById('ppf-toggle-theme').onclick = () => {
+          settings.theme = settings.theme === 'light' ? 'dark' : 'light';
+          saveSettings(settings);
+          render();
+        };
+        shadow.getElementById('ppf-export-acct').onchange = (e) => {
+          settings.exportAccountOverride = e.target.value;
+          saveSettings(settings);
+          pendingExportConfirm = null;
+          pushExportHintToBackground({ enqueue: false });
+          render();
+        };
+        const btnAcc = shadow.getElementById('ppf-btn-exp-account');
+        btnAcc.onclick = async () => {
+          btnAcc.disabled = true;
+          try {
+            await runDimensionExport('account', { force: false });
+          } finally {
+            btnAcc.disabled = false;
+          }
+        };
+        const btnWrk = shadow.getElementById('ppf-btn-exp-works');
+        btnWrk.onclick = async () => {
+          btnWrk.disabled = true;
+          try {
+            await runDimensionExport('works', { force: false });
+          } finally {
+            btnWrk.disabled = false;
+          }
+        };
+        const confCancel = shadow.getElementById('ppf-exp-conf-cancel');
+        if (confCancel) {
+          confCancel.onclick = () => {
+            pendingExportConfirm = null;
+            render();
+          };
+        }
+        const confOk = shadow.getElementById('ppf-exp-conf-ok');
+        if (confOk) {
+          confOk.onclick = async () => {
+            const targetDim = pendingExportConfirm?.dimension || 'works';
+            pendingExportConfirm = null;
+            render();
+            await runDimensionExport(targetDim, { force: true });
+          };
+        }
+        const archBtn = shadow.getElementById('ppf-archive-dl');
+        archBtn.onclick = async () => {
+          archBtn.disabled = true;
+          try {
+            await runArchiveDownloadsToAihub();
+          } finally {
+            archBtn.disabled = false;
+          }
+        };
+        const dataDrag = shadow.getElementById('ppf-data-drag');
+        dataDrag.onmousedown = (e) => {
+          if (e.target.closest('button, select')) return;
+          const startY = e.clientY;
+          const initTop = settings.floatTop || 64;
+          const onMove = (me) => {
+            settings.floatTop = Math.max(8, Math.min(window.innerHeight - 160, initTop + (me.clientY - startY)));
+            applyHostGeometry();
+          };
+          const onUp = () => {
+            saveSettings(settings);
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        };
+        return;
+      }
+
+      // ==================== 独立面板二：「发布填表与排期防撞面板」 ====================
 
       const pData = currentPack.platforms?.[platform] || {};
       const activeContentType = pData.contentType || currentPack.meta?.contentType || 'video';
@@ -2977,6 +4145,35 @@
           </div>
 
           <div class="ppf-body">
+            ${(() => {
+              const schedInfo = detectPagePublishModeAndTime();
+              const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
+              const isUnlocked =
+                shieldState.manuallyDismissed || (shieldState.unlockedSig && shieldState.unlockedSig === curSig);
+              const radarBorder = scheduleRadarState.hasConflict ? '#e11d48' : '#059669';
+              const radarBg = scheduleRadarState.hasConflict ? 'rgba(225,29,72,0.06)' : 'rgba(5,150,105,0.06)';
+              return `<div class="ppf-sec" style="border:1.5px solid ${radarBorder}; background:${radarBg}; gap:6px;">
+                <div class="ppf-sec-hd" style="color:${radarBorder};">
+                  <span>🚦 飞书排期防撞 · ${
+                    schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布'
+                  }</span>
+                  <button class="ppf-icon-btn" id="ppf-refresh-radar" title="重新查询飞书排期">🔄</button>
+                </div>
+                <div style="font-size:11.5px; line-height:1.42; font-weight:500;">${scheduleRadarState.summary}</div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-pub" style="flex:1; background:${
+                    isUnlocked ? '#10b981' : '#059669'
+                  }; color:#fff; border:none; font-weight:700; padding:6px 10px;">
+                    ${
+                      isUnlocked
+                        ? '✅ 已同步飞书（原生发布钮已解锁）'
+                        : '🔒 1. 同步发布信息到飞书 → 解锁发布钮'
+                    }
+                  </button>
+                </div>
+              </div>`;
+            })()}
+
             <!-- 精简成品包栏 -->
             <div class="ppf-pack-bar" id="ppf-dropzone">
               <div class="ppf-pack-name" title="${currentPack.meta?.packTitle || ''}">
@@ -3256,7 +4453,16 @@
         }
       }
 
-      // 顶部栏按钮
+      // 顶部栏与飞书排期防撞雷达按钮绑定
+      const refreshRadarBtn = shadow.getElementById('ppf-refresh-radar');
+      if (refreshRadarBtn) {
+        refreshRadarBtn.onclick = () => refreshFeishuScheduleRadar(false);
+      }
+      const panelSyncPubBtn = shadow.getElementById('ppf-panel-sync-pub');
+      if (panelSyncPubBtn) {
+        panelSyncPubBtn.onclick = () => syncPublishToFeishuAndUnlock({ force: false });
+      }
+
       shadow.getElementById('ppf-toggle-theme').onclick = () => {
         settings.theme = settings.theme === 'light' ? 'dark' : 'light';
         saveSettings(settings);
@@ -3670,7 +4876,7 @@
       }
     });
 
-    // Chrome 插件模式下：当其它标签页载入了新成品包，或点击右上角插件弹窗切换折叠状态时，本页免刷新实时热同步！
+    // Chrome 插件模式下：当其它标签页载入了新成品包、更新了导出缓存，或切换折叠状态时，本页免刷新实时热同步！
     if (IS_CHROME_EXT && chrome.storage?.onChanged) {
       chrome.storage.onChanged.addListener(async (changes, areaName) => {
         if (areaName !== 'local' || suppressStorageEcho) return;
@@ -3679,10 +4885,15 @@
           settings = await loadSettings();
           needRender = true;
         }
+        if (changes[STORAGE_KEY_EXPORT_CACHE]) {
+          await loadExportCache();
+          needRender = true;
+        }
         if (changes[STORAGE_KEY_PACK]) {
           currentPack = await loadPackState();
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
+          shieldState.unlockedSig = '';
           setStatus(`🔄 已同步发布包：${currentPack.meta?.packTitle || ''}`);
           needRender = true;
         } else if (Object.keys(changes).some((k) => k.startsWith(CROSS_COVER_PREFIX))) {
@@ -3694,10 +4905,74 @@
       });
     }
 
+    await loadExportCache();
     hydrateCoversFromBlobs().then((changed) => {
       if (changed) render();
     });
     render();
+    setTimeout(() => {
+      pushExportHintToBackground({ enqueue: false });
+      if (!getDataCenterContext().isDataMode) {
+        refreshFeishuScheduleRadar(true);
+      }
+    }, 1500);
+
+    // 即使手动直接点网页原生的「导出数据 / 下载明细」按钮，也在按下瞬间同步当前账号与板块名，让后台自动重命名与 12h 缓存生效！
+    document.addEventListener(
+      'mousedown',
+      (e) => {
+        const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target];
+        const firstEl = path.find((n) => n && n.nodeType === 1);
+        if (!firstEl || hostEl.contains?.(firstEl)) return;
+        const btn = firstEl.closest?.('button, a, [role="button"], .weui-desktop-btn, span, div') || firstEl;
+        const txt = (btn.textContent || '').replace(/\s+/g, '').trim();
+        if (txt.length <= 12 && /(?:导出|下载)/.test(txt)) {
+          pushExportHintToBackground({ btnEl: btn, enqueue: true });
+        }
+      },
+      { capture: true, passive: true }
+    );
+
+    // 滚动与窗口缩放时实时贴合原生「发布」按钮的沙箱护盾坐标
+    window.addEventListener('scroll', () => updatePublishShieldOverlay(), { capture: true, passive: true });
+    window.addEventListener('resize', () => updatePublishShieldOverlay(), { passive: true });
+
+    // SPA 路由切换感知 & 发布页沙箱护盾坐标巡检（零 Hook history API）
+    let lastObservedHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastObservedHref) {
+        lastObservedHref = location.href;
+        pendingExportConfirm = null;
+        shieldState.manuallyDismissed = false;
+        shieldState.unlockedSig = '';
+        shieldState.conflictPopover = null;
+        pushExportHintToBackground({ enqueue: false });
+        render();
+        if (!getDataCenterContext().isDataMode) {
+          setTimeout(() => refreshFeishuScheduleRadar(true), 900);
+        }
+      } else if (!getDataCenterContext().isDataMode) {
+        updatePublishShieldOverlay();
+      }
+    }, 650);
+
+    // 若由后台 /api/collect 下发了带 autoExport 的采集指令，进入数据页后默认触发作品导出（仍受 12h 防重保护）
+    if (IS_CHROME_EXT && chrome.storage?.local && getDataCenterContext().isDataMode) {
+      chrome.storage.local.get('ppf_collect_active_v1', (res) => {
+        try {
+          const raw = res?.ppf_collect_active_v1;
+          if (!raw) return;
+          const job = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (job?.autoExport && Date.now() < Number(job.expiresAt || 0)) {
+            setTimeout(() => {
+              runDimensionExport('works', { force: false });
+            }, 2600);
+          }
+        } catch {
+          // ignore
+        }
+      });
+    }
 
     // 若本地 8765 飞书桥接服务刚切换过新作品且尚未同步，在扩展后台静默自动拉取最新一期（创作者网页本身零网络痕迹）
     gmRequestJson(`${settings.bridgeUrl}/api/status`)
@@ -3851,6 +5126,6 @@
   if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
     handleFeishuLaunchpad();
   } else {
-    setTimeout(mountUI, 1000);
+    setTimeout(mountUI, 900);
   }
 })();

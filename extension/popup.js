@@ -49,6 +49,16 @@ async function initPopup() {
     }
   });
 
+  const dataBtn = document.getElementById('open-data-centers');
+  if (dataBtn) {
+    dataBtn.addEventListener('click', () => {
+      chrome.runtime.sendMessage(
+        { type: 'PPF_OPEN_DATA_CENTERS', platforms: ['xhs', 'wx', 'bili', 'dy'], autoExport: false },
+        () => window.close()
+      );
+    });
+  }
+
   document.getElementById('toggle-panel').addEventListener('click', async () => {
     try {
       const res = await chrome.storage.local.get(STORAGE_KEY_SETTINGS);
