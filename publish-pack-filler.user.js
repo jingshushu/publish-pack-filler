@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      1.7.1
+// @version      1.7.2
 // @description  全平台半自动发布与四端数据安全采集助手：导表/发布双面板分家、账号/作品极简双键、12h防重二次确认、发前沙箱护盾同步飞书防撞车
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -3279,7 +3279,7 @@
       if (shieldState.manualTimeOverride) {
         return { mode: 'scheduled', plannedAt: shieldState.manualTimeOverride, source: '手动指定' };
       }
-      // 只读扫描页面上可见的定时时间输入框（四平台均仅在开启「定时发布」时才挂载/显示日期时间选择器！）
+      // 只读扫描页面上可见的定时时间控件（兼容视频号 Wujie ShadowDOM 分体式日期+时间下拉框、B站/小红书/抖音 DatePicker）
       const inputs = queryDeepAll('input');
       const nowYear = new Date().getFullYear();
       let foundDatePart = '';
@@ -3289,16 +3289,17 @@
         if (!isVisible(inp) || hostEl.contains?.(inp)) continue;
         const val = (inp.value || inp.getAttribute('value') || '').trim();
         if (!val) continue;
-        const fullMatch = val.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s+(\d{1,2}:\d{2})/);
+        const fullMatch = val.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s*(\d{1,2}:\d{2})/);
         if (fullMatch) {
           const y = fullMatch[1] || String(nowYear);
           const m = fullMatch[2].padStart(2, '0');
           const d = fullMatch[3].padStart(2, '0');
           return { mode: 'scheduled', plannedAt: `${y}-${m}-${d} ${fullMatch[4]}`, source: '页面定时框' };
         }
-        const dateOnly = val.match(/^(202\d)[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+        const dateOnly = val.match(/^(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?$/);
         if (dateOnly) {
-          foundDatePart = `${dateOnly[1]}-${dateOnly[2].padStart(2, '0')}-${dateOnly[3].padStart(2, '0')}`;
+          const y = dateOnly[1] || String(nowYear);
+          foundDatePart = `${y}-${dateOnly[2].padStart(2, '0')}-${dateOnly[3].padStart(2, '0')}`;
         }
         const timeOnly = val.match(/^(\d{1,2}:\d{2})(?::\d{2})?$/);
         if (timeOnly) {
@@ -3309,11 +3310,16 @@
         return { mode: 'scheduled', plannedAt: `${foundDatePart} ${foundTimePart}`, source: '页面定时框' };
       }
 
-      // 兼容非 input 文本型日期选择器（如视频号/Semi Popover 渲染在 span 里的时间文本）
-      const schedContainers = queryDeepAll('[class*="schedule" i], [class*="timer" i], [class*="timing" i], .semi-datepicker, .el-date-editor, .weui-desktop-picker');
+      // 兼容非 input 文本型日期/时间选择器（特别是视频号 weui-desktop 日期框「2026年11月19日」与时间框「11:02」分列两个独立组件的情况）
+      const schedContainers = queryDeepAll(
+        '[class*="schedule" i], [class*="timer" i], [class*="timing" i], .semi-datepicker, .el-date-editor, .bcc-datepicker, .weui-desktop-picker, .weui-desktop-form__dropdown, [class*="date-picker" i], [class*="time-picker" i], [class*="datepicker" i], [class*="timepicker" i]'
+      );
+      let pickerDatePart = foundDatePart;
+      let pickerTimePart = foundTimePart;
       for (const box of schedContainers) {
         if (!isVisible(box) || hostEl.contains?.(box)) continue;
-        const txt = (box.textContent || '').replace(/\s+/g, ' ').trim();
+        const txt = (box.innerText || box.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt || txt.length > 160) continue;
         const m = txt.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?\s*(\d{1,2}:\d{2})/);
         if (m) {
           const y = m[1] || String(nowYear);
@@ -3322,6 +3328,49 @@
             plannedAt: `${y}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')} ${m[4]}`,
             source: '页面定时组件',
           };
+        }
+        if (!pickerDatePart) {
+          const dm = txt.match(/(?:(202\d)[-/.年])(\d{1,2})[-/.月](\d{1,2})日?|(?:^|\s)(\d{1,2})月(\d{1,2})日/);
+          if (dm) {
+            const y = dm[1] || String(nowYear);
+            const mo = (dm[2] || dm[4]).padStart(2, '0');
+            const da = (dm[3] || dm[5]).padStart(2, '0');
+            pickerDatePart = `${y}-${mo}-${da}`;
+          }
+        }
+        if (!pickerTimePart) {
+          const tm = txt.match(/(?:^|\s)(\d{1,2}:\d{2})(?::\d{2})?(?:\s|$)/);
+          if (tm) {
+            pickerTimePart = tm[1];
+          }
+        }
+      }
+      if (pickerDatePart && pickerTimePart) {
+        return { mode: 'scheduled', plannedAt: `${pickerDatePart} ${pickerTimePart}`, source: '页面分体定时组件' };
+      }
+
+      // 兜底：扫描包含「定时发表 / 定时发布」可见表单行（高度 <= 220px）内的可见日期+时间文本（完美覆盖视频号 Wujie 自定义结构）
+      const labels = queryDeepAll('label, span, div');
+      for (const node of labels) {
+        if (hostEl.contains?.(node) || node.children.length > 2) continue;
+        const t = (node.textContent || '').trim();
+        if (!/^(定时发表|定时发布|定时)$/.test(t)) continue;
+        if (!isVisible(node)) continue;
+        let row = node.parentElement;
+        for (let depth = 0; depth < 4 && row; depth++, row = row.parentElement) {
+          const rect = row.getBoundingClientRect?.();
+          if (!rect || rect.height > 220 || rect.height < 18) continue;
+          const rowTxt = (row.innerText || '').replace(/\s+/g, ' ').trim();
+          if (!rowTxt || rowTxt.length > 240) continue;
+          const rm = rowTxt.match(/(?:(202\d)[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?[^0-9]{0,24}?(\d{1,2}:\d{2})/);
+          if (rm) {
+            const y = rm[1] || String(nowYear);
+            return {
+              mode: 'scheduled',
+              plannedAt: `${y}-${rm[2].padStart(2, '0')}-${rm[3].padStart(2, '0')} ${rm[4]}`,
+              source: '定时发表行',
+            };
+          }
         }
       }
 
@@ -3459,6 +3508,13 @@
 
       const schedInfo = detectPagePublishModeAndTime();
       const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
+      if (shieldState.lastSeenSig !== curSig) {
+        shieldState.lastSeenSig = curSig;
+        shieldState.conflictPopover = null;
+        if (!scheduleRadarState.loading) {
+          refreshFeishuScheduleRadar(true);
+        }
+      }
       const isUnlocked = shieldState.manuallyDismissed || (shieldState.unlockedSig && shieldState.unlockedSig === curSig);
       const r = target.rect;
 
