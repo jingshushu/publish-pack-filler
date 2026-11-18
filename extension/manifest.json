@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "全平台半自动发布助手",
   "short_name": "半自动发布助手",
-  "version": "1.7.2",
-  "description": "全平台半自动发布与四端数据安全采集助手：导表/发布双面板分家、12h防重缓存、发前沙箱护盾同步飞书防撞车",
+  "version": "2.0.0",
+  "description": "全平台半自动发布与飞书多维表直连助手：跨设备一键配置码激活、NAS未同步云端兜底、发布前统一警告变绿同步与四端数据导表归档",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -20,11 +20,16 @@
     "https://zhuanlan.zhihu.com/*",
     "https://weibo.com/*",
     "https://studio.youtube.com/*",
+    "https://open.feishu.cn/*",
+    "https://base-api.feishu.cn/*",
+    "https://open.larksuite.com/*",
+    "https://base-api.larksuite.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
+  "options_page": "options.html",
   "action": {
-    "default_title": "全平台半自动发布助手 (v1.7.2)",
+    "default_title": "全平台半自动发布助手 (v2.0.0)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

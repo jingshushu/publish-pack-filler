@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v1.6.2)
-// 1. 在扩展后台进程代理本地只读桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
-// 2. 支持飞书跳板页 site=all 时多标签页齐开。
-// 3. 内置四端创作者数据中心采集指令接收器 (轮询 /api/collect 或响应 Popup 一键打开数据中心)。
-// 4. 下载瞬间直接重命名 (chrome.downloads.onDeterminingFilename)：将四平台导出的 .xlsx/.csv 自动重命名为
-//    W<ISO周>_<YYYYMMDD>导出_<平台>_<账号>_<报表类型>.(xlsx|csv)，并自动去重覆盖 (消灭 data.xlsx 与 (1)(2))。
+// Background Service Worker (Manifest V3 · v2.0.0)
+// 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
+// 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
+// 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
+
+importScripts('feishu_client.js');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {
@@ -277,17 +277,89 @@ async function pollCollectQueue() {
 }
 
 if (chrome.alarms) {
-  chrome.alarms.create('ppf_poll_collect', { periodInMinutes: 0.25 });
+  chrome.alarms.create('ppf_poll_collect', { periodInMinutes: 1.0 });
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'ppf_poll_collect') {
       pollCollectQueue();
     }
   });
 }
-pollCollectQueue();
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return false;
+
+  // ==================== 飞书直连引擎消息路由 (v2.0 跨设备自包含) ====================
+  if (msg.type === 'PPF_OPEN_OPTIONS_PAGE') {
+    if (chrome.runtime.openOptionsPage) {
+      chrome.runtime.openOptionsPage(() => sendResponse({ ok: true }));
+    } else {
+      chrome.tabs.create({ url: chrome.runtime.getURL('options.html') }, () => sendResponse({ ok: true }));
+    }
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_GET_CONFIG') {
+    self.PPFFeishuClient.loadFeishuConfig()
+      .then((config) => sendResponse({ ok: true, config }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_SAVE_CONFIG') {
+    self.PPFFeishuClient.saveFeishuConfig(msg.config || {})
+      .then((config) => sendResponse({ ok: true, config }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_EXPORT_CODE') {
+    self.PPFFeishuClient.loadFeishuConfig()
+      .then((cfg) => {
+        const code = self.PPFFeishuClient.exportFeishuConfigCode(msg.config || cfg, {
+          includeSecret: msg.includeSecret !== false,
+        });
+        sendResponse({ ok: true, code });
+      })
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_IMPORT_CODE') {
+    (async () => {
+      const parsedCfg = self.PPFFeishuClient.importFeishuConfigCode(msg.code || '');
+      const result = await self.PPFFeishuClient.discoverAndSaveSchema(parsedCfg);
+      sendResponse({ ok: true, ...result });
+    })().catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_DISCOVER') {
+    self.PPFFeishuClient.discoverAndSaveSchema(msg.config || {})
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_ENSURE_SNAPSHOT_COL') {
+    self.PPFFeishuClient.ensurePackSnapshotColumn()
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_QUERY_CONTEXT') {
+    self.PPFFeishuClient.queryFeishuPublishContext(msg.params || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_SYNC_PUBLISH') {
+    self.PPFFeishuClient.syncPrePublishToFeishu(msg.payload || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
 
   if (msg.type === 'PPF_SET_EXPORT_HINT') {
     const plat = String(msg.platform || '');

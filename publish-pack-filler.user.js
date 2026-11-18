@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      1.7.2
-// @description  全平台半自动发布与四端数据安全采集助手：导表/发布双面板分家、账号/作品极简双键、12h防重二次确认、发前沙箱护盾同步飞书防撞车
+// @version      2.0.0
+// @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（配置码5秒跨设备迁移）、云端兜底文案（兼容NAS未同步）、发前关联作品与黄转绿警示同步按钮
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
 // @match        https://creator.douyin.com/*
@@ -23,6 +23,10 @@
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
 // @connect      localhost
+// @connect      open.feishu.cn
+// @connect      base-api.feishu.cn
+// @connect      open.larksuite.com
+// @connect      base-api.larksuite.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -128,6 +132,7 @@
   // 开箱即用默认预设：《一座城的年轮 · 天津》四平台标准发布包（v01）
   const DEFAULT_PRESET_PACK = {
     meta: {
+      isPresetDefault: true,
       packTitle: '《一座城的年轮 · 天津》四平台标准发布包（v01）',
       mdFileName: '发布包_v01.md',
       baseDir: '',
@@ -306,6 +311,38 @@
       return Promise.resolve(true);
     }
     return navigator.clipboard.writeText(text).then(() => true).catch(() => false);
+  }
+
+  function escapeHtml(str = '') {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function extractWorkSlugFront(raw = '') {
+    const text = String(raw || '')
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/\/+$/, '');
+    if (!text) return '';
+    const dateSlugMatch = text.match(/(\d{8}_[^/\\\s"']+)/);
+    if (dateSlugMatch) return dateSlugMatch[1];
+    const parts = text.split('/').filter(Boolean);
+    if (!parts.length) return '';
+    let last = parts[parts.length - 1];
+    if (/^(?:成片|04_成片|04_发布与成片|09_发布与交付|publish_pack)$/i.test(last) && parts.length >= 2) {
+      last = parts[parts.length - 2];
+    }
+    if (/^(?:Users|Desktop|AIHub|Code|Downloads|Volumes)$/i.test(last)) return '';
+    return last;
+  }
+
+  function normalizeCompareTitle(str = '') {
+    return String(str || '')
+      .toLowerCase()
+      .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '');
   }
 
   // ==================== Markdown 发布包解析器 ====================
@@ -2189,7 +2226,27 @@
     return { ok: true, msg: `已按序注入全部 ${validFiles.length} 张图文轮播卡片！` };
   }
 
-  // ==================== 本地只读小助手桥接（可选，兼容 Chrome MV3 Service Worker 与油猴） ====================
+  // ==================== 扩展后台通信 & 可选本地只读桥接 ====================
+  function sendExtMessage(msg) {
+    return new Promise((resolve, reject) => {
+      if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) {
+        reject(new Error('当前为独立脚本环境，建议安装 Chrome 扩展版以启用内置飞书直连'));
+        return;
+      }
+      chrome.runtime.sendMessage(msg, (resp) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (resp && resp.ok === false) {
+          reject(new Error(resp.error || '飞书请求失败'));
+          return;
+        }
+        resolve(resp || {});
+      });
+    });
+  }
+
   function gmRequestJson(url) {
     if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
       return new Promise((resolve, reject) => {
@@ -2465,11 +2522,6 @@
     rootWrap.className = 'ppf-root';
     shadow.appendChild(rootWrap);
 
-    // 独立于右侧面板的「发布按钮沙箱浮层护盾」（位于同一 closed ShadowRoot 内，对宿主网页 DOM 100% 零修改）
-    const shieldWrap = document.createElement('div');
-    shieldWrap.className = 'ppf-shield-host';
-    shadow.appendChild(shieldWrap);
-
     let statusText =
       platform === 'weixin'
         ? '视频号就绪 · 请点页面「发表视频」并拖入视频，再点下方一键填表或注入双封面'
@@ -2569,7 +2621,8 @@
         .ppf-status { font-size: 12px; color: ${statusFg}; min-height: 18px; line-height: 1.42; font-weight: 500; flex-shrink: 0; }
         .ppf-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: ${subFg}; cursor: pointer; user-select: none; }
         .ppf-foot { font-size: 11px; color: ${subFg}; border-top: 1px solid ${border}; padding-top: 7px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
-        select.ppf-select { background: ${inputBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 7px; padding: 5px 8px; font-size: 12px; width: 100%; }
+        select.ppf-select, input.ppf-input { background: ${inputBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 7px; padding: 5px 8px; font-size: 12px; width: 100%; outline: none; }
+        select.ppf-select:focus, input.ppf-input:focus { border-color: ${pMeta.accent}; }
       `;
     }
 
@@ -2615,24 +2668,35 @@
 
     let exportCacheMap = {};
     let pendingExportConfirm = null; // { dimension: 'account'|'works', lastTs, agoStr, lastFile }
-    let scheduleRadarState = {
+    let feishuState = {
+      configured: true, // 初次查询前默认乐观展示加载态，避免闪烁
       loading: false,
       loadedAt: 0,
-      summary: '⏳ 正在连接飞书检查本号最近排期...',
-      hasConflict: false,
+      error: '',
+      schemaMode: 'multi_table',
+      accountId: '',
       accountName: '',
-      goldenWindows: [],
-      lastPublished: null,
-      futureScheduled: [],
-      bridgeOffline: false,
+      goldenWindows: '',
+      defaultCollection: '',
+      platformAccounts: [],
+      candidates: [],
+      matchedCandidate: null,
+      matchReason: '',
+      hasConflict: false,
+      conflicts: [],
+      summary: '⏳ 正在连接飞书检查本号待发作品与排期...',
     };
-    let shieldState = {
-      unlockedSig: '',
-      manuallyDismissed: false,
-      syncing: false,
-      conflictPopover: null, // { summary, conflicts, mode, plannedAt, title, body }
+    let prePubState = {
+      selectedAccountId: '',
+      selectedWorkKey: 'auto', // 'auto' | 'new' | 'b:recXXX' | 'c:recXXX'
+      syncedSig: '',
       syncedLabel: '',
+      syncing: false,
+      conflictConfirm: null, // { summary, conflicts }
       manualTimeOverride: '',
+      showTimeInput: false,
+      showQuickSetup: false,
+      lastTimeSig: '',
     };
 
     async function loadExportCache() {
@@ -3235,49 +3299,10 @@
       }
     }
 
-    // ==================== 发布页：只读探测发布按钮与定时时间 + 飞书排期防撞沙箱护盾 ====================
-    function locateNativePublishButton() {
-      if (getDataCenterContext().isDataMode) return null;
-      const u = location.href;
-      // 仅在四平台真实上传/发布路由生效
-      const isPubRoute =
-        u.includes('creator.xiaohongshu.com/publish') ||
-        u.includes('creator.douyin.com/creator-micro/content/upload') ||
-        u.includes('creator.douyin.com/creator-micro/content/post') ||
-        u.includes('channels.weixin.qq.com/platform/post') ||
-        u.includes('member.bilibili.com/platform/upload');
-      if (!isPubRoute) return null;
-
-      const labelRe =
-        platform === 'weixin'
-          ? /^(?:发表|定时发表)$/
-          : platform === 'bilibili'
-          ? /^(?:立即投稿|定时投稿|提交稿件)$/
-          : /^(?:发布|定时发布|立即发布)$/;
-
-      const cands = queryDeepAll('button, [role="button"], .weui-desktop-btn');
-      const hits = [];
-      for (const el of cands) {
-        if (!el || el === hostEl || hostEl.contains?.(el)) continue;
-        if (!isVisible(el)) continue;
-        const r = el.getBoundingClientRect();
-        // 排除顶部导航栏（如左上角「发布作品」菜单）或过小/过大容器
-        if (r.top < 140 || r.left < 180 || r.width < 64 || r.width > 280 || r.height < 28 || r.height > 66) continue;
-        const txt = (el.textContent || '').replace(/\s+/g, '').trim();
-        if (!labelRe.test(txt)) continue;
-        // 排除单选框 label（如「立即发布」radio 文字本身不是 button）
-        if (el.querySelector?.('input[type="radio"], input[type="checkbox"]')) continue;
-        hits.push({ el, rect: r, text: txt });
-      }
-      if (!hits.length) return null;
-      // 优先选择位于页面较下方的主提交按钮
-      hits.sort((a, b) => b.rect.top - a.rect.top);
-      return hits[0];
-    }
-
+    // ==================== 发布页：定时探测 + 飞书发前作品关联 + 云端兜底文案 + 黄转绿警示同步 ====================
     function detectPagePublishModeAndTime() {
-      if (shieldState.manualTimeOverride) {
-        return { mode: 'scheduled', plannedAt: shieldState.manualTimeOverride, source: '手动指定' };
+      if (prePubState.manualTimeOverride) {
+        return { mode: 'scheduled', plannedAt: prePubState.manualTimeOverride, source: '手动指定' };
       }
       // 只读扫描页面上可见的定时时间控件（兼容视频号 Wujie ShadowDOM 分体式日期+时间下拉框、B站/小红书/抖音 DatePicker）
       const inputs = queryDeepAll('input');
@@ -3379,222 +3404,391 @@
 
     function readCurrentFormTitleAndBody() {
       const pData = currentPack.platforms?.[platform] || {};
+      const isPreset = Boolean(currentPack.meta?.isPresetDefault);
       const { titleInput, bodyEditor, shortTitleInput } = locatePlatformFields(platform);
-      let actualTitle = '';
+
+      let pageRawTitle = '';
       if (platform === 'weixin' && shortTitleInput?.value) {
-        actualTitle = shortTitleInput.value.trim();
+        pageRawTitle = shortTitleInput.value.trim();
       } else if (titleInput?.value) {
-        actualTitle = titleInput.value.trim();
+        pageRawTitle = titleInput.value.trim();
       }
-      if (!actualTitle) {
+
+      let actualTitle = pageRawTitle;
+      if (!actualTitle && !isPreset) {
         actualTitle =
           platform === 'weixin'
             ? pData.shortTitleClean || pData.shortTitleRaw || currentPack.meta?.packTitle || ''
             : pData.title || currentPack.meta?.packTitle || '';
       }
 
-      let actualBody = '';
+      let pageRawBody = '';
       if (bodyEditor) {
-        actualBody = (bodyEditor.value ?? bodyEditor.innerText ?? bodyEditor.textContent ?? '').trim();
+        pageRawBody = (bodyEditor.value ?? bodyEditor.innerText ?? bodyEditor.textContent ?? '').trim();
       }
-      if (!actualBody) {
+      let actualBody = pageRawBody;
+      if (!actualBody && !isPreset) {
         actualBody = pData.body || '';
       }
-      return { actualTitle, actualBody };
+
+      const tagSet = new Set();
+      if (!isPreset && Array.isArray(pData.tags)) {
+        for (const t of pData.tags) {
+          const clean = String(t || '').replace(/^#+/, '').trim();
+          if (clean) tagSet.add(clean);
+        }
+      }
+      const hashMatches = (actualBody || '').match(/#([^\s#，,。！!？?；;：:\n]{1,24})/g) || [];
+      for (const hm of hashMatches) {
+        const clean = hm.replace(/^#+/, '').trim();
+        if (clean) tagSet.add(clean);
+      }
+      const actualTags = Array.from(tagSet).slice(0, 15);
+
+      return { actualTitle, actualBody, actualTags, pageRawTitle, pageRawBody };
     }
 
-    async function refreshFeishuScheduleRadar(silent = true) {
-      if (getDataCenterContext().isDataMode) return;
-      scheduleRadarState.loading = true;
-      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
-      const work = currentPack.meta?.baseDir || currentPack.meta?.packTitle || '';
+    function getCandidateKey(cand) {
+      if (!cand) return '';
+      return cand.bRecordId ? `b:${cand.bRecordId}` : cand.cRecordId ? `c:${cand.cRecordId}` : '';
+    }
+
+    function getEffectiveFeishuCandidate() {
+      if (prePubState.selectedWorkKey === 'new') return null;
+      if (prePubState.selectedWorkKey && prePubState.selectedWorkKey !== 'auto') {
+        const found = (feishuState.candidates || []).find((c) => getCandidateKey(c) === prePubState.selectedWorkKey);
+        if (found) return found;
+      }
+      return feishuState.matchedCandidate || null;
+    }
+
+    function getCurrentSyncSignature() {
       const schedInfo = detectPagePublishModeAndTime();
-      const qs = new URLSearchParams({
-        platform,
-        account: acct,
-        work,
-        plannedAt: schedInfo.plannedAt || '',
-      });
-      try {
-        const res = await gmRequestJson(`${settings.bridgeUrl}/api/schedule-check?${qs.toString()}`);
-        if (res && res.ok) {
-          scheduleRadarState = {
-            loading: false,
-            loadedAt: Date.now(),
-            summary: res.summary || '🟢 已同步飞书排期状态',
-            hasConflict: Boolean(res.has_conflict),
-            accountName: res.account_name || '',
-            goldenWindows: res.golden_windows || [],
-            lastPublished: res.last_published || null,
-            futureScheduled: res.future_scheduled || [],
-            bridgeOffline: false,
+      const cand = getEffectiveFeishuCandidate();
+      const candKey = prePubState.selectedWorkKey === 'new' ? 'new' : getCandidateKey(cand) || currentPack.meta?.workSlug || 'auto';
+      const accKey = prePubState.selectedAccountId || feishuState.accountId || 'auto';
+      return `${candKey}|${accKey}|${schedInfo.mode}|${schedInfo.plannedAt}`;
+    }
+
+    // 云端兜底文案注入：当 NAS 尚未同步本地目录或切换到另一台电脑时，直接从飞书拉取完整快照或通用文案装入面板！
+    function applyCloudPackFromCandidate(cand, { silent = false } = {}) {
+      if (!cand) return false;
+
+      if (cand.hasCloudPack && cand.packSnapshot) {
+        try {
+          const parsed = parsePublishPackJson(cand.packSnapshot, {
+            fileName: '☁️ 飞书云端发布包快照',
+            sourceLabel: cand.label || '飞书云端快照',
+            baseDir: '',
+          });
+          parsed.meta = {
+            ...parsed.meta,
+            isPresetDefault: false,
+            packTitle: cand.label || parsed.meta?.packTitle || '飞书云端作品',
+            mdFileName: '☁️ 飞书云端发布包快照',
+            workSlug: cand.slug || currentPack.meta?.workSlug || '',
+            bRecordId: cand.bRecordId || '',
+            cRecordId: cand.cRecordId || '',
+            cloudFallback: true,
+            cloudSource: 'snapshot',
+            localMissing: Boolean(currentPack.meta?.localMissing),
           };
-          if (!silent) setStatus(res.summary);
-          render();
+          if (coverBlobsMap.size > 0) {
+            parsed.covers = mergeCoversWithBlobs(parsed.covers, coverBlobsMap, parsed.meta?.contentType === 'image_post');
+          }
+          currentPack = parsed;
+          settings.selectedTitleIdx = -1;
+          saveSettings(settings);
+          savePackState(currentPack);
+          if (!silent) {
+            setStatus(`☁️ 已从飞书载入《${cand.label}》完整四平台云端发布包快照！`);
+          }
+          return true;
+        } catch {
+          // 快照解析异常时平滑降级到通用字段兜底
         }
-      } catch {
-        scheduleRadarState.loading = false;
-        scheduleRadarState.bridgeOffline = true;
-        scheduleRadarState.summary = 'ℹ️ 本地桥接(8765)未启动：启动 serve_pack.py 后自动检查同账号 6h 撞车排期';
+      }
+
+      if (cand.fallbackTitle || cand.fallbackBody) {
+        const rawBody = String(cand.fallbackBody || '').trim();
+        const extractedTags = [];
+        const hashMatches = rawBody.match(/#([^\s#，,。！!？?；;：:\n]{1,24})/g) || [];
+        for (const hm of hashMatches) {
+          const t = hm.replace(/^#+/, '').trim();
+          if (t && !extractedTags.includes(t)) extractedTags.push(t);
+        }
+        const cleanBody = rawBody.replace(/(?:\s*#[^\s#，,。！!？?；;：:\n]{1,24})+\s*$/, '').trim() || rawBody;
+        const baseTitle = String(cand.fallbackTitle || cand.label || '').replace(/^[0-9？?]+｜/, '').trim();
+        const wxClean = sanitizeWeixinShortTitle(baseTitle).slice(0, 16);
+        const defCol = String(cand.defaultCollection || '').trim();
+
+        currentPack = {
+          meta: {
+            isPresetDefault: false,
+            format: 'cloud_fields',
+            contentType: 'video',
+            packTitle: `${cand.label || baseTitle}（☁️ 飞书云端兜底）`,
+            mdFileName: '☁️ 飞书通用文案兜底',
+            baseDir: '',
+            workSlug: cand.slug || currentPack.meta?.workSlug || '',
+            bRecordId: cand.bRecordId || '',
+            cRecordId: cand.cRecordId || '',
+            cloudFallback: true,
+            cloudSource: 'fields',
+            localMissing: Boolean(currentPack.meta?.localMissing),
+            updatedAt: new Date().toISOString(),
+          },
+          covers: coverBlobsMap.size > 0 ? mergeCoversWithBlobs([], coverBlobsMap, false) : [],
+          images: [],
+          platforms: {
+            xiaohongshu: {
+              collection: defCol,
+              title: baseTitle.slice(0, 20),
+              altTitles: [],
+              body: cleanBody,
+              tags: extractedTags,
+              pinnedComment: '',
+            },
+            weixin: {
+              collection: defCol,
+              location: '',
+              shortTitleRaw: baseTitle.slice(0, 16),
+              shortTitleClean: wxClean,
+              altTitles: [],
+              body: cleanBody,
+              tags: extractedTags.slice(0, 6),
+              pinnedComment: '',
+            },
+            douyin: {
+              collection: defCol,
+              location: '',
+              title: baseTitle.slice(0, 30),
+              altTitles: [],
+              body: cleanBody,
+              tags: extractedTags.slice(0, 5),
+              pinnedComment: '',
+            },
+            bilibili: {
+              collection: defCol,
+              title: baseTitle,
+              altTitles: [],
+              body: cleanBody,
+              tags: extractedTags.slice(0, 10),
+              pinnedComment: '',
+            },
+          },
+        };
+        settings.selectedTitleIdx = -1;
+        saveSettings(settings);
+        savePackState(currentPack);
+        if (!silent) {
+          setStatus(`☁️ 本机暂无本地包，已从飞书载入《${cand.label}》云端通用兜底文案！`);
+        }
+        return true;
+      }
+
+      return false;
+    }
+
+    async function refreshFeishuPublishContext(silent = true) {
+      if (getDataCenterContext().isDataMode) return;
+      if (!IS_CHROME_EXT) {
+        feishuState.configured = false;
+        feishuState.summary = '请使用 Chrome 扩展版以启用零依赖飞书多维表直连';
         if (!silent) render();
+        return;
+      }
+
+      feishuState.loading = true;
+      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
+      const isPreset = Boolean(currentPack.meta?.isPresetDefault);
+      const workSlug = isPreset
+        ? ''
+        : currentPack.meta?.workSlug || extractWorkSlugFront(currentPack.meta?.baseDir || currentPack.meta?.packTitle || '');
+      const { pageRawTitle, actualTitle } = readCurrentFormTitleAndBody();
+      const schedInfo = detectPagePublishModeAndTime();
+
+      let explicitBId = '';
+      let explicitCId = '';
+      if (prePubState.selectedWorkKey.startsWith('b:')) {
+        explicitBId = prePubState.selectedWorkKey.slice(2);
+      } else if (prePubState.selectedWorkKey.startsWith('c:')) {
+        explicitCId = prePubState.selectedWorkKey.slice(2);
+      } else if (!isPreset && prePubState.selectedWorkKey === 'auto') {
+        explicitBId = currentPack.meta?.bRecordId || '';
+        explicitCId = currentPack.meta?.cRecordId || '';
+      }
+
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_QUERY_CONTEXT',
+          params: {
+            platform,
+            account: acct,
+            accountRecordId: prePubState.selectedAccountId || '',
+            workSlug,
+            bRecordId: explicitBId,
+            cRecordId: explicitCId,
+            title: pageRawTitle || actualTitle || '',
+            plannedAt: schedInfo.plannedAt || '',
+            forceRefresh: !silent,
+          },
+        });
+        const data = resp?.data || {};
+        feishuState = {
+          configured: Boolean(data.configured),
+          loading: false,
+          loadedAt: Date.now(),
+          error: '',
+          schemaMode: data.schemaMode || 'multi_table',
+          accountId: data.accountId || '',
+          accountName: data.accountName || '',
+          goldenWindows: data.goldenWindows || '',
+          defaultCollection: data.defaultCollection || '',
+          platformAccounts: data.platformAccounts || [],
+          candidates: data.candidates || [],
+          matchedCandidate: data.matchedCandidate || null,
+          matchReason: data.matchReason || '',
+          hasConflict: Boolean(data.hasConflict),
+          conflicts: data.conflicts || [],
+          summary: data.summary || '🟢 已同步飞书排期状态',
+        };
+
+        // 当 NAS 尚未同步本地目录（localMissing / cloud_pending / empty）且飞书命中对应作品时，自动拉取云端兜底文案！
+        const effCand = getEffectiveFeishuCandidate();
+        const needsCloudHydrate =
+          currentPack.meta?.localMissing ||
+          currentPack.meta?.format === 'cloud_pending' ||
+          currentPack.meta?.format === 'empty';
+        if (effCand && needsCloudHydrate && (effCand.hasCloudPack || effCand.fallbackTitle || effCand.fallbackBody)) {
+          const applied = applyCloudPackFromCandidate(effCand, { silent: true });
+          if (applied) {
+            currentPack.meta.localMissing = false;
+            savePackState(currentPack);
+            setStatus(
+              effCand.hasCloudPack
+                ? `☁️ NAS未同步本地包，已从飞书自动恢复《${effCand.label}》完整云端发布包！`
+                : `☁️ NAS未同步本地包，已从飞书自动载入《${effCand.label}》通用兜底文案！`
+            );
+          }
+        } else if (!silent && data.summary) {
+          setStatus(data.summary);
+        }
+        render();
+      } catch (err) {
+        feishuState.loading = false;
+        feishuState.error = String(err?.message || err);
+        feishuState.summary = `⚠️ 飞书查询异常：${feishuState.error}`;
+        if (!silent) setStatus(feishuState.summary);
+        render();
       }
     }
 
-    async function syncPublishToFeishuAndUnlock({ force = false } = {}) {
-      if (shieldState.syncing) return;
-      shieldState.syncing = true;
-      updatePublishShieldOverlay();
+    async function syncPrePublishAndTurnGreen({ force = false } = {}) {
+      if (prePubState.syncing) return false;
+      prePubState.syncing = true;
+      render();
 
       const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
       const schedInfo = detectPagePublishModeAndTime();
-      const { actualTitle, actualBody } = readCurrentFormTitleAndBody();
-      const work = currentPack.meta?.baseDir || currentPack.meta?.packTitle || '';
-      const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
+      const { actualTitle, actualBody, actualTags } = readCurrentFormTitleAndBody();
+      const isPreset = Boolean(currentPack.meta?.isPresetDefault);
+      const effCand = getEffectiveFeishuCandidate();
+      const isCreateNew = prePubState.selectedWorkKey === 'new';
 
-      setStatus('⏳ 正在向飞书校验同号排期并同步本次发布时间...');
+      const workSlug = isCreateNew
+        ? ''
+        : effCand?.slug ||
+          (isPreset ? '' : currentPack.meta?.workSlug || extractWorkSlugFront(currentPack.meta?.baseDir || ''));
+
+      // 若本机已加载真实本地发布包（非预设、非空、非云端兜底），同步时顺手生成标准 PublishPack JSON 备份到飞书 B 表，供其他设备免 NAS 兜底！
+      let packSnapshotJson = '';
+      if (
+        !isPreset &&
+        !currentPack.meta?.cloudFallback &&
+        currentPack.meta?.format !== 'empty' &&
+        currentPack.meta?.format !== 'cloud_pending'
+      ) {
+        try {
+          packSnapshotJson = exportPackToSpecJson(currentPack);
+        } catch {
+          packSnapshotJson = '';
+        }
+      }
+
+      const curSig = getCurrentSyncSignature();
+      setStatus('⏳ 正在向飞书核对同号排期并同步本次发布时间与作品关联...');
+
       try {
-        const res = await gmPostJson(`${settings.bridgeUrl}/api/record-publish`, {
-          platform,
-          account: acct,
-          mode: schedInfo.mode,
-          plannedAt: schedInfo.plannedAt,
-          work,
-          title: actualTitle,
-          body: actualBody,
-          force,
-        });
-
-        shieldState.syncing = false;
-        if (res?.needs_confirm) {
-          shieldState.conflictPopover = {
-            summary: res.summary || '🚨 检测到 6 小时内存在排期冲突！',
-            conflicts: res.conflicts || [],
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_SYNC_PUBLISH',
+          payload: {
+            platform,
+            account: acct,
+            accountRecordId: prePubState.selectedAccountId || feishuState.accountId || '',
             mode: schedInfo.mode,
             plannedAt: schedInfo.plannedAt,
+            bRecordId: isCreateNew ? '' : effCand?.bRecordId || (isPreset ? '' : currentPack.meta?.bRecordId || ''),
+            cRecordId: isCreateNew ? '' : effCand?.cRecordId || (isPreset ? '' : currentPack.meta?.cRecordId || ''),
+            createNewWork: isCreateNew,
+            workSlug,
+            workLabel: isCreateNew ? actualTitle : effCand?.label || (isPreset ? actualTitle : currentPack.meta?.packTitle || ''),
+            title: actualTitle,
+            body: actualBody,
+            tags: actualTags,
+            packSnapshotJson,
+            force,
+          },
+        });
+        const res = resp?.data || {};
+        prePubState.syncing = false;
+
+        if (res.needsConfirm) {
+          prePubState.conflictConfirm = {
+            summary: res.summary || '🚨 检测到同账号 6 小时内存在排期撞车冲突！',
+            conflicts: res.conflicts || [],
           };
-          setStatus(res.summary || '🚨 排期冲突，请确认或修改定时发布时间');
-          updatePublishShieldOverlay();
+          feishuState.hasConflict = true;
+          feishuState.summary = res.summary || feishuState.summary;
+          setStatus(res.summary || '🚨 排期冲突，请在面板确认强制同步或修改页面定时时间');
           render();
           return false;
         }
 
-        if (res?.saved) {
-          shieldState.conflictPopover = null;
-          shieldState.unlockedSig = curSig;
-          shieldState.syncedLabel =
+        if (res.saved) {
+          prePubState.conflictConfirm = null;
+          if (!isPreset) {
+            currentPack.meta = currentPack.meta || {};
+            if (res.bRecordId) currentPack.meta.bRecordId = res.bRecordId;
+            if (res.cRecordId) currentPack.meta.cRecordId = res.cRecordId;
+            savePackState(currentPack);
+          }
+          if (isCreateNew && res.bRecordId) {
+            prePubState.selectedWorkKey = `b:${res.bRecordId}`;
+          }
+          prePubState.syncedLabel =
             schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
-          scheduleRadarState.summary = res.summary || '✅ 已写入飞书 C 发布记录表';
-          scheduleRadarState.hasConflict = false;
-          setStatus(`${res.summary} · 护盾已解锁，请亲手点击原网页「发布」按钮！`);
-          updatePublishShieldOverlay();
+          // 重新计算绑定更新后的签名并标记为绿色已同步
+          await refreshFeishuPublishContext(true);
+          prePubState.syncedSig = getCurrentSyncSignature();
+          feishuState.summary = res.summary || '✅ 已写入飞书发布记录表';
+          feishuState.hasConflict = false;
+          setStatus(`${res.summary} · 面板已变绿，现在可放心点击网页「发布」按钮！`);
           render();
           return true;
         }
       } catch (err) {
-        shieldState.syncing = false;
-        setStatus(`⚠️ 无法连接飞书桥接 (8765: ${err?.message || err})；可启动 serve_pack.py 重试，或点护盾右侧 × 临时解锁`);
-        updatePublishShieldOverlay();
+        prePubState.syncing = false;
+        const errMsg = String(err?.message || err);
+        setStatus(`⚠️ 飞书同步失败：${errMsg}`);
+        render();
       }
       return false;
     }
 
-    // 实时对齐原生「发布」按钮几何坐标（位于 closed ShadowRoot 内部，宿主网页 DOM 零接触、零事件拦截）
-    function updatePublishShieldOverlay() {
-      const target = locateNativePublishButton();
-      if (!target) {
-        if (shieldWrap.innerHTML !== '') shieldWrap.innerHTML = '';
-        return;
-      }
-
-      const schedInfo = detectPagePublishModeAndTime();
-      const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
-      if (shieldState.lastSeenSig !== curSig) {
-        shieldState.lastSeenSig = curSig;
-        shieldState.conflictPopover = null;
-        if (!scheduleRadarState.loading) {
-          refreshFeishuScheduleRadar(true);
-        }
-      }
-      const isUnlocked = shieldState.manuallyDismissed || (shieldState.unlockedSig && shieldState.unlockedSig === curSig);
-      const r = target.rect;
-
-      // 已同步解锁状态：护盾完全让开（pointer-events: none），仅在按钮上方轻浮一行不挡鼠标的绿字提示
-      if (isUnlocked) {
-        shieldWrap.innerHTML = `
-          <div style="position:fixed; left:${Math.max(8, Math.round(r.left - 4))}px; top:${Math.max(
-          8,
-          Math.round(r.top - 26)
-        )}px; z-index:2147483647; pointer-events:none; background:rgba(5,150,105,0.94); color:#fff; font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; white-space:nowrap; box-shadow:0 3px 10px rgba(5,150,105,0.25);">
-            ✅ ${shieldState.manuallyDismissed ? '已临时移开护盾' : `已同步飞书(${shieldState.syncedLabel})`} · 请亲手点下方「${target.text}」
-          </div>
-        `;
-        return;
-      }
-
-      const modeTag = schedInfo.mode === 'scheduled' ? `⏰ 定时 ${schedInfo.plannedAt.slice(5)}` : '⚡ 立即发布';
-      const w = Math.max(Math.round(r.width + 8), 196);
-      const h = Math.max(Math.round(r.height + 6), 38);
-      const left = Math.max(8, Math.round(r.left - 4));
-      const top = Math.max(8, Math.round(r.top - 3));
-
-      const conflictHtml = shieldState.conflictPopover
-        ? `<div style="position:fixed; left:${Math.max(8, left - 24)}px; top:${Math.max(
-            12,
-            top - 122
-          )}px; width:310px; z-index:2147483647; pointer-events:auto; background:#fff1f2; border:1.5px solid #e11d48; color:#9f1239; border-radius:10px; padding:10px 11px; box-shadow:0 10px 28px rgba(225,29,72,0.24); font-size:12px; line-height:1.45;">
-            <div style="font-weight:700; margin-bottom:6px;">${shieldState.conflictPopover.summary}</div>
-            <div style="display:flex; gap:6px; justify-content:flex-end;">
-              <button id="ppf-shield-cancel-conf" style="background:#fff; color:#1f2329; border:1px solid rgba(0,0,0,0.15); border-radius:6px; padding:4px 9px; font-size:11.5px; cursor:pointer; font-weight:600;">去改定时时间</button>
-              <button id="ppf-shield-force-conf" style="background:#e11d48; color:#fff; border:none; border-radius:6px; padding:4px 9px; font-size:11.5px; cursor:pointer; font-weight:700;">已知风险·仍同步解锁</button>
-            </div>
-          </div>`
-        : '';
-
-      shieldWrap.innerHTML = `
-        ${conflictHtml}
-        <div style="position:fixed; left:${left}px; top:${top}px; width:${w}px; height:${h}px; z-index:2147483647; pointer-events:auto; display:flex; align-items:stretch; border-radius:8px; overflow:hidden; box-shadow:0 4px 16px rgba(5,150,105,0.34); border:1.5px solid #047857; background:linear-gradient(135deg, #059669, #047857);">
-          <button id="ppf-shield-sync-btn" style="flex:1; background:transparent; color:#fff; border:none; padding:0 9px; font-size:12px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; white-space:nowrap;" title="先将本次发布方式与时间写入飞书 C 发布记录表并校验 6h 排期冲突，随后自动露底由您亲手点发布">
-            ${shieldState.syncing ? '⏳ 校验同步中...' : `🔒 同步飞书解锁 (${modeTag})`}
-          </button>
-          <button id="ppf-shield-dismiss-btn" style="width:24px; background:rgba(0,0,0,0.16); color:rgba(255,255,255,0.85); border:none; border-left:1px solid rgba(255,255,255,0.2); font-size:12px; cursor:pointer; display:flex; align-items:center; justify-content:center;" title="临时移开护盾（离线时跳过飞书同步）">×</button>
-        </div>
-      `;
-
-      const syncBtn = shieldWrap.querySelector('#ppf-shield-sync-btn');
-      if (syncBtn) {
-        syncBtn.onclick = (e) => {
-          e.stopPropagation();
-          syncPublishToFeishuAndUnlock({ force: false });
-        };
-      }
-      const disBtn = shieldWrap.querySelector('#ppf-shield-dismiss-btn');
-      if (disBtn) {
-        disBtn.onclick = (e) => {
-          e.stopPropagation();
-          shieldState.manuallyDismissed = true;
-          updatePublishShieldOverlay();
-        };
-      }
-      const cancelConf = shieldWrap.querySelector('#ppf-shield-cancel-conf');
-      if (cancelConf) {
-        cancelConf.onclick = (e) => {
-          e.stopPropagation();
-          shieldState.conflictPopover = null;
-          updatePublishShieldOverlay();
-        };
-      }
-      const forceConf = shieldWrap.querySelector('#ppf-shield-force-conf');
-      if (forceConf) {
-        forceConf.onclick = (e) => {
-          e.stopPropagation();
-          syncPublishToFeishuAndUnlock({ force: true });
-        };
-      }
-    }
-
     let showPasteDrawer = false;
 
-    function applyPackContent(fileName, rawText, subMdTextMap = {}) {
+    function applyPackContent(fileName, rawText, subMdTextMap = {}, extraMeta = {}) {
       const isJson = /\.json$/i.test(fileName) || stripJsonCodeFence(rawText).startsWith('{');
       let parsed;
 
@@ -3602,13 +3796,13 @@
         parsed = parsePublishPackJson(rawText, {
           fileName,
           sourceLabel: fileName,
-          baseDir: currentPack.meta?.baseDir || '',
+          baseDir: extraMeta.baseDir ?? currentPack.meta?.baseDir ?? '',
         });
       } else {
         parsed = parsePublishPackMarkdown(rawText, {
           mdFileName: fileName,
           sourceLabel: fileName,
-          baseDir: currentPack.meta?.baseDir || '',
+          baseDir: extraMeta.baseDir ?? currentPack.meta?.baseDir ?? '',
         });
         parsed.meta.format = 'markdown';
         parsed.meta.contentType = 'video';
@@ -3630,20 +3824,33 @@
         }
       }
 
+      parsed.meta = {
+        ...parsed.meta,
+        isPresetDefault: false,
+        cloudFallback: false,
+        localMissing: false,
+        ...extraMeta,
+      };
+
       if (coverBlobsMap.size > 0) {
         parsed.covers = mergeCoversWithBlobs(parsed.covers, coverBlobsMap, parsed.meta?.contentType === 'image_post');
       }
 
       currentPack = parsed;
+      prePubState.selectedWorkKey = 'auto';
+      prePubState.syncedSig = '';
       settings.selectedTitleIdx = -1;
       settings.selectedCoverByPlat = {};
       saveSettings(settings);
       savePackState(currentPack);
     }
 
-    async function ingestFileEntries(rawFiles) {
+    async function ingestFileEntries(rawFiles, dirNameHint = '') {
       const files = Array.from(rawFiles || []);
       if (!files.length) return;
+
+      const topFolderFromRel = (files[0]?.webkitRelativePath || '').split('/')[0] || '';
+      const inferredSlug = extractWorkSlugFront(dirNameHint || topFolderFromRel);
 
       const packCandidates = [];
       const subMdTextMap = {};
@@ -3711,8 +3918,17 @@
         });
         availableMdFiles = packCandidates;
         const best = packCandidates[0];
-        applyPackContent(best.name, best.text, subMdTextMap);
+        applyPackContent(best.name, best.text, subMdTextMap, {
+          workSlug: inferredSlug,
+          bRecordId: '',
+          cRecordId: '',
+        });
       } else if (imageFiles.length > 0) {
+        currentPack.meta = {
+          ...currentPack.meta,
+          isPresetDefault: false,
+          workSlug: inferredSlug || currentPack.meta?.workSlug || '',
+        };
         currentPack.covers = mergeCoversWithBlobs(currentPack.covers, coverBlobsMap, false);
         savePackState(currentPack);
       }
@@ -3722,6 +3938,7 @@
         `✅ 已载入《${currentPack.meta?.mdFileName || '发布包'}》与 ${coverBlobsMap.size} 张配图`
       );
       render();
+      refreshFeishuPublishContext(true);
     }
 
     async function pickPackDirectory() {
@@ -3747,7 +3964,7 @@
             }
           };
           await walkDir(dirHandle, '');
-          await ingestFileEntries(collected);
+          await ingestFileEntries(collected, dirHandle.name || '');
           return;
         } catch (err) {
           if (err && err.name === 'AbortError') return;
@@ -3757,9 +3974,44 @@
     }
 
     async function syncFromLocalBridge(silent = false) {
-      if (!silent) setStatus('⏳ 正在从本地飞书桥接服务同步...');
+      if (!silent) setStatus('⏳ 正在从本地服务同步作品与配图...');
       try {
         const data = await gmRequestJson(`${settings.bridgeUrl}/api/pack`);
+        if (data.localMissing) {
+          coverBlobsMap.clear();
+          await xStorageClearByPrefix(CROSS_COVER_PREFIX);
+          currentPack = {
+            meta: {
+              isPresetDefault: false,
+              packTitle: data.workSlug || '待从飞书拉取云端文案...',
+              mdFileName: '☁️ 飞书云端关联模式',
+              format: 'cloud_pending',
+              contentType: 'video',
+              baseDir: '',
+              workSlug: data.workSlug || '',
+              cRecordId: data.cRecordId || '',
+              bRecordId: data.bRecordId || '',
+              targetAccount: data.targetAccount || '',
+              localMissing: true,
+              cloudFallback: true,
+              updatedAt: new Date().toISOString(),
+            },
+            covers: [],
+            images: [],
+            platforms: {},
+          };
+          prePubState.selectedWorkKey = 'auto';
+          prePubState.syncedSig = '';
+          if (data.packVersion) {
+            settings.lastBridgeVersion = data.packVersion;
+            saveSettings(settings);
+          }
+          savePackState(currentPack);
+          render();
+          await refreshFeishuPublishContext(false);
+          return;
+        }
+
         if (Array.isArray(data.covers) && data.covers.length > 0) {
           coverBlobsMap.clear();
           const records = [];
@@ -3776,22 +4028,37 @@
         }
         const fileName = data.packFile || data.mdFile || '';
         const rawContent = data.content || data.markdown || '';
+        const workSlug = data.workSlug || extractWorkSlugFront(data.baseDir || data.folderName || '');
         if (rawContent) {
-          applyPackContent(fileName || 'publish.pack.json', rawContent, data.subMarkdowns || {});
+          applyPackContent(fileName || 'publish.pack.json', rawContent, data.subMarkdowns || {}, {
+            baseDir: data.baseDir || '',
+            workSlug,
+            cRecordId: data.cRecordId || '',
+            bRecordId: data.bRecordId || '',
+            targetAccount: data.targetAccount || '',
+          });
         } else if (data.folderName) {
           currentPack = {
             meta: {
+              isPresetDefault: false,
               packTitle: data.folderName,
               mdFileName: '（仅媒体目录）',
               format: 'empty',
               contentType: 'video',
               baseDir: data.baseDir || '',
+              workSlug,
+              cRecordId: data.cRecordId || '',
+              bRecordId: data.bRecordId || '',
+              targetAccount: data.targetAccount || '',
+              localMissing: false,
               updatedAt: new Date().toISOString(),
             },
             covers: Array.from(coverBlobsMap.keys()).map((rel) => inferCoverMetaFromPath(rel)),
             images: [],
             platforms: {},
           };
+          prePubState.selectedWorkKey = 'auto';
+          prePubState.syncedSig = '';
         }
         if (data.packVersion) {
           settings.lastBridgeVersion = data.packVersion;
@@ -3802,9 +4069,10 @@
         savePackState(currentPack);
         setStatus(`✅ 已同步：${currentPack.meta.packTitle}（${coverBlobsMap.size} 张配图）`);
         render();
+        refreshFeishuPublishContext(true);
       } catch {
         if (!silent) {
-          setStatus('⚠️ 本地桥接未运行，可点「📂 选择成品包目录」或启动 serve_pack.py');
+          setStatus('ℹ️ 本地服务(8765)未启动：可直接点上方飞书关联下拉框用云端文案，或点「📂 选成品包目录」');
         }
       }
     }
@@ -4229,31 +4497,194 @@
 
           <div class="ppf-body">
             ${(() => {
+              if (!feishuState.configured) {
+                return `<div class="ppf-sec" style="border:1.5px dashed #3b82f6; background:rgba(59,130,246,0.06); gap:7px;">
+                  <div class="ppf-sec-hd" style="color:#2563eb;">
+                    <span>🔗 关联飞书多维表（跨设备 5 秒激活）</span>
+                    <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="打开飞书多维表连接设置">⚙️</button>
+                  </div>
+                  <div style="font-size:11.5px; line-height:1.45;">
+                    粘贴主力电脑导出的 <code>PPF2:...</code> 配置码即可直连飞书排期与云端兜底文案（零本机环境依赖）。
+                  </div>
+                  <div style="display:flex; gap:6px;">
+                    <button class="ppf-btn" id="ppf-toggle-quick-code" style="flex:1; font-weight:600;">📥 粘贴配置码秒连</button>
+                    <button class="ppf-btn ppf-btn-accent" id="ppf-open-feishu-opts-btn" style="padding:5px 10px;">⚙️ 完整设置</button>
+                  </div>
+                  ${
+                    prePubState.showQuickSetup
+                      ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+                          <input class="ppf-input" id="ppf-quick-code-inp" placeholder="在此粘贴 PPF2:... 跨设备配置码" />
+                          <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-quick-code-apply">⚡ 立即验证并连接飞书</button>
+                        </div>`
+                      : ''
+                  }
+                </div>`;
+              }
+
               const schedInfo = detectPagePublishModeAndTime();
-              const curSig = `${schedInfo.mode}|${schedInfo.plannedAt}`;
-              const isUnlocked =
-                shieldState.manuallyDismissed || (shieldState.unlockedSig && shieldState.unlockedSig === curSig);
-              const radarBorder = scheduleRadarState.hasConflict ? '#e11d48' : '#059669';
-              const radarBg = scheduleRadarState.hasConflict ? 'rgba(225,29,72,0.06)' : 'rgba(5,150,105,0.06)';
-              return `<div class="ppf-sec" style="border:1.5px solid ${radarBorder}; background:${radarBg}; gap:6px;">
-                <div class="ppf-sec-hd" style="color:${radarBorder};">
-                  <span>🚦 飞书排期防撞 · ${
-                    schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布'
-                  }</span>
-                  <button class="ppf-icon-btn" id="ppf-refresh-radar" title="重新查询飞书排期">🔄</button>
+              const curSig = getCurrentSyncSignature();
+              const isSyncedGreen = Boolean(prePubState.syncedSig && prePubState.syncedSig === curSig);
+              const effCand = getEffectiveFeishuCandidate();
+              const hasCloudCopy = Boolean(
+                effCand && (effCand.hasCloudPack || effCand.fallbackTitle || effCand.fallbackBody)
+              );
+              const modeTag =
+                schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
+
+              // 防张冠李戴检测：若网页输入框已填标题，但与自动匹配的作品毫无重合字，主动亮黄牌提醒
+              let mismatchWarnHtml = '';
+              const { pageRawTitle } = readCurrentFormTitleAndBody();
+              if (prePubState.selectedWorkKey === 'auto' && effCand && pageRawTitle && pageRawTitle.length >= 5) {
+                const pNorm = normalizeCompareTitle(pageRawTitle);
+                const cNorm1 = normalizeCompareTitle(effCand.label.replace(/^[0-9？?]+｜/, ''));
+                const cNorm2 = normalizeCompareTitle(effCand.fallbackTitle || '');
+                const cNorm3 = currentPack.meta?.isPresetDefault ? '' : normalizeCompareTitle(activeTitle || '');
+                const hasBigramOverlap = (a, b) => {
+                  if (!a || !b || a.length < 2 || b.length < 2) return false;
+                  for (let i = 0; i < a.length - 1; i++) {
+                    if (b.includes(a.slice(i, i + 2))) return true;
+                  }
+                  return false;
+                };
+                if (
+                  pNorm.length >= 4 &&
+                  !hasBigramOverlap(pNorm, cNorm1) &&
+                  !hasBigramOverlap(pNorm, cNorm2) &&
+                  (!cNorm3 || !hasBigramOverlap(pNorm, cNorm3))
+                ) {
+                  mismatchWarnHtml = `⚠️ 网页标题与当前关联《${escapeHtml(
+                    effCand.label
+                  )}》疑似不符，请点上方下拉框切换正确作品或选「➕ 作为新作品登记」！`;
+                }
+              }
+
+              const cardBorder = isSyncedGreen
+                ? '#10b981'
+                : prePubState.conflictConfirm || feishuState.hasConflict
+                ? '#e11d48'
+                : '#f59e0b';
+              const cardBg = isSyncedGreen
+                ? 'rgba(16,185,129,0.09)'
+                : prePubState.conflictConfirm || feishuState.hasConflict
+                ? 'rgba(225,29,72,0.07)'
+                : 'rgba(245,158,11,0.09)';
+              const hdColor = isSyncedGreen
+                ? '#059669'
+                : prePubState.conflictConfirm || feishuState.hasConflict
+                ? '#be123c'
+                : '#b45309';
+              const btnBgGrad = isSyncedGreen
+                ? 'linear-gradient(135deg, #10b981, #059669)'
+                : 'linear-gradient(135deg, #f59e0b, #d97706)';
+
+              return `<div class="ppf-sec" style="border:2px solid ${cardBorder}; background:${cardBg}; gap:7px;">
+                <div class="ppf-sec-hd" style="color:${hdColor};">
+                  <span>${isSyncedGreen ? '✅ 发前飞书已同步' : '⚠️ 发前同步飞书'} · ${escapeHtml(
+                feishuState.accountName || pMeta.name
+              )}</span>
+                  <div class="ppf-row-nowrap">
+                    <button class="ppf-icon-btn" id="ppf-toggle-time-override" title="手动指定定时时间（页面未识别时的兜底）">⏰</button>
+                    <button class="ppf-icon-btn" id="ppf-refresh-radar" title="刷新飞书待发作品与排期雷达">🔄</button>
+                    <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="飞书连接设置与生成跨设备配置码">⚙️</button>
+                  </div>
                 </div>
-                <div style="font-size:11.5px; line-height:1.42; font-weight:500;">${scheduleRadarState.summary}</div>
-                <div style="display:flex; gap:6px; align-items:center;">
-                  <button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-pub" style="flex:1; background:${
-                    isUnlocked ? '#10b981' : '#059669'
-                  }; color:#fff; border:none; font-weight:700; padding:6px 10px;">
-                    ${
-                      isUnlocked
-                        ? '✅ 已同步飞书（原生发布钮已解锁）'
-                        : '🔒 1. 同步发布信息到飞书 → 解锁发布钮'
-                    }
-                  </button>
+
+                ${
+                  Array.isArray(feishuState.platformAccounts) && feishuState.platformAccounts.length > 1
+                    ? `<select class="ppf-select" id="ppf-feishu-acct-select" title="同平台多矩阵账号切换">
+                        ${feishuState.platformAccounts
+                          .map(
+                            (acc) =>
+                              `<option value="${escapeHtml(acc.recordId)}" ${
+                                (prePubState.selectedAccountId || feishuState.accountId) === acc.recordId
+                                  ? 'selected'
+                                  : ''
+                              }>👤 分发账号：${escapeHtml(acc.name)}</option>`
+                          )
+                          .join('')}
+                      </select>`
+                    : ''
+                }
+
+                <div style="display:flex; gap:5px; align-items:center;">
+                  <select class="ppf-select" id="ppf-work-select" style="flex:1;" title="关联本次发布对应的飞书作品（选中带 ☁️ 项可在 NAS 未同步时拉取云端文案）">
+                    <option value="auto" ${prePubState.selectedWorkKey === 'auto' ? 'selected' : ''}>🎯 自动关联：${
+                feishuState.matchedCandidate
+                  ? escapeHtml(feishuState.matchedCandidate.label)
+                  : '未命中待发项（按新作品登记）'
+              }</option>
+                    ${(feishuState.candidates || [])
+                      .map((c) => {
+                        const k = getCandidateKey(c);
+                        const cloudTag = c.hasCloudPack ? ' ☁️全套' : c.fallbackBody ? ' ☁️文案' : '';
+                        return `<option value="${escapeHtml(k)}" ${
+                          prePubState.selectedWorkKey === k ? 'selected' : ''
+                        }>📌 ${escapeHtml(c.label)} (${escapeHtml(c.cStatus)})${cloudTag}</option>`;
+                      })
+                      .join('')}
+                    <option value="new" ${
+                      prePubState.selectedWorkKey === 'new' ? 'selected' : ''
+                    }>➕ 作为新作品登记到飞书</option>
+                  </select>
+                  ${
+                    hasCloudCopy
+                      ? `<button class="ppf-btn" id="ppf-use-cloud-copy" style="flex-shrink:0; padding:5px 7px;" title="NAS未同步本机时，一键载入飞书云端备份的标题与正文">☁️ 云文案</button>`
+                      : ''
+                  }
                 </div>
+
+                ${
+                  mismatchWarnHtml
+                    ? `<div class="ppf-warn" style="background:rgba(245,158,11,0.16); padding:5px 8px; border-radius:6px; font-weight:600;">${mismatchWarnHtml}</div>`
+                    : ''
+                }
+
+                ${
+                  prePubState.showTimeInput || prePubState.manualTimeOverride
+                    ? `<div style="display:flex; gap:5px; align-items:center;">
+                        <input class="ppf-input" id="ppf-manual-time-inp" placeholder="手动指定定时 YYYY-MM-DD HH:mm (留空自动读页面)" value="${escapeHtml(
+                          prePubState.manualTimeOverride
+                        )}" />
+                        ${
+                          prePubState.manualTimeOverride
+                            ? `<button class="ppf-btn" id="ppf-clear-time-inp" style="flex-shrink:0;">清除</button>`
+                            : ''
+                        }
+                      </div>`
+                    : ''
+                }
+
+                <div style="font-size:11.5px; line-height:1.42; font-weight:500;">
+                  ${escapeHtml(feishuState.summary)}${
+                feishuState.goldenWindows && !isSyncedGreen
+                  ? ` · 黄金档 ${escapeHtml(feishuState.goldenWindows)}`
+                  : ''
+              }
+                </div>
+
+                ${
+                  prePubState.conflictConfirm
+                    ? `<div style="background:rgba(225,29,72,0.10); border:1px solid #e11d48; border-radius:8px; padding:7px 9px; display:flex; flex-direction:column; gap:6px;">
+                        <div style="font-size:11.5px; font-weight:700; color:#be123c;">${escapeHtml(
+                          prePubState.conflictConfirm.summary
+                        )}</div>
+                        <div style="display:flex; gap:6px; justify-content:flex-end;">
+                          <button class="ppf-btn" id="ppf-conf-cancel">去改页面定时</button>
+                          <button class="ppf-btn" id="ppf-conf-force" style="background:#e11d48; color:#fff; border:none; font-weight:700;">已知风险 · 强制同步变绿</button>
+                        </div>
+                      </div>`
+                    : `<button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-pub" style="background:${btnBgGrad}; color:#fff; border:none; font-weight:700; padding:8px 10px; font-size:12.5px; box-shadow:0 3px 10px ${
+                        isSyncedGreen ? 'rgba(16,185,129,0.28)' : 'rgba(217,119,6,0.28)'
+                      };">
+                        ${
+                          prePubState.syncing
+                            ? '⏳ 正在核对排期并写入飞书...'
+                            : isSyncedGreen
+                            ? `✅ 已同步飞书 (${escapeHtml(prePubState.syncedLabel || modeTag)}) · 请点网页发布`
+                            : `⚠️ 发布前点此同步飞书 · ${escapeHtml(modeTag)}`
+                        }
+                      </button>`
+                }
               </div>`;
             })()}
 
@@ -4536,14 +4967,136 @@
         }
       }
 
-      // 顶部栏与飞书排期防撞雷达按钮绑定
+      // 顶部栏与飞书发前关联 & 黄转绿警示同步按钮绑定
+      const openOptsHandler = () => {
+        sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {
+          setStatus('💡 请点击浏览器右上角插件图标 →「⚙️ 飞书直连与跨设备配置码设置」');
+        });
+      };
+      const openOptsIcon = shadow.getElementById('ppf-open-feishu-opts');
+      if (openOptsIcon) openOptsIcon.onclick = openOptsHandler;
+      const openOptsBtn = shadow.getElementById('ppf-open-feishu-opts-btn');
+      if (openOptsBtn) openOptsBtn.onclick = openOptsHandler;
+
+      const toggleQuickBtn = shadow.getElementById('ppf-toggle-quick-code');
+      if (toggleQuickBtn) {
+        toggleQuickBtn.onclick = () => {
+          prePubState.showQuickSetup = !prePubState.showQuickSetup;
+          render();
+        };
+      }
+      const quickApplyBtn = shadow.getElementById('ppf-quick-code-apply');
+      if (quickApplyBtn) {
+        quickApplyBtn.onclick = async () => {
+          const code = (shadow.getElementById('ppf-quick-code-inp')?.value || '').trim();
+          if (!code) {
+            setStatus('⚠️ 请先粘贴 PPF2:... 跨设备配置码');
+            return;
+          }
+          quickApplyBtn.disabled = true;
+          setStatus('⏳ 正在验证配置码并连接飞书多维表...');
+          try {
+            await sendExtMessage({ type: 'PPF_FEISHU_IMPORT_CODE', code });
+            prePubState.showQuickSetup = false;
+            setStatus('✅ 飞书多维表连接成功！正在拉取待发作品与排期...');
+            await refreshFeishuPublishContext(false);
+          } catch (err) {
+            setStatus(`❌ 配置码导入失败：${err?.message || err}`);
+          } finally {
+            quickApplyBtn.disabled = false;
+          }
+        };
+      }
+
       const refreshRadarBtn = shadow.getElementById('ppf-refresh-radar');
       if (refreshRadarBtn) {
-        refreshRadarBtn.onclick = () => refreshFeishuScheduleRadar(false);
+        refreshRadarBtn.onclick = () => refreshFeishuPublishContext(false);
       }
+
+      const feishuAcctSel = shadow.getElementById('ppf-feishu-acct-select');
+      if (feishuAcctSel) {
+        feishuAcctSel.onchange = (e) => {
+          prePubState.selectedAccountId = e.target.value;
+          prePubState.syncedSig = '';
+          prePubState.conflictConfirm = null;
+          refreshFeishuPublishContext(false);
+        };
+      }
+
+      const workSelect = shadow.getElementById('ppf-work-select');
+      if (workSelect) {
+        workSelect.onchange = (e) => {
+          const val = e.target.value;
+          prePubState.selectedWorkKey = val;
+          prePubState.syncedSig = '';
+          prePubState.conflictConfirm = null;
+          if (val !== 'auto' && val !== 'new') {
+            const picked = (feishuState.candidates || []).find((c) => getCandidateKey(c) === val);
+            const canAutoHydrate =
+              currentPack.meta?.isPresetDefault ||
+              currentPack.meta?.cloudFallback ||
+              currentPack.meta?.format === 'empty' ||
+              currentPack.meta?.format === 'cloud_pending';
+            if (picked && canAutoHydrate && (picked.hasCloudPack || picked.fallbackTitle || picked.fallbackBody)) {
+              applyCloudPackFromCandidate(picked, { silent: false });
+            }
+          }
+          render();
+          refreshFeishuPublishContext(true);
+        };
+      }
+
+      const useCloudCopyBtn = shadow.getElementById('ppf-use-cloud-copy');
+      if (useCloudCopyBtn) {
+        useCloudCopyBtn.onclick = () => {
+          const eff = getEffectiveFeishuCandidate();
+          if (eff && applyCloudPackFromCandidate(eff, { silent: false })) {
+            render();
+          } else {
+            setStatus('⚠️ 当前飞书作品暂无云端备份文案');
+          }
+        };
+      }
+
+      const toggleTimeBtn = shadow.getElementById('ppf-toggle-time-override');
+      if (toggleTimeBtn) {
+        toggleTimeBtn.onclick = () => {
+          prePubState.showTimeInput = !prePubState.showTimeInput;
+          render();
+        };
+      }
+      const manualTimeInp = shadow.getElementById('ppf-manual-time-inp');
+      if (manualTimeInp) {
+        manualTimeInp.onchange = (e) => {
+          prePubState.manualTimeOverride = e.target.value.trim();
+          prePubState.conflictConfirm = null;
+          refreshFeishuPublishContext(false);
+        };
+      }
+      const clearTimeBtn = shadow.getElementById('ppf-clear-time-inp');
+      if (clearTimeBtn) {
+        clearTimeBtn.onclick = () => {
+          prePubState.manualTimeOverride = '';
+          prePubState.showTimeInput = false;
+          prePubState.conflictConfirm = null;
+          refreshFeishuPublishContext(false);
+        };
+      }
+
       const panelSyncPubBtn = shadow.getElementById('ppf-panel-sync-pub');
       if (panelSyncPubBtn) {
-        panelSyncPubBtn.onclick = () => syncPublishToFeishuAndUnlock({ force: false });
+        panelSyncPubBtn.onclick = () => syncPrePublishAndTurnGreen({ force: false });
+      }
+      const confCancelBtn = shadow.getElementById('ppf-conf-cancel');
+      if (confCancelBtn) {
+        confCancelBtn.onclick = () => {
+          prePubState.conflictConfirm = null;
+          render();
+        };
+      }
+      const confForceBtn = shadow.getElementById('ppf-conf-force');
+      if (confForceBtn) {
+        confForceBtn.onclick = () => syncPrePublishAndTurnGreen({ force: true });
       }
 
       shadow.getElementById('ppf-toggle-theme').onclick = () => {
@@ -4978,13 +5531,19 @@
             setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
           }
         }
+        if (changes.ppf_feishu_config_v2) {
+          refreshFeishuPublishContext(true);
+        }
         if (changes[STORAGE_KEY_PACK]) {
           currentPack = await loadPackState();
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
-          shieldState.unlockedSig = '';
+          prePubState.selectedWorkKey = 'auto';
+          prePubState.syncedSig = '';
+          prePubState.conflictConfirm = null;
           setStatus(`🔄 已同步发布包：${currentPack.meta?.packTitle || ''}`);
           needRender = true;
+          refreshFeishuPublishContext(true);
         } else if (Object.keys(changes).some((k) => k.startsWith(CROSS_COVER_PREFIX))) {
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
@@ -5002,9 +5561,11 @@
     setTimeout(() => {
       pushExportHintToBackground({ enqueue: false });
       if (!getDataCenterContext().isDataMode) {
-        refreshFeishuScheduleRadar(true);
+        const initSched = detectPagePublishModeAndTime();
+        prePubState.lastTimeSig = `${initSched.mode}|${initSched.plannedAt}`;
+        refreshFeishuPublishContext(true);
       }
-    }, 1500);
+    }, 1200);
 
     // 即使手动直接点网页原生的「导出数据 / 下载明细」按钮，也在按下瞬间同步当前账号与板块名，让后台自动重命名与 12h 缓存生效！
     document.addEventListener(
@@ -5022,28 +5583,32 @@
       { capture: true, passive: true }
     );
 
-    // 滚动与窗口缩放时实时贴合原生「发布」按钮的沙箱护盾坐标
-    window.addEventListener('scroll', () => updatePublishShieldOverlay(), { capture: true, passive: true });
-    window.addEventListener('resize', () => updatePublishShieldOverlay(), { passive: true });
-
-    // SPA 路由切换感知 & 发布页沙箱护盾坐标巡检（零 Hook history API）
+    // SPA 路由切换感知 & 页面定时时间变更实时监测（一旦改了定时，自动退回黄色警示态并重查 6h 冲突）
     let lastObservedHref = location.href;
     setInterval(() => {
       if (location.href !== lastObservedHref) {
         lastObservedHref = location.href;
         pendingExportConfirm = null;
-        shieldState.manuallyDismissed = false;
-        shieldState.unlockedSig = '';
-        shieldState.conflictPopover = null;
+        prePubState.syncedSig = '';
+        prePubState.conflictConfirm = null;
         pushExportHintToBackground({ enqueue: false });
         render();
         if (!getDataCenterContext().isDataMode) {
-          setTimeout(() => refreshFeishuScheduleRadar(true), 900);
+          setTimeout(() => refreshFeishuPublishContext(true), 900);
         }
       } else if (!getDataCenterContext().isDataMode) {
-        updatePublishShieldOverlay();
+        const curSched = detectPagePublishModeAndTime();
+        const curTimeSig = `${curSched.mode}|${curSched.plannedAt}`;
+        if (curTimeSig !== prePubState.lastTimeSig) {
+          prePubState.lastTimeSig = curTimeSig;
+          prePubState.conflictConfirm = null;
+          render();
+          if (!feishuState.loading && feishuState.configured) {
+            refreshFeishuPublishContext(true);
+          }
+        }
       }
-    }, 650);
+    }, 700);
 
     // 若由后台 /api/collect 下发了带 autoExport 的采集指令，进入数据页后默认触发作品导出（仍受 12h 防重保护）
     if (IS_CHROME_EXT && chrome.storage?.local && getDataCenterContext().isDataMode) {
@@ -5092,94 +5657,145 @@
       targetUrls = [];
     }
 
+    const launchAccount = launchEl.getAttribute('data-account') || '';
+    const launchSlug = launchEl.getAttribute('data-work-slug') || '';
+    const launchCId = launchEl.getAttribute('data-c-record-id') || '';
+    const launchBId = launchEl.getAttribute('data-b-record-id') || '';
+
     try {
-      setLaunchMsg('⏳ 正在将当前作品《发布包》与全部高清配图透传至插件...');
+      setLaunchMsg('⏳ 正在将当前作品《发布包》与配图透传至插件...');
       const origin = location.origin;
       const res = await fetch(`${origin}/api/pack`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        const records = [];
-        if (Array.isArray(data.covers) && data.covers.length > 0) {
-          for (const rel of data.covers) {
-            try {
-              const imgRes = await fetch(`${origin}/api/file?path=${encodeURIComponent(rel)}`, { cache: 'no-store' });
-              if (imgRes.ok) {
-                const blob = await imgRes.blob();
-                records.push({ relPath: rel, blob });
-              }
-            } catch {
-              // ignore
-            }
-          }
-          await saveCoversCrossPlatform(records);
-        }
+        const effAccount = launchAccount || data.targetAccount || '';
+        const effSlug = data.workSlug || launchSlug || extractWorkSlugFront(data.baseDir || data.folderName || '');
+        const effCId = data.cRecordId || launchCId || '';
+        const effBId = data.bRecordId || launchBId || '';
 
-        const launchAccount = launchEl.getAttribute('data-account') || data.targetAccount || '';
-        const fileName = data.packFile || data.mdFile || '';
-        const rawContent = data.content || data.markdown || '';
-        let parsed = null;
-        if (rawContent) {
-          const safeName = fileName || 'publish.pack.json';
-          const isJson = /\.json$/i.test(safeName) || stripJsonCodeFence(rawContent).startsWith('{');
-          parsed = isJson
-            ? parsePublishPackJson(rawContent, { fileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' })
-            : parsePublishPackMarkdown(rawContent, { mdFileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' });
-
-          if (!isJson && data.subMarkdowns && typeof data.subMarkdowns === 'object') {
-            for (const [subPath, subText] of Object.entries(data.subMarkdowns)) {
-              const subData = parseSinglePlatformMarkdown(subText);
-              if (subPath.includes('小红书') && subData.body) {
-                parsed.platforms.xiaohongshu.title = subData.title || parsed.platforms.xiaohongshu.title;
-                parsed.platforms.xiaohongshu.body = subData.body;
-                parsed.platforms.xiaohongshu.tags = subData.tags;
-              } else if (subPath.includes('抖音') && subData.body) {
-                parsed.platforms.douyin.title = subData.title || parsed.platforms.douyin.title;
-                parsed.platforms.douyin.body = subData.body;
-                parsed.platforms.douyin.tags = subData.tags;
-              } else if (subPath.includes('B站') && subData.body) {
-                parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
-                parsed.platforms.bilibili.body = subData.body;
-              }
-            }
-          }
-        } else if (data.folderName || records.length > 0) {
-          parsed = {
+        if (data.localMissing) {
+          await xStorageClearByPrefix(CROSS_COVER_PREFIX);
+          const cloudStub = {
             meta: {
-              packTitle: data.folderName || '已定位作品目录',
-              mdFileName: '（仅媒体目录）',
-              format: 'empty',
+              isPresetDefault: false,
+              packTitle: effSlug || '待从飞书拉取云端文案...',
+              mdFileName: '☁️ 飞书云端关联模式',
+              format: 'cloud_pending',
               contentType: 'video',
-              baseDir: data.baseDir || '',
+              baseDir: '',
+              workSlug: effSlug,
+              cRecordId: effCId,
+              bRecordId: effBId,
+              targetAccount: effAccount,
+              localMissing: true,
+              cloudFallback: true,
               updatedAt: new Date().toISOString(),
             },
             covers: [],
             images: [],
             platforms: {},
           };
-        }
-
-        if (parsed) {
-          parsed.meta = parsed.meta || {};
-          if (records.length > 0 && parsed.meta?.contentType !== 'image_post') {
-            const recMap = new Map(records.map((r) => [r.relPath, r.blob]));
-            parsed.covers = mergeCoversWithBlobs(parsed.covers, recMap, false);
-            for (const c of parsed.covers) {
-              const b = findBlobFlexible(recMap, c.relPath);
-              if (b) {
-                c.ratio = await detectImageBlobRatio(b, c.ratio);
-                c._ratioVerified = true;
-              }
-            }
-          }
-          await xStorageSet(STORAGE_KEY_PACK, JSON.stringify(parsed));
-
+          await xStorageSet(STORAGE_KEY_PACK, JSON.stringify(cloudStub));
           const curSettings = await loadSettings();
           curSettings.lastBridgeVersion = data.packVersion || '';
           curSettings.selectedTitleIdx = -1;
           curSettings.selectedCoverByPlat = {};
           await xStorageSet(STORAGE_KEY_SETTINGS, JSON.stringify(curSettings));
+          setLaunchMsg('☁️ 本机暂无该目录，已绑定飞书排期并在目标发布页自动拉取云端兜底文案...');
+        } else {
+          const records = [];
+          if (Array.isArray(data.covers) && data.covers.length > 0) {
+            for (const rel of data.covers) {
+              try {
+                const imgRes = await fetch(`${origin}/api/file?path=${encodeURIComponent(rel)}`, { cache: 'no-store' });
+                if (imgRes.ok) {
+                  const blob = await imgRes.blob();
+                  records.push({ relPath: rel, blob });
+                }
+              } catch {
+                // ignore
+              }
+            }
+            await saveCoversCrossPlatform(records);
+          } else {
+            await xStorageClearByPrefix(CROSS_COVER_PREFIX);
+          }
+
+          const fileName = data.packFile || data.mdFile || '';
+          const rawContent = data.content || data.markdown || '';
+          let parsed = null;
+          if (rawContent) {
+            const safeName = fileName || 'publish.pack.json';
+            const isJson = /\.json$/i.test(safeName) || stripJsonCodeFence(rawContent).startsWith('{');
+            parsed = isJson
+              ? parsePublishPackJson(rawContent, { fileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' })
+              : parsePublishPackMarkdown(rawContent, { mdFileName: safeName, sourceLabel: safeName, baseDir: data.baseDir || '' });
+
+            if (!isJson && data.subMarkdowns && typeof data.subMarkdowns === 'object') {
+              for (const [subPath, subText] of Object.entries(data.subMarkdowns)) {
+                const subData = parseSinglePlatformMarkdown(subText);
+                if (subPath.includes('小红书') && subData.body) {
+                  parsed.platforms.xiaohongshu.title = subData.title || parsed.platforms.xiaohongshu.title;
+                  parsed.platforms.xiaohongshu.body = subData.body;
+                  parsed.platforms.xiaohongshu.tags = subData.tags;
+                } else if (subPath.includes('抖音') && subData.body) {
+                  parsed.platforms.douyin.title = subData.title || parsed.platforms.douyin.title;
+                  parsed.platforms.douyin.body = subData.body;
+                  parsed.platforms.douyin.tags = subData.tags;
+                } else if (subPath.includes('B站') && subData.body) {
+                  parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
+                  parsed.platforms.bilibili.body = subData.body;
+                }
+              }
+            }
+          } else if (data.folderName || records.length > 0) {
+            parsed = {
+              meta: {
+                packTitle: data.folderName || '已定位作品目录',
+                mdFileName: '（仅媒体目录）',
+                format: 'empty',
+                contentType: 'video',
+                baseDir: data.baseDir || '',
+                updatedAt: new Date().toISOString(),
+              },
+              covers: [],
+              images: [],
+              platforms: {},
+            };
+          }
+
+          if (parsed) {
+            parsed.meta = {
+              ...(parsed.meta || {}),
+              isPresetDefault: false,
+              workSlug: effSlug,
+              cRecordId: effCId,
+              bRecordId: effBId,
+              targetAccount: effAccount,
+              localMissing: false,
+              cloudFallback: false,
+            };
+            if (records.length > 0 && parsed.meta?.contentType !== 'image_post') {
+              const recMap = new Map(records.map((r) => [r.relPath, r.blob]));
+              parsed.covers = mergeCoversWithBlobs(parsed.covers, recMap, false);
+              for (const c of parsed.covers) {
+                const b = findBlobFlexible(recMap, c.relPath);
+                if (b) {
+                  c.ratio = await detectImageBlobRatio(b, c.ratio);
+                  c._ratioVerified = true;
+                }
+              }
+            }
+            await xStorageSet(STORAGE_KEY_PACK, JSON.stringify(parsed));
+
+            const curSettings = await loadSettings();
+            curSettings.lastBridgeVersion = data.packVersion || '';
+            curSettings.selectedTitleIdx = -1;
+            curSettings.selectedCoverByPlat = {};
+            await xStorageSet(STORAGE_KEY_SETTINGS, JSON.stringify(curSettings));
+          }
+          setLaunchMsg(`✅ 透传完成（含 ${records.length} 张配图）！正在前往目标发布后台...`);
         }
-        setLaunchMsg(`✅ 透传完成（含 ${records.length} 张配图）！正在前往目标发布后台...`);
       }
     } catch {
       // 即使目录内暂无发布包文档，仍正常执行页面跳转

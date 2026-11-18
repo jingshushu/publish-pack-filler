@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>全平台半自动发布助手 · 飞书直连与跨设备配置 (v2.0)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    body { background: #f5f6f8; color: #1f2329; padding: 28px 16px 60px; font-size: 13.5px; line-height: 1.55; }
+    .container { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+    .header { display: flex; align-items: center; justify-content: space-between; background: #fff; padding: 20px 24px; border-radius: 14px; border: 1px solid rgba(31,35,41,0.08); box-shadow: 0 4px 16px rgba(15,23,42,0.04); }
+    .header h1 { font-size: 19px; display: flex; align-items: center; gap: 9px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #ff2442; }
+    .ver { font-size: 12px; color: #646a73; background: #f2f3f5; padding: 3px 9px; border-radius: 999px; font-weight: 600; }
+    .card { background: #fff; padding: 22px 24px; border-radius: 14px; border: 1px solid rgba(31,35,41,0.08); box-shadow: 0 4px 16px rgba(15,23,42,0.03); display: flex; flex-direction: column; gap: 14px; }
+    .card h2 { font-size: 15.5px; font-weight: 700; display: flex; align-items: center; justify-content: space-between; }
+    .desc { font-size: 12.5px; color: #646a73; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: #4e5969; }
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      width: 100%; padding: 8px 11px; border-radius: 8px; border: 1px solid rgba(31,35,41,0.16); font-size: 13px; color: #1f2329; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: #059669; box-shadow: 0 0 0 3px rgba(5,150,105,0.12); }
+    button { padding: 8px 15px; border-radius: 8px; border: 1px solid rgba(31,35,41,0.14); background: #fff; color: #1f2329; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.14s; }
+    button:hover { background: #f2f3f5; }
+    button.primary { background: #059669; color: #fff; border-color: transparent; }
+    button.primary:hover { filter: brightness(1.06); background: #059669; }
+    button.accent { background: #ff2442; color: #fff; border-color: transparent; }
+    button.accent:hover { filter: brightness(1.06); background: #ff2442; }
+    .status-box { padding: 11px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; display: none; white-space: pre-wrap; word-break: break-word; }
+    .status-box.ok { display: block; background: rgba(5,150,105,0.1); color: #047857; border: 1px solid rgba(5,150,105,0.25); }
+    .status-box.err { display: block; background: rgba(225,29,72,0.08); color: #be123c; border: 1px solid rgba(225,29,72,0.25); }
+    details summary { cursor: pointer; font-weight: 600; color: #4e5969; font-size: 13px; user-select: none; }
+    .sub-sec { margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(31,35,41,0.12); display: flex; flex-direction: column; gap: 12px; }
+    code { background: #f2f3f5; padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1><span class="dot"></span><span>全平台半自动发布助手 · 飞书直连与跨设备配置</span></h1>
+      <span class="ver">v2.0.0 · 零本地依赖</span>
+    </div>
+
+    <div id="global-msg" class="status-box"></div>
+
+    <!-- 卡片 1：跨设备 5 秒一键迁移 -->
+    <div class="card">
+      <h2>
+        <span>⚡ 跨设备 / 团队 5 秒激活（配置码导入与导出）</span>
+        <button id="btn-load-local-bridge" title="若本机开启了 serve_pack.py 且配过 .env / .bridge.local.json，可一键读取">🔌 从本机环境自动读取</button>
+      </h2>
+      <div class="desc">
+        在主力电脑配置好后，点击「复制完整配置码」发到另一台电脑（如 MacBook Air / Windows），粘贴导入即可立即打通飞书，无需安装 Python、`lark-cli` 或任何外部仓库。
+      </div>
+      <textarea id="config-code-input" rows="2" placeholder="在此粘贴 PPF2:... 配置码，点击下方「导入并自动激活」..."></textarea>
+      <div class="row">
+        <button class="primary" id="btn-import-code">📥 导入配置码并测试激活</button>
+        <button id="btn-export-full">📋 复制完整配置码（自用跨电脑迁移，含密钥）</button>
+        <button id="btn-export-template">📋 复制脱敏模板码（分享给他人复用表结构，不含密钥）</button>
+      </div>
+    </div>
+
+    <!-- 卡片 2：飞书多维表格直连配置 -->
+    <div class="card">
+      <h2><span>🔗 飞书 / Lark 多维表格直连设置</span></h2>
+      <div class="desc">
+        插件后台直接通过官方 HTTPS OpenAPI 连接多维表格。即使不启动本地 Python 脚本、或 NAS 尚未同步本地视频目录，也能完成作品关联、6h 防撞排期校验与云端兜底文案读取。
+      </div>
+
+      <div class="grid2">
+        <label class="field">
+          <span>鉴权方式</span>
+          <select id="auth-type">
+            <option value="app">飞书自建应用（App ID + App Secret · 推荐长期稳定）</option>
+            <option value="personal_token">多维表格个人授权码（Personal Base Token · 免建应用）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>飞书多维表格链接（或 Base Token）</span>
+          <input type="text" id="base-url" placeholder="例如：https://my.feishu.cn/base/bascnXXXXXXXXXXXXXX" />
+        </label>
+      </div>
+
+      <div id="app-auth-fields" class="grid2">
+        <label class="field">
+          <span>应用 App ID</span>
+          <input type="text" id="app-id" placeholder="cli_xxxxxxxxxxxx" />
+        </label>
+        <label class="field">
+          <span>应用 App Secret（仅加密保存在当前浏览器本地扩展存储）</span>
+          <input type="password" id="app-secret" placeholder="填写 App Secret" />
+        </label>
+      </div>
+
+      <div id="pt-auth-fields" style="display:none;">
+        <label class="field">
+          <span>多维表格个人授权码（在多维表格右上角「插件 → 自定义脚本 → 获取授权码」查看）</span>
+          <input type="password" id="personal-token" placeholder="pt-xxxxxxxxxxxxxxxx" />
+        </label>
+      </div>
+
+      <div class="row">
+        <button class="primary" id="btn-discover">🔍 测试连接并自动识别数据表与字段</button>
+        <button id="btn-ensure-snapshot">☁️ 一键在内容表创建「发布包快照」云端兜底列</button>
+        <button id="btn-save-only">💾 保存当前设置</button>
+      </div>
+    </div>
+
+    <!-- 卡片 3：表结构与字段映射（面向任意团队/其他产品的通用自定义能力） -->
+    <div class="card">
+      <details id="advanced-details">
+        <summary>🗂️ 数据表与字段映射（已支持自动识别，其他产品/不同表头可在此自由映射）</summary>
+        <div class="sub-sec">
+          <div class="grid3">
+            <label class="field">
+              <span>表架构模式</span>
+              <select id="schema-mode">
+                <option value="multi_table">多表协同（内容表 B + 发布记录表 C + 可选账号表 Z3）</option>
+                <option value="single_table">极简单表（仅用 1 张发布排期表管理全部记录）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>同账号排期防撞最小间隔（小时）</span>
+              <input type="number" id="min-gap-hours" min="1" max="72" step="0.5" value="6" />
+            </label>
+            <label class="field">
+              <span>开放平台域名</span>
+              <select id="api-domain">
+                <option value="https://open.feishu.cn">飞书国内版 (open.feishu.cn)</option>
+                <option value="https://open.larksuite.com">Lark 国际版 (open.larksuite.com)</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid3">
+            <label class="field">
+              <span>账号表 (Z3 · 可选)</span>
+              <select id="tbl-accounts"><option value="">（不使用独立账号表）</option></select>
+            </label>
+            <label class="field">
+              <span>内容运营/作品表 (B · 多表模式)</span>
+              <select id="tbl-works"><option value="">（不使用独立内容表）</option></select>
+            </label>
+            <label class="field">
+              <span>发布记录/排期表 (C · 必选)</span>
+              <select id="tbl-publishes"><option value="">请先点击上方「测试连接并识别」</option></select>
+            </label>
+          </div>
+
+          <div class="grid3">
+            <label class="field"><span>内容表 · 作品名称列</span><input type="text" id="fm-work-title" /></label>
+            <label class="field"><span>内容表 · 本地目录名列</span><input type="text" id="fm-work-slug" /></label>
+            <label class="field"><span>内容表 · 云端发布包快照列</span><input type="text" id="fm-work-snapshot" /></label>
+            <label class="field"><span>内容表 · 兜底通用标题列</span><input type="text" id="fm-work-fb-title" /></label>
+            <label class="field"><span>内容表 · 兜底通用文案列</span><input type="text" id="fm-work-fb-body" /></label>
+            <label class="field"><span>发布表 · 状态列</span><input type="text" id="fm-pub-status" /></label>
+            <label class="field"><span>发布表 · 计划定时列</span><input type="text" id="fm-pub-planned" /></label>
+            <label class="field"><span>发布表 · 真实发布时间列</span><input type="text" id="fm-pub-published" /></label>
+            <label class="field"><span>发布表 · 实发标题列</span><input type="text" id="fm-pub-title" /></label>
+            <label class="field"><span>发布表 · 实发正文列</span><input type="text" id="fm-pub-body" /></label>
+            <label class="field"><span>发布表 · 话题标签列</span><input type="text" id="fm-pub-tags" /></label>
+            <label class="field"><span>发布表 · 线上链接列</span><input type="text" id="fm-pub-url" /></label>
+          </div>
+
+          <div class="grid3">
+            <label class="field"><span>状态值 · 待发布</span><input type="text" id="st-pub-pending" /></label>
+            <label class="field"><span>状态值 · 定时排期中</span><input type="text" id="st-pub-scheduled" /></label>
+            <label class="field"><span>状态值 · 已发布</span><input type="text" id="st-pub-published" /></label>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

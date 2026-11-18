@@ -59,6 +59,17 @@ async function initPopup() {
     });
   }
 
+  const optBtn = document.getElementById('open-options');
+  if (optBtn) {
+    optBtn.addEventListener('click', () => {
+      if (chrome.runtime.openOptionsPage) {
+        chrome.runtime.openOptionsPage(() => window.close());
+      } else {
+        chrome.tabs.create({ url: chrome.runtime.getURL('options.html') });
+      }
+    });
+  }
+
   document.getElementById('toggle-panel').addEventListener('click', async () => {
     try {
       const res = await chrome.storage.local.get(STORAGE_KEY_SETTINGS);

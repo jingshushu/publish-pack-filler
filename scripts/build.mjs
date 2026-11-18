@@ -33,7 +33,11 @@ const zipName = `publish-pack-filler-chrome-v${manifest.version}.zip`;
 const zipPath = path.join(distDir, zipName);
 if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
 
-execFileSync('zip', ['-r', '-q', zipPath, 'manifest.json', 'background.js', 'content.js', 'popup.html', 'popup.js', 'icons'], {
-  cwd: extDir,
-});
+execFileSync(
+  'zip',
+  ['-r', '-q', zipPath, 'manifest.json', 'background.js', 'feishu_client.js', 'content.js', 'popup.html', 'popup.js', 'options.html', 'options.js', 'icons'],
+  {
+    cwd: extDir,
+  }
+);
 console.log(`✅ Packaged Chrome Extension: dist/${zipName}`);
