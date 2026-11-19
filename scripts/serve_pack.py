@@ -840,6 +840,7 @@ def build_cutcheck_launchpad_html(
     tok_info: dict,
     cutcheck_url: str,
     work_slug: str,
+    b_record_id: str = "",
 ) -> str:
     size_mb = round(int(tok_info.get("size", 0)) / (1024 * 1024), 1)
     return f"""<!DOCTYPE html>
@@ -870,6 +871,7 @@ def build_cutcheck_launchpad_html(
        data-project="{html.escape(tok_info.get('projectName', ''))}"
        data-version="{html.escape(tok_info.get('version', ''))}"
        data-work-slug="{html.escape(work_slug)}"
+       data-b-record-id="{html.escape(b_record_id)}"
        data-target-url="{html.escape(cutcheck_url)}">
     <span class="badge">🎬 Cutcheck 在线审片直连</span>
     <h1>已锁定本机成片：{html.escape(tok_info['name'])}</h1>
@@ -965,12 +967,66 @@ def make_handler(state: BridgeState):
                 self._send_json(load_local_feishu_bootstrap(state.raw_cfg))
                 return
 
+            if parsed.path == "/api/prepare-review":
+                raw_dir = (qs.get("dir") or qs.get("path") or [""])[0]
+                raw_project = normalize_feishu_cell_text((qs.get("project") or qs.get("title") or [""])[0])
+                raw_version = normalize_feishu_cell_text((qs.get("version") or [""])[0])
+                raw_bid = normalize_feishu_cell_text((qs.get("bid") or [""])[0])
+                clean_slug = extract_clean_slug(raw_dir)
+                try:
+                    target_base = state.resolve_work_directory(raw_dir)
+                    proj_dir, pack_dir = state.locate_pack_dir(target_base, "")
+                except PermissionError as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=403)
+                    return
+                except (ValueError, FileNotFoundError):
+                    self._send_json({"ok": False, "error": f"本机磁盘/NAS 暂未同步目录：{raw_dir}"}, status=404)
+                    return
+
+                video_file = (
+                    target_base
+                    if (target_base.is_file() and target_base.suffix.lower() in (".mp4", ".mov", ".m4v", ".webm"))
+                    else find_primary_video_file(pack_dir, proj_dir)
+                )
+                if not video_file or not video_file.is_file():
+                    self._send_json({"ok": False, "error": f"目录《{proj_dir.name}》内暂未找到成片视频 (.mp4/.mov)"}, status=404)
+                    return
+
+                resolved_slug = extract_clean_slug(proj_dir.name) or clean_slug
+                project_label = raw_project or resolved_slug or proj_dir.name
+                version_label = raw_version or infer_video_version_label(video_file)
+                tok_info = state.register_review_video(video_file, project_name=project_label, version=version_label, ttl=7200)
+                hash_dict = {"file": str(video_file)}
+                if project_label:
+                    hash_dict["project"] = project_label
+                if version_label:
+                    hash_dict["version"] = version_label
+                cutcheck_url = f"{CUTCHECK_HOSTED_URL}/#" + urllib.parse.urlencode(hash_dict)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "token": tok_info["token"],
+                        "videoPath": tok_info["path"],
+                        "fileName": tok_info["name"],
+                        "size": tok_info["size"],
+                        "mime": tok_info["mime"],
+                        "lastModified": tok_info["lastModified"],
+                        "project": project_label,
+                        "version": version_label,
+                        "workSlug": resolved_slug,
+                        "bRecordId": raw_bid,
+                        "cutcheckUrl": cutcheck_url,
+                    }
+                )
+                return
+
             if parsed.path == "/review" or (
                 parsed.path == "/open" and normalize_feishu_cell_text((qs.get("site") or [""])[0]).lower() == "cutcheck"
             ):
                 raw_dir = (qs.get("dir") or qs.get("path") or [""])[0]
                 raw_project = normalize_feishu_cell_text((qs.get("project") or qs.get("title") or [""])[0])
                 raw_version = normalize_feishu_cell_text((qs.get("version") or [""])[0])
+                raw_bid = normalize_feishu_cell_text((qs.get("bid") or [""])[0])
                 raw_time = (qs.get("t") or qs.get("time") or ["0"])[0]
                 raw_host = (qs.get("host") or [CUTCHECK_HOSTED_URL])[0].strip().rstrip("/")
                 if not raw_host.startswith(("https://cutcheck-alpha.vercel.app", "http://127.0.0.1:", "http://localhost:")):
@@ -1040,6 +1096,7 @@ def make_handler(state: BridgeState):
                         tok_info=tok_info,
                         cutcheck_url=cutcheck_url,
                         work_slug=resolved_slug,
+                        b_record_id=raw_bid,
                     )
                 )
                 return

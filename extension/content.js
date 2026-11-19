@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.3.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.4.0) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -20,8 +20,9 @@
   const STORAGE_KEY_EXPORT_CACHE = 'ppf_export_cache_v1';
   const STORAGE_KEY_DEVICE_ID = 'ppf_device_id_v1';
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
+  const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.3.0';
+  const EXT_FALLBACK_VERSION = '2.4.0';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -5979,6 +5980,9 @@
       const msgEl = document.getElementById('ppf-cutcheck-msg');
       if (msgEl) msgEl.textContent = '⚡ 插件已接管：正在打开线上 Cutcheck 并自动注入本机成片...';
       const targetUrl = cutLaunchEl.getAttribute('data-target-url') || '';
+      const urlQsCut = new URLSearchParams(window.location.search || '');
+      const bRecId = cutLaunchEl.getAttribute('data-b-record-id') || (urlQsCut.get('bid') || '').trim();
+      const workSlugCut = cutLaunchEl.getAttribute('data-work-slug') || extractWorkSlugFront(urlQsCut.get('dir') || '');
       const payload = {
         token: cutLaunchEl.getAttribute('data-review-token') || '',
         videoPath: cutLaunchEl.getAttribute('data-video-path') || '',
@@ -5988,10 +5992,23 @@
         lastModified: Number(cutLaunchEl.getAttribute('data-last-modified') || Date.now()),
         project: cutLaunchEl.getAttribute('data-project') || '',
         version: cutLaunchEl.getAttribute('data-version') || '',
+        workSlug: workSlugCut,
+        bRecordId: bRecId,
         bridgeOrigin: location.origin,
         createdAt: Date.now(),
       };
       await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, JSON.stringify(payload));
+      await xStorageSet(
+        STORAGE_KEY_CUTCHECK_BOUND,
+        JSON.stringify({
+          bRecordId: bRecId,
+          workSlug: workSlugCut,
+          project: payload.project,
+          videoPath: payload.videoPath,
+          version: payload.version,
+          updatedAt: Date.now(),
+        })
+      );
       if (targetUrl) {
         if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
           chrome.runtime.sendMessage({ type: 'PPF_NAVIGATE_CLEAN_TABS', urls: [targetUrl] }, (resp) => {
@@ -6379,10 +6396,506 @@
     }
   }
 
+  // ==================== Cutcheck 在线审片场景专属微工作条（待审队列快切 + 一键审片通过生成发布任务） ====================
+  async function mountCutcheckReviewBar() {
+    const ccHost = document.createElement('aside');
+    (document.body || document.documentElement).appendChild(ccHost);
+    const ccShadow = ccHost.attachShadow({ mode: 'closed' });
+    const ccStyle = document.createElement('style');
+    const ccRoot = document.createElement('div');
+    ccShadow.appendChild(ccStyle);
+    ccShadow.appendChild(ccRoot);
+
+    const ccState = {
+      collapsed: false,
+      posLeft: 14,
+      posBottom: 14,
+      configured: true,
+      loading: false,
+      switching: false,
+      approving: false,
+      pendingWorks: [],
+      activeWork: null,
+      boundBId: '',
+      boundSlug: '',
+      boundProject: '',
+      alertMsg: '',
+      alertIsErr: false,
+    };
+
+    try {
+      const rawBound = await xStorageGet(STORAGE_KEY_CUTCHECK_BOUND, '');
+      if (rawBound) {
+        const b = typeof rawBound === 'string' ? JSON.parse(rawBound) : rawBound;
+        if (b && Date.now() - Number(b.updatedAt || 0) < 12 * 3600 * 1000) {
+          ccState.boundBId = b.bRecordId || '';
+          ccState.boundSlug = b.workSlug || '';
+          ccState.boundProject = b.project || '';
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    function parseHashContext() {
+      const h = String(location.hash || '').replace(/^#/, '');
+      if (!h) return { filePath: '', project: '', slug: '' };
+      const p = new URLSearchParams(h);
+      const filePath = p.get('file') || '';
+      const project = p.get('project') || '';
+      const slug = extractWorkSlugFront(filePath);
+      return { filePath, project, slug };
+    }
+
+    function syncBoundWithHash() {
+      const hc = parseHashContext();
+      if (hc.slug && ccState.boundSlug && hc.slug !== ccState.boundSlug) {
+        // 若用户通过 URL 手动切到了另一部作品，清空旧 bRecordId 让新 slug 自动匹配
+        ccState.boundBId = '';
+        ccState.boundSlug = hc.slug;
+        ccState.boundProject = hc.project || '';
+      } else {
+        if (!ccState.boundSlug && hc.slug) ccState.boundSlug = hc.slug;
+        if (!ccState.boundProject && hc.project) ccState.boundProject = hc.project;
+      }
+    }
+
+    function applyCcHostPos() {
+      ccHost.style.cssText = `all: initial; position: fixed; z-index: 2147483645; left: ${ccState.posLeft}px; bottom: ${ccState.posBottom}px; pointer-events: none;`;
+    }
+
+    ccStyle.textContent = `
+      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .cc-card { pointer-events: auto; width: 356px; max-width: calc(100vw - 28px); background: rgba(255,255,255,0.98); color: #171a18; border: 1.5px solid #bfc8c3; border-radius: 13px; box-shadow: 0 12px 34px rgba(17,31,25,0.16); backdrop-filter: blur(12px); padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; }
+      .cc-hd { display: flex; align-items: center; justify-content: space-between; gap: 6px; cursor: move; user-select: none; }
+      .cc-title { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; color: #16624f; }
+      .cc-badge { background: #16624f; color: #fff; padding: 2px 6px; border-radius: 5px; font-size: 11px; font-weight: 700; }
+      .cc-cnt { background: #e9f3f0; color: #16624f; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+      .cc-icons { display: flex; align-items: center; gap: 3px; }
+      .cc-ibtn { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 5px; font-size: 12px; cursor: pointer; color: #65706b; line-height: 1.1; }
+      .cc-ibtn:hover { background: #f1f4f2; color: #171a18; border-color: #d9dedb; }
+      .cc-row { display: flex; align-items: center; gap: 6px; }
+      .cc-sel { flex: 1; min-width: 0; padding: 4px 7px; border-radius: 7px; border: 1px solid #cdd6d0; background: #fff; color: #171a18; font-size: 12px; font-weight: 600; outline: none; }
+      .cc-sel:focus { border-color: #16624f; }
+      .cc-btn { padding: 4px 9px; border-radius: 7px; border: 1px solid #cdd6d0; background: #fff; color: #171a18; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+      .cc-btn:hover { background: #f1f4f2; }
+      .cc-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+      .cc-approve { width: 100%; padding: 7px 10px; border-radius: 8px; border: none; background: linear-gradient(135deg, #16624f, #0f503f); color: #fff; font-size: 12.5px; font-weight: 800; cursor: pointer; box-shadow: 0 3px 10px rgba(22,98,79,0.25); }
+      .cc-approve:hover { filter: brightness(1.06); }
+      .cc-approve:disabled { opacity: 0.65; cursor: wait; }
+      .cc-ok-box { background: #ecfdf5; border: 1px solid #10b981; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 5px; }
+      .cc-ok-hd { color: #047857; font-size: 11.5px; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
+      .cc-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+      .cc-pill { text-decoration: none; background: #fff; color: #0f503f; border: 1px solid rgba(16,185,129,0.45); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+      .cc-pill:hover { background: #d1fae5; }
+      .cc-alert { padding: 5px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.38; word-break: break-word; }
+      .cc-alert.err { background: #fff1ef; color: #a43d35; border-left: 3px solid #dc2626; }
+      .cc-alert.info { background: #e9f3f0; color: #16624f; }
+      .cc-mini { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; background: #16624f; color: #fff; border: 2px solid #fff; border-radius: 999px; box-shadow: 0 6px 18px rgba(22,98,79,0.34); font-size: 12px; font-weight: 700; cursor: pointer; user-select: none; }
+    `;
+
+    async function refreshReviewQueue(force = false) {
+      if (!IS_CHROME_EXT) {
+        ccState.configured = false;
+        renderCcBar();
+        return;
+      }
+      syncBoundWithHash();
+      const hc = parseHashContext();
+      ccState.loading = true;
+      renderCcBar();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_QUERY_REVIEW_QUEUE',
+          params: {
+            bRecordId: ccState.boundBId,
+            workSlug: ccState.boundSlug || hc.slug,
+            videoPath: hc.filePath,
+            project: ccState.boundProject || hc.project,
+            forceRefresh: force,
+          },
+        });
+        const d = resp?.data || {};
+        ccState.configured = Boolean(d.configured);
+        ccState.pendingWorks = d.pendingWorks || [];
+        ccState.activeWork = d.activeWork || null;
+        if (ccState.activeWork?.bRecordId) {
+          ccState.boundBId = ccState.activeWork.bRecordId;
+          ccState.boundSlug = ccState.activeWork.slug || ccState.boundSlug;
+          ccState.boundProject = ccState.activeWork.title || ccState.boundProject;
+        }
+      } catch (err) {
+        ccState.alertMsg = `⚠️ 读取飞书待审列表失败：${err?.message || err}`;
+        ccState.alertIsErr = true;
+      } finally {
+        ccState.loading = false;
+        renderCcBar();
+      }
+    }
+
+    async function switchReviewVideoToWork(targetWork) {
+      if (!targetWork || ccState.switching) return;
+      if (!targetWork.slug) {
+        ccState.alertMsg = `⚠️《${targetWork.title}》在飞书尚未填写本地作品目录`;
+        ccState.alertIsErr = true;
+        renderCcBar();
+        return;
+      }
+      ccState.switching = true;
+      ccState.alertMsg = `⏳ 正在定位本机《${targetWork.title}》最新正片...`;
+      ccState.alertIsErr = false;
+      renderCcBar();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_BRIDGE_PREPARE_REVIEW',
+          dir: targetWork.slug,
+          project: targetWork.title,
+          bid: targetWork.bRecordId,
+        });
+        const prep = resp?.data || {};
+        ccState.boundBId = targetWork.bRecordId;
+        ccState.boundSlug = prep.workSlug || targetWork.slug;
+        ccState.boundProject = prep.project || targetWork.title;
+
+        const payload = {
+          token: prep.token,
+          videoPath: prep.videoPath,
+          fileName: prep.fileName,
+          size: Number(prep.size || 0),
+          mime: prep.mime || 'video/mp4',
+          lastModified: Number(prep.lastModified || Date.now()),
+          project: prep.project || targetWork.title,
+          version: prep.version || '',
+          workSlug: ccState.boundSlug,
+          bRecordId: targetWork.bRecordId,
+          bridgeOrigin: BRIDGE_DEFAULT_URL,
+          createdAt: Date.now(),
+        };
+        await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, JSON.stringify(payload));
+        await xStorageSet(
+          STORAGE_KEY_CUTCHECK_BOUND,
+          JSON.stringify({
+            bRecordId: targetWork.bRecordId,
+            workSlug: ccState.boundSlug,
+            project: ccState.boundProject,
+            videoPath: prep.videoPath,
+            version: prep.version || '',
+            updatedAt: Date.now(),
+          })
+        );
+        ccState.activeWork = targetWork;
+        ccState.alertMsg = '';
+        ccState.switching = false;
+        renderCcBar();
+
+        const nextHash = new URL(prep.cutcheckUrl).hash;
+        if (location.hash === nextHash) {
+          handleCutcheckAutoLoad();
+        } else {
+          location.hash = nextHash;
+        }
+      } catch (err) {
+        ccState.switching = false;
+        ccState.alertMsg = `❌ 切换失败：${err?.message || '请确认本机 8765 桥接服务已启动且 NAS 已同步该成片'}`;
+        ccState.alertIsErr = true;
+        renderCcBar();
+      }
+    }
+
+    async function approveCurrentWork() {
+      const cur = ccState.activeWork;
+      if (!cur || ccState.approving) return;
+      ccState.approving = true;
+      ccState.alertMsg = '⏳ 正在写入审片通过时间，并触发飞书流转 B12 与生成全渠道发布任务...';
+      ccState.alertIsErr = false;
+      renderCcBar();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_APPROVE_REVIEW',
+          payload: {
+            bRecordId: cur.bRecordId,
+            workSlug: cur.slug,
+            project: cur.title,
+          },
+        });
+        const res = resp?.data || {};
+        ccState.approving = false;
+        ccState.pendingWorks = res.pendingWorks || ccState.pendingWorks.filter((w) => w.bRecordId !== cur.bRecordId);
+        ccState.activeWork = {
+          ...cur,
+          status: res.newStatus || 'B12等待发布至平台',
+          approvedAt: res.approvedAtStr || '',
+          isApproved: true,
+          cTasks: res.cTasks || [],
+        };
+        ccState.alertMsg = '';
+        ccState.alertIsErr = false;
+        renderCcBar();
+      } catch (err) {
+        ccState.approving = false;
+        ccState.alertMsg = `❌ 审片通过失败：${err?.message || err}`;
+        ccState.alertIsErr = true;
+        renderCcBar();
+      }
+    }
+
+    function renderCcBar() {
+      applyCcHostPos();
+      ccRoot.innerHTML = '';
+
+      const pCnt = ccState.pendingWorks.length;
+      const cur = ccState.activeWork;
+
+      if (ccState.collapsed) {
+        const pill = document.createElement('div');
+        pill.className = 'cc-mini';
+        pill.id = 'ppf-cc-collapsed-pill';
+        pill.title = '点击展开飞书审片工作条';
+        pill.innerHTML = `<span>🎬 飞书审片</span><span style="background:rgba(255,255,255,0.2);padding:1px 6px;border-radius:999px;">待审 ${pCnt}</span>`;
+        pill.onclick = () => {
+          ccState.collapsed = false;
+          renderCcBar();
+        };
+        ccRoot.appendChild(pill);
+        return;
+      }
+
+      const card = document.createElement('div');
+      card.className = 'cc-card';
+      card.id = 'ppf-cc-card';
+
+      if (!ccState.configured) {
+        card.innerHTML = `
+          <div class="cc-hd" id="ppf-cc-drag">
+            <div class="cc-title"><span class="cc-badge">🎬 飞书审片</span><span>未连接多维表</span></div>
+            <div class="cc-icons">
+              <button class="cc-ibtn" id="ppf-cc-opts" title="连接飞书多维表设置">⚙️</button>
+              <button class="cc-ibtn" id="ppf-cc-collapse" title="收起为胶囊">—</button>
+            </div>
+          </div>
+          <button class="cc-approve" id="ppf-cc-opts-main">⚙️ 点此连接飞书（启用待审快切与一键通过）</button>
+        `;
+        ccRoot.appendChild(card);
+        const openOpts = () => sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {});
+        ccShadow.getElementById('ppf-cc-opts').onclick = openOpts;
+        ccShadow.getElementById('ppf-cc-opts-main').onclick = openOpts;
+        ccShadow.getElementById('ppf-cc-collapse').onclick = () => {
+          ccState.collapsed = true;
+          renderCcBar();
+        };
+        return;
+      }
+
+      // 构建下拉列表：若当前活跃作品不在 pendingWorks 中（例如已通过为 B12），置顶显示当前项方便查看状态
+      const listItems = [];
+      if (cur && !ccState.pendingWorks.some((w) => w.bRecordId === cur.bRecordId)) {
+        listItems.push({ ...cur, _isCurrentExtra: true });
+      }
+      for (const w of ccState.pendingWorks) {
+        listItems.push(w);
+      }
+
+      // 计算「下一条待审」目标
+      let nextCandidate = null;
+      if (ccState.pendingWorks.length > 0) {
+        const curIdx = cur ? ccState.pendingWorks.findIndex((w) => w.bRecordId === cur.bRecordId) : -1;
+        if (curIdx === -1) {
+          nextCandidate = ccState.pendingWorks[0];
+        } else if (ccState.pendingWorks.length > 1) {
+          nextCandidate = ccState.pendingWorks[(curIdx + 1) % ccState.pendingWorks.length];
+        }
+      }
+
+      card.innerHTML = `
+        <div class="cc-hd" id="ppf-cc-drag">
+          <div class="cc-title">
+            <span class="cc-badge">🎬 飞书审片</span>
+            <span class="cc-cnt">${ccState.loading ? '读取中...' : `待审 ${pCnt} 部`}</span>
+          </div>
+          <div class="cc-icons">
+            <button class="cc-ibtn" id="ppf-cc-refresh" title="刷新飞书待审列表">🔄</button>
+            <button class="cc-ibtn" id="ppf-cc-feedback" title="反馈问题或建议">💬</button>
+            <button class="cc-ibtn" id="ppf-cc-opts" title="飞书设置">⚙️</button>
+            <button class="cc-ibtn" id="ppf-cc-collapse" title="收起为迷你胶囊">—</button>
+          </div>
+        </div>
+
+        <div class="cc-row">
+          <select class="cc-sel" id="ppf-cc-queue-select" title="选择任意待审片子，自动从本机装入 Cutcheck 审片">
+            ${
+              !cur && listItems.length > 0
+                ? `<option value="" selected>👇 请选择待审作品（共 ${pCnt} 部）...</option>`
+                : ''
+            }
+            ${
+              listItems.length === 0
+                ? `<option value="">🎉 暂无 B11待审核 作品</option>`
+                : listItems
+                    .map((w) => {
+                      const isSel = cur && w.bRecordId === cur.bRecordId;
+                      const icon = w.isApproved ? '✅' : /B11|待审核/.test(w.status) ? '🟠' : '🎬';
+                      const brandShort = w.brand ? ` · ${w.brand.split('·')[0]}` : '';
+                      return `<option value="${escapeHtml(w.bRecordId)}" ${isSel ? 'selected' : ''}>${icon} ${escapeHtml(
+                        w.title
+                      )}${escapeHtml(brandShort)} (${escapeHtml(w.status)})</option>`;
+                    })
+                    .join('')
+            }
+          </select>
+          ${
+            nextCandidate
+              ? `<button class="cc-btn" id="ppf-cc-next-btn" ${ccState.switching ? 'disabled' : ''} title="切换到下一部待审：《${escapeHtml(
+                  nextCandidate.title
+                )}》">下一条 ▶</button>`
+              : ''
+          }
+        </div>
+
+        ${
+          ccState.alertMsg
+            ? `<div class="cc-alert ${ccState.alertIsErr ? 'err' : 'info'}">${escapeHtml(ccState.alertMsg)}</div>`
+            : ''
+        }
+
+        ${
+          cur
+            ? cur.isApproved
+              ? `<div class="cc-ok-box">
+                  <div class="cc-ok-hd">
+                    <span>✅ 已通过 (${escapeHtml(cur.status)}) · 待发任务 ${cur.cTasks?.length || 0} 条</span>
+                  </div>
+                  ${
+                    cur.cTasks && cur.cTasks.length > 0
+                      ? `<div class="cc-pills">
+                          ${cur.cTasks
+                            .map((t) => {
+                              const href = `${BRIDGE_DEFAULT_URL}/open?dir=${encodeURIComponent(
+                                cur.slug || ''
+                              )}&account=${encodeURIComponent(t.accountName || '')}&cno=${encodeURIComponent(
+                                t.cSerialNo || ''
+                              )}&cid=${encodeURIComponent(t.cRecordId || '')}&bid=${encodeURIComponent(cur.bRecordId)}`;
+                              const isDone = /C21|已发布/.test(t.cStatus);
+                              return `<a class="cc-pill" href="${escapeHtml(
+                                href
+                              )}" target="_blank" rel="noopener noreferrer" title="点击直接打开该渠道发布后台并带入发布包">${
+                                isDone ? '✅' : '🚀'
+                              } ${escapeHtml(t.accountName)}</a>`;
+                            })
+                            .join('')}
+                        </div>`
+                      : ''
+                  }
+                </div>`
+              : `<button class="cc-approve" id="ppf-cc-approve-btn" ${ccState.approving ? 'disabled' : ''}>
+                  ${
+                    ccState.approving
+                      ? '⏳ 正在流转 B12 并生成各平台发布任务...'
+                      : `✅ 审片通过 · 生成发布任务（${escapeHtml(cur.title.slice(0, 14))}）`
+                  }
+                </button>`
+            : ''
+        }
+      `;
+
+      ccRoot.appendChild(card);
+
+      ccShadow.getElementById('ppf-cc-refresh').onclick = () => refreshReviewQueue(true);
+      ccShadow.getElementById('ppf-cc-opts').onclick = () =>
+        sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {});
+      ccShadow.getElementById('ppf-cc-collapse').onclick = () => {
+        ccState.collapsed = true;
+        renderCcBar();
+      };
+      ccShadow.getElementById('ppf-cc-feedback').onclick = async () => {
+        const devId = await getOrCreateDeviceId();
+        const diag = `scene:cutcheck | feishu:${ccState.configured ? 'ok' : 'unconf'} | pending:${pCnt} | active:${
+          cur?.bRecordId || 'none'
+        } | err:${ccState.alertIsErr ? ccState.alertMsg : 'none'}`;
+        const url = buildFeishuFeedbackUrl({
+          pageLabel: `[Cutcheck审片页] ${location.origin}${location.pathname}`,
+          panelModeLabel: '左下角审片联动栏',
+          deviceId: devId,
+          diagSummary: diag,
+        });
+        window.open(url, '_blank', 'noopener,noreferrer');
+      };
+
+      const qSel = ccShadow.getElementById('ppf-cc-queue-select');
+      if (qSel) {
+        qSel.onchange = (e) => {
+          const pickedId = e.target.value;
+          if (!pickedId) return;
+          const found = listItems.find((w) => w.bRecordId === pickedId);
+          if (found) switchReviewVideoToWork(found);
+        };
+      }
+
+      const nextBtn = ccShadow.getElementById('ppf-cc-next-btn');
+      if (nextBtn && nextCandidate) {
+        nextBtn.onclick = () => switchReviewVideoToWork(nextCandidate);
+      }
+
+      const appBtn = ccShadow.getElementById('ppf-cc-approve-btn');
+      if (appBtn) {
+        appBtn.onclick = approveCurrentWork;
+      }
+
+      // 支持按住头部自由拖拽位置
+      const dragEl = ccShadow.getElementById('ppf-cc-drag');
+      if (dragEl) {
+        dragEl.onmousedown = (e) => {
+          if (e.target.closest('button, select')) return;
+          const startX = e.clientX;
+          const startY = e.clientY;
+          const initL = ccState.posLeft;
+          const initB = ccState.posBottom;
+          const onMove = (me) => {
+            ccState.posLeft = Math.max(8, Math.min(window.innerWidth - 200, initL + (me.clientX - startX)));
+            ccState.posBottom = Math.max(8, Math.min(window.innerHeight - 100, initB - (me.clientY - startY)));
+            applyCcHostPos();
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        };
+      }
+    }
+
+    renderCcBar();
+    refreshReviewQueue(false);
+
+    window.addEventListener('hashchange', () => {
+      syncBoundWithHash();
+      refreshReviewQueue(false);
+    });
+    if (IS_CHROME_EXT && chrome.storage?.onChanged) {
+      chrome.storage.onChanged.addListener(async (changes, area) => {
+        if (area === 'local' && changes[STORAGE_KEY_CUTCHECK_BOUND]?.newValue) {
+          try {
+            const raw = changes[STORAGE_KEY_CUTCHECK_BOUND].newValue;
+            const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (b) {
+              ccState.boundBId = b.bRecordId || '';
+              ccState.boundSlug = b.workSlug || '';
+              ccState.boundProject = b.project || '';
+              refreshReviewQueue(true);
+            }
+          } catch {
+            // ignore
+          }
+        }
+      });
+    }
+  }
+
   if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
     handleFeishuLaunchpad();
   } else if (location.hostname === 'cutcheck-alpha.vercel.app') {
     handleCutcheckAutoLoad();
+    setTimeout(mountCutcheckReviewBar, 350);
     window.addEventListener('hashchange', () => handleCutcheckAutoLoad());
     if (IS_CHROME_EXT && chrome.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {

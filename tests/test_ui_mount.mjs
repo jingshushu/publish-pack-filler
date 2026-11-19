@@ -175,8 +175,77 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: '2.3.0' }),
+        getManifest: () => ({ version: '2.4.0' }),
         sendMessage: (msg, cb) => {
+          if (msg.type === 'PPF_FEISHU_QUERY_REVIEW_QUEUE') {
+            cb?.({
+              ok: true,
+              data: {
+                ok: true,
+                configured: feishuConfigured,
+                pendingWorks: [
+                  {
+                    bRecordId: 'recBRev01',
+                    title: '开源爬墙画画盒',
+                    slug: '20261118_开源爬墙画画盒',
+                    status: 'B11待审核',
+                    brand: '靖蜀黍·个人IP',
+                    isApproved: false,
+                    cTasks: [],
+                  },
+                  {
+                    bRecordId: 'recBRev02',
+                    title: '百元AI大脑',
+                    slug: '20261102_百元AI大脑',
+                    status: 'B11待审核',
+                    brand: '靖蜀黍·个人IP',
+                    isApproved: false,
+                    cTasks: [],
+                  },
+                ],
+                activeWork: {
+                  bRecordId: 'recBRev01',
+                  title: '开源爬墙画画盒',
+                  slug: '20261118_开源爬墙画画盒',
+                  status: 'B11待审核',
+                  brand: '靖蜀黍·个人IP',
+                  isApproved: false,
+                  cTasks: [],
+                },
+              },
+            });
+            return;
+          }
+          if (msg.type === 'PPF_FEISHU_APPROVE_REVIEW') {
+            cb?.({
+              ok: true,
+              data: {
+                ok: true,
+                approved: true,
+                bRecordId: 'recBRev01',
+                title: '开源爬墙画画盒',
+                slug: '20261118_开源爬墙画画盒',
+                newStatus: 'B12等待发布至平台',
+                approvedAtStr: '2026-11-19 17:30',
+                pendingWorks: [
+                  {
+                    bRecordId: 'recBRev02',
+                    title: '百元AI大脑',
+                    slug: '20261102_百元AI大脑',
+                    status: 'B11待审核',
+                    brand: '靖蜀黍·个人IP',
+                    isApproved: false,
+                    cTasks: [],
+                  },
+                ],
+                cTasks: [
+                  { cRecordId: 'recC1', cSerialNo: 'C00301', accountName: '小红书·靖蜀黍', cStatus: 'C00未发布' },
+                  { cRecordId: 'recC2', cSerialNo: 'C00302', accountName: 'B站·靖蜀黍', cStatus: 'C00未发布' },
+                ],
+              },
+            });
+            return;
+          }
           if (msg.type === 'PPF_FEISHU_QUERY_CONTEXT') {
             cb?.({
               ok: true,
@@ -380,7 +449,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.3.0');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.4.0');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
@@ -389,10 +458,24 @@ assert.equal(
 assert.ok(fbUrl.searchParams.get('prefill_运行环境').includes('macOS · Chrome 131 · 左侧分屏停靠'));
 assert.match(fbUrl.searchParams.get('prefill_设备标识'), /^ppf_[a-z0-9]{10}$/);
 
-// 7. 验证 Cutcheck 在线审片域名严格零侧边栏污染：进入 cutcheck-alpha.vercel.app 绝不挂载发布助手 UI
-const ccEnv = createMockDomEnv('https://cutcheck-alpha.vercel.app/#file=%2Ftmp%2Fdemo_v2.mp4&project=demo&version=v2', true);
+// 7. 验证 Cutcheck 在线审片专属微工作条：不挂载发布侧边栏、不推开页面边距，展示待审队列快切 + 一键审片通过生成各平台发布任务
+const ccEnv = createMockDomEnv(
+  'https://cutcheck-alpha.vercel.app/#file=%2Ftmp%2F20261118_%E5%BC%80%E6%BA%90%E7%88%AC%E5%A2%99%E7%94%BB%E7%94%BB%E7%9B%92%2Fdemo_v2.mp4&project=%E5%BC%80%E6%BA%90%E7%88%AC%E5%A2%99%E7%94%BB%E7%94%BB%E7%9B%92&version=v2',
+  true
+);
 await ccEnv.flushTimers();
-assert.equal(ccEnv.getShadowRoot(), null, 'Cutcheck 审片页严禁创建发布助手 Shadow DOM 侧边栏');
 assert.equal(ccEnv.docEl.style.paddingLeft || '', '', 'Cutcheck 审片页严禁修改页面边距');
+const ccShadow = ccEnv.getShadowRoot();
+assert.ok(ccShadow, 'Cutcheck 审片页应挂载左下角轻量审片微工作条');
+const ccHtmlBefore = ccShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(!ccHtmlBefore.includes('全平台半自动发布助手'), '严禁在 Cutcheck 审片页渲染发布填表侧边栏');
+assert.ok(ccHtmlBefore.includes('待审 2 部') && ccHtmlBefore.includes('ppf-cc-queue-select'), '必须渲染飞书待审队列下拉快切器');
+assert.ok(ccHtmlBefore.includes('ppf-cc-next-btn'), '多条待审时必须提供下一条快切按钮');
+const ccApproveBtn = ccShadow.getElementById('ppf-cc-approve-btn');
+assert.ok(ccApproveBtn && typeof ccApproveBtn.onclick === 'function', '必须渲染一键审片通过按钮');
+await ccApproveBtn.onclick();
+const ccHtmlAfter = ccShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(ccHtmlAfter.includes('B12等待发布至平台') && ccHtmlAfter.includes('待发任务 2 条'), '点击审片通过后必须展示B12流转结果与待发任务数');
+assert.ok(ccHtmlAfter.includes('小红书·靖蜀黍') && ccHtmlAfter.includes('B站·靖蜀黍'), '审片通过后必须展示各渠道一键去发布入口');
 
-console.log('✅ UI Mount & Render Smoke Tests (Publish-Only + Collapsed Red/Green + Feedback + Cutcheck Zero-UI Handoff) ALL PASSED!');
+console.log('✅ UI Mount & Render Smoke Tests (Publish-Only + Collapsed Red/Green + Feedback + Cutcheck Review Queue & Approval) ALL PASSED!');

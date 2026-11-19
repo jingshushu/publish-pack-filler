@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v2.3.0)
+// Background Service Worker (Manifest V3 · v2.4.0)
 // 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
 // 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
 // 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
 
-importScripts('feishu_client.js?v=2.3.0');
+importScripts('feishu_client.js?v=2.4.0');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {
@@ -357,6 +357,38 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'PPF_FEISHU_SYNC_PUBLISH') {
     self.PPFFeishuClient.syncPrePublishToFeishu(msg.payload || {})
       .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_QUERY_REVIEW_QUEUE') {
+    self.PPFFeishuClient.queryFeishuReviewQueue(msg.params || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_FEISHU_APPROVE_REVIEW') {
+    self.PPFFeishuClient.approveWorkReviewInFeishu(msg.payload || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg.type === 'PPF_BRIDGE_PREPARE_REVIEW') {
+    const qs = new URLSearchParams({
+      dir: String(msg.dir || '').trim(),
+      project: String(msg.project || '').trim(),
+      bid: String(msg.bid || '').trim(),
+    });
+    fetch(`${BRIDGE_BASE}/api/prepare-review?${qs.toString()}`, { cache: 'no-store' })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.ok === false) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        sendResponse({ ok: true, data });
+      })
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;
   }

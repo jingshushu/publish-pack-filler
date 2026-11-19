@@ -72,7 +72,7 @@ IF(
   ISBLANK([本地作品目录]),
   "",
   HYPERLINK(
-    "http://127.0.0.1:8765/review?dir=" & ENCODEURL([本地作品目录]&"") & "&project=" & ENCODEURL([选题方向]&""),
+    "http://127.0.0.1:8765/review?dir=" & ENCODEURL([本地作品目录]&"") & "&project=" & ENCODEURL([选题方向]&"") & "&bid=" & ENCODEURL(RECORD_ID()),
     "🎬 在线审片"
   )
 )
