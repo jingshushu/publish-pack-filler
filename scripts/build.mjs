@@ -20,12 +20,19 @@ const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 
 // 1. 生成图标
 execFileSync('python3', [path.join(rootDir, 'scripts', 'gen_icons.py')], { stdio: 'inherit' });
 
-// 2. 剥离 ==UserScript== 头部生成干净的 Chrome MV3 content.js（双端同源零分叉）
+// 2. 剥离 ==UserScript== 头部生成干净的 Chrome MV3 content.js（双端同源零分叉），并同步刷新 background.js 的 Service Worker 缓存版本号
 const userScriptSrc = fs.readFileSync(userScriptPath, 'utf8');
 const strippedContent = userScriptSrc.replace(/^\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==\s*/, '');
 const banner = `// Auto-generated from publish-pack-filler.user.js (v${manifest.version}) — DO NOT EDIT DIRECTLY\n`;
 fs.writeFileSync(path.join(extDir, 'content.js'), banner + strippedContent, 'utf8');
-console.log('✅ Synced extension/content.js');
+
+const bgPath = path.join(extDir, 'background.js');
+const bgSrc = fs.readFileSync(bgPath, 'utf8');
+const updatedBg = bgSrc
+  .replace(/\/\/ Background Service Worker \(Manifest V3 · v[\d.]+\)/, `// Background Service Worker (Manifest V3 · v${manifest.version})`)
+  .replace(/importScripts\('feishu_client\.js(?:\?v=[^']+)?'\);/, `importScripts('feishu_client.js?v=${manifest.version}');`);
+fs.writeFileSync(bgPath, updatedBg, 'utf8');
+console.log(`✅ Synced extension/content.js & Service Worker cache-buster (v${manifest.version})`);
 
 // 3. 打包 Chrome 插件 ZIP 分发包
 fs.mkdirSync(distDir, { recursive: true });

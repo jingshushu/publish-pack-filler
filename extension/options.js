@@ -68,6 +68,7 @@ function fillFormFromConfig(cfg) {
   document.getElementById('app-id').value = cfg.appId || '';
   document.getElementById('app-secret').value = cfg.appSecret || '';
   document.getElementById('personal-token').value = cfg.personalBaseToken || '';
+  document.getElementById('status-sync-mode').value = cfg.statusSyncMode || 'auto';
   document.getElementById('schema-mode').value = cfg.schemaMode || 'multi_table';
   document.getElementById('min-gap-hours').value = cfg.minGapHours ?? 6;
 
@@ -106,6 +107,7 @@ function readFormToConfig() {
     appId: document.getElementById('app-id').value.trim(),
     appSecret: document.getElementById('app-secret').value.trim(),
     personalBaseToken: document.getElementById('personal-token').value.trim(),
+    statusSyncMode: document.getElementById('status-sync-mode').value || 'auto',
     schemaMode: document.getElementById('schema-mode').value,
     minGapHours: Number(document.getElementById('min-gap-hours').value || 6),
     tables: {

@@ -19,6 +19,7 @@ const DEFAULT_FEISHU_CONFIG = {
   baseUrl: '',
   baseToken: '',
   schemaMode: 'multi_table', // 'multi_table' | 'single_table'
+  statusSyncMode: 'auto', // 'auto' (优先写状态，遇 1254062 自动降级仅写时间文案) | 'time_only' (仅写时间与文案，状态交由飞书自动化流转)
   minGapHours: 6,
   tables: {
     accounts: '',
@@ -75,6 +76,9 @@ let memQueryCache = {
   ts: 0,
   data: null,
 };
+
+// 记录在 Bitable v1 接口上触发过 1254062 (引用选项单选列限制) 的 tableId，后续同步自动跳过单选状态列（交由飞书自动化流转），实现 1 次请求零报错直通
+const dynamicSingleSelectTables = new Set();
 
 function invalidateFeishuMemCache() {
   memQueryCache = { key: '', ts: 0, data: null };
@@ -150,6 +154,7 @@ function exportFeishuConfigCode(cfg, { includeSecret = true } = {}) {
     baseUrl: clean.baseUrl,
     baseToken: clean.baseToken,
     schemaMode: clean.schemaMode,
+    statusSyncMode: clean.statusSyncMode,
     minGapHours: clean.minGapHours,
     tables: clean.tables,
     fieldMap: clean.fieldMap,
@@ -607,8 +612,12 @@ function resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly = fa
   return result;
 }
 
-// 组装飞书 Bitable v1 接口字段格式（适用于个人授权码 pt-... 模式及普通单选表）
-function buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly = false } = {}) {
+// 组装飞书 Bitable v1 接口字段格式（适用于个人授权码 pt-... 模式、仅开通 bitable:app 权限的应用及飞书自动化流转模式）
+function buildSafeWriteFields(
+  fieldsMeta,
+  rawEntries,
+  { strictKnownOptionsOnly = false, skipSingleSelect = false, skipMultiSelect = false } = {}
+) {
   const byName = new Map();
   for (const f of fieldsMeta || []) {
     // 跳过公式(20)、查找引用(19)、按钮(3001)、创建时间(1001)、自动编号(1005) 等只读字段
@@ -623,6 +632,8 @@ function buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly =
     if (!meta) continue;
 
     if (rawVal === null) {
+      if (meta.type === 3 && skipSingleSelect) continue;
+      if (meta.type === 4 && skipMultiSelect) continue;
       out[colName] = null;
       continue;
     }
@@ -637,12 +648,14 @@ function buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly =
         if (!Number.isNaN(n)) out[colName] = n;
         break;
       }
-      case 3: { // SingleSelect (v1 传纯字符串)
+      case 3: { // SingleSelect (v1 传纯字符串；若开启飞书自动化流转或命中 1254062 动态引用限制则自动跳过)
+        if (skipSingleSelect) break;
         const optName = resolveSingleSelectOptionName(meta, rawVal);
         if (optName) out[colName] = optName;
         break;
       }
       case 4: { // MultiSelect
+        if (skipMultiSelect) break;
         const multi = resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly);
         if (multi.length > 0) out[colName] = multi;
         break;
@@ -675,8 +688,12 @@ function buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly =
   return out;
 }
 
-// 组装飞书 Base v3 接口字段格式（完美兼容飞书「引用选项 dynamic_options_source」全局状态流转列，彻底解决 v1 的 1254062 SingleSelectFieldConvFail！）
-function buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly = false } = {}) {
+// 组装飞书 Base v3 接口字段格式（兼容飞书「引用选项 dynamic_options_source」全局状态流转列）
+function buildSafeV3WriteFields(
+  fieldsMeta,
+  rawEntries,
+  { strictKnownOptionsOnly = false, skipSingleSelect = false, skipMultiSelect = false } = {}
+) {
   const byName = new Map();
   for (const f of fieldsMeta || []) {
     if ([19, 20, 1001, 1002, 1003, 1004, 1005, 3001].includes(f.type)) continue;
@@ -690,6 +707,8 @@ function buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly
     if (!meta) continue;
 
     if (rawVal === null) {
+      if (meta.type === 3 && skipSingleSelect) continue;
+      if (meta.type === 4 && skipMultiSelect) continue;
       out[colName] = null;
       continue;
     }
@@ -705,11 +724,13 @@ function buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly
         break;
       }
       case 3: { // SingleSelect (Base v3 传单元素字符串数组 ["C10等待定时发布"])
+        if (skipSingleSelect) break;
         const optName = resolveSingleSelectOptionName(meta, rawVal);
         if (optName) out[colName] = [optName];
         break;
       }
       case 4: { // MultiSelect
+        if (skipMultiSelect) break;
         const multi = resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly);
         if (multi.length > 0) out[colName] = multi;
         break;
@@ -742,11 +763,30 @@ function buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly
   return out;
 }
 
-// 双协议自适应写入引擎：自建应用模式优先走 Base v3（原生支持动态引用选项状态列，零 1254062 报错），并在动态标签库遇到新词报 800010409 时自动过滤未知新词重试；个人授权码模式自动走 v1。
+function isSingleSelectConvError(err) {
+  return err?.feishuCode === 1254062 || /1254062|SingleSelectFieldConvFail/i.test(err?.message || '');
+}
+
+function isMultiSelectConvError(err) {
+  return err?.feishuCode === 1254063 || /1254063|MultiSelectFieldConvFail/i.test(err?.message || '');
+}
+
+// 三级自愈自适应写入引擎：
+// 1. 若用户开启 statusSyncMode === 'time_only'，首轮即跳过单选状态列（1 次请求极速写入时间+文案+关联列，状态交由飞书原生自动化流转）。
+// 2. 自建应用优先走 Base v3；若应用仅开通 bitable:app 权限（未开 base:record:*）或使用个人授权码 pt-...，无缝降级至 Bitable v1。
+// 3. 在 Bitable v1 遇到飞书「引用选项单选列」平台限制 (1254062: SingleSelectFieldConvFail) 或新标签限制 (1254063: MultiSelectFieldConvFail) 时，
+//    自动剥离受限单选列 / 过滤未知新词立即重试并缓存表特征，确保发布时间、文案与作品关联 100% 写入成功永不卡壳！
 async function smartBatchUpdateRecord(cfg, tableId, recordId, fieldsMeta, rawEntries) {
+  const forceSkipSingle = cfg.statusSyncMode === 'time_only';
+
   if (cfg.authType !== 'personal_token') {
-    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
-    if (Object.keys(v3Fields).length === 0) return;
+    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, {
+      strictKnownOptionsOnly: false,
+      skipSingleSelect: forceSkipSingle,
+    });
+    if (Object.keys(v3Fields).length === 0) {
+      return { recordId, skippedSingleSelect: forceSkipSingle };
+    }
     try {
       await feishuApiRequest(
         cfg,
@@ -754,30 +794,42 @@ async function smartBatchUpdateRecord(cfg, tableId, recordId, fieldsMeta, rawEnt
         `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
         { body: { update_records: { [recordId]: v3Fields } } }
       );
-      return;
+      return { recordId, skippedSingleSelect: forceSkipSingle };
     } catch (err) {
-      // 若多选字段引用了动态标签表且遇到未收录新词 (800010409 validation_error)，自动收敛为仅保留已收录标签重试
       if (err?.feishuCode === 800010409 || /validation_error/i.test(err?.message || '')) {
-        const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+        const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, {
+          strictKnownOptionsOnly: true,
+          skipSingleSelect: forceSkipSingle,
+        });
         if (Object.keys(v3Strict).length > 0) {
-          await feishuApiRequest(
-            cfg,
-            'POST',
-            `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
-            { body: { update_records: { [recordId]: v3Strict } } }
-          );
-          return;
+          try {
+            await feishuApiRequest(
+              cfg,
+              'POST',
+              `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+              { body: { update_records: { [recordId]: v3Strict } } }
+            );
+            return { recordId, skippedSingleSelect: forceSkipSingle };
+          } catch {
+            // 继续向下回退到 v1 自愈链路
+          }
+        } else {
+          return { recordId, skippedSingleSelect: true };
         }
       }
-      // 仅当网关不支持 base/v3 (404) 时降级尝试 v1
-      if (err?.httpStatus !== 404) {
-        throw err;
-      }
+      // 无论 base/v3 因 404 还是未开通 base:record:update 权限报错，均无缝降级到通用的 bitable/v1 自愈链路
     }
   }
 
-  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
-  if (Object.keys(v1Fields).length === 0) return;
+  const v1SkipSingle = forceSkipSingle || dynamicSingleSelectTables.has(tableId);
+  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, {
+    strictKnownOptionsOnly: false,
+    skipSingleSelect: v1SkipSingle,
+  });
+  if (Object.keys(v1Fields).length === 0) {
+    return { recordId, skippedSingleSelect: v1SkipSingle };
+  }
+
   try {
     await feishuApiRequest(
       cfg,
@@ -785,50 +837,99 @@ async function smartBatchUpdateRecord(cfg, tableId, recordId, fieldsMeta, rawEnt
       `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
       { body: { records: [{ record_id: recordId, fields: v1Fields }] } }
     );
+    return { recordId, skippedSingleSelect: v1SkipSingle };
   } catch (err) {
-    if (/MultiSelectFieldConvFail/i.test(err?.message || '')) {
-      const v1Strict = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
-      await feishuApiRequest(
-        cfg,
-        'POST',
-        `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
-        { body: { records: [{ record_id: recordId, fields: v1Strict }] } }
-      );
-      return;
+    if (isSingleSelectConvError(err) || isMultiSelectConvError(err)) {
+      const nextSkipSingle = v1SkipSingle || isSingleSelectConvError(err);
+      if (isSingleSelectConvError(err)) {
+        dynamicSingleSelectTables.add(tableId);
+      }
+      const v1Retry = buildSafeWriteFields(fieldsMeta, rawEntries, {
+        strictKnownOptionsOnly: true,
+        skipSingleSelect: nextSkipSingle,
+      });
+      if (Object.keys(v1Retry).length === 0) {
+        return { recordId, skippedSingleSelect: true };
+      }
+      try {
+        await feishuApiRequest(
+          cfg,
+          'POST',
+          `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+          { body: { records: [{ record_id: recordId, fields: v1Retry }] } }
+        );
+        return { recordId, skippedSingleSelect: nextSkipSingle };
+      } catch (err2) {
+        if (isSingleSelectConvError(err2) || isMultiSelectConvError(err2)) {
+          if (isSingleSelectConvError(err2)) dynamicSingleSelectTables.add(tableId);
+          const v1CoreOnly = buildSafeWriteFields(fieldsMeta, rawEntries, {
+            skipSingleSelect: true,
+            skipMultiSelect: true,
+          });
+          if (Object.keys(v1CoreOnly).length === 0) {
+            return { recordId, skippedSingleSelect: true };
+          }
+          await feishuApiRequest(
+            cfg,
+            'POST',
+            `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+            { body: { records: [{ record_id: recordId, fields: v1CoreOnly }] } }
+          );
+          return { recordId, skippedSingleSelect: true };
+        }
+        throw err2;
+      }
     }
     throw err;
   }
 }
 
 async function smartBatchCreateRecord(cfg, tableId, fieldsMeta, rawEntries) {
+  const forceSkipSingle = cfg.statusSyncMode === 'time_only';
+
   if (cfg.authType !== 'personal_token') {
-    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
-    try {
-      const created = await feishuApiRequest(
-        cfg,
-        'POST',
-        `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
-        { body: { create_records: [v3Fields] } }
-      );
-      return created.record_id_list?.[0] || created.records?.[0]?.record_id || '';
-    } catch (err) {
-      if (err?.feishuCode === 800010409 || /validation_error/i.test(err?.message || '')) {
-        const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, {
+      strictKnownOptionsOnly: false,
+      skipSingleSelect: forceSkipSingle,
+    });
+    if (Object.keys(v3Fields).length > 0) {
+      try {
         const created = await feishuApiRequest(
           cfg,
           'POST',
           `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
-          { body: { create_records: [v3Strict] } }
+          { body: { create_records: [v3Fields] } }
         );
         return created.record_id_list?.[0] || created.records?.[0]?.record_id || '';
-      }
-      if (err?.httpStatus !== 404) {
-        throw err;
+      } catch (err) {
+        if (err?.feishuCode === 800010409 || /validation_error/i.test(err?.message || '')) {
+          const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, {
+            strictKnownOptionsOnly: true,
+            skipSingleSelect: forceSkipSingle,
+          });
+          if (Object.keys(v3Strict).length > 0) {
+            try {
+              const created = await feishuApiRequest(
+                cfg,
+                'POST',
+                `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+                { body: { create_records: [v3Strict] } }
+              );
+              return created.record_id_list?.[0] || created.records?.[0]?.record_id || '';
+            } catch {
+              // 继续向下回退到 v1 自愈链路
+            }
+          }
+        }
       }
     }
   }
 
-  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
+  const v1SkipSingle = forceSkipSingle || dynamicSingleSelectTables.has(tableId);
+  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, {
+    strictKnownOptionsOnly: false,
+    skipSingleSelect: v1SkipSingle,
+  });
   try {
     const created = await feishuApiRequest(
       cfg,
@@ -838,15 +939,40 @@ async function smartBatchCreateRecord(cfg, tableId, fieldsMeta, rawEntries) {
     );
     return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
   } catch (err) {
-    if (/MultiSelectFieldConvFail/i.test(err?.message || '')) {
-      const v1Strict = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
-      const created = await feishuApiRequest(
-        cfg,
-        'POST',
-        `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
-        { body: { records: [{ fields: v1Strict }] } }
-      );
-      return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
+    if (isSingleSelectConvError(err) || isMultiSelectConvError(err)) {
+      const nextSkipSingle = v1SkipSingle || isSingleSelectConvError(err);
+      if (isSingleSelectConvError(err)) {
+        dynamicSingleSelectTables.add(tableId);
+      }
+      const v1Retry = buildSafeWriteFields(fieldsMeta, rawEntries, {
+        strictKnownOptionsOnly: true,
+        skipSingleSelect: nextSkipSingle,
+      });
+      try {
+        const created = await feishuApiRequest(
+          cfg,
+          'POST',
+          `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+          { body: { records: [{ fields: v1Retry }] } }
+        );
+        return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
+      } catch (err2) {
+        if (isSingleSelectConvError(err2) || isMultiSelectConvError(err2)) {
+          if (isSingleSelectConvError(err2)) dynamicSingleSelectTables.add(tableId);
+          const v1CoreOnly = buildSafeWriteFields(fieldsMeta, rawEntries, {
+            skipSingleSelect: true,
+            skipMultiSelect: true,
+          });
+          const created = await feishuApiRequest(
+            cfg,
+            'POST',
+            `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+            { body: { records: [{ fields: v1CoreOnly }] } }
+          );
+          return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
+        }
+        throw err2;
+      }
     }
     throw err;
   }
@@ -912,8 +1038,12 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
 
     const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
     const planMs = parseDateTimeMs(cf[fmPub.plannedAt]);
-    const effMs =
-      /已发布|已完成|C21/.test(st) ? pubMs || planMs : /定时|等待|排期|C10/.test(st) ? planMs : null;
+    const explicitPub = /已发布|已完成|C21/.test(st);
+    const explicitSched = /定时|等待|排期|C10/.test(st);
+    // 完美兼容「飞书原生自动化改状态」模式：即便状态列尚处 C00未发布/空（等待自动化异步流转），只要填入了计划发布时间或真实发布日期即刻纳入 6h 防撞雷达！
+    const isPub = explicitPub || (!explicitSched && Boolean(pubMs) && (!planMs || pubMs <= nowMs + 600_000));
+    const isSched = !isPub && (explicitSched || Boolean(planMs) || Boolean(pubMs));
+    const effMs = isPub ? pubMs || planMs : isSched ? planMs || pubMs : null;
     if (!effMs) continue;
 
     const linkedB = bIds[0] && bById.get(bIds[0]);
@@ -932,10 +1062,10 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
       diffHours: Math.round((Math.abs(targetMs - effMs) / 3600000) * 10) / 10,
     };
 
-    if (/已发布|C21/.test(st) && (!lastPublished || effMs > lastPublished.timeMs)) {
+    if (isPub && (!lastPublished || effMs > lastPublished.timeMs)) {
       lastPublished = recInfo;
     }
-    if (effMs > nowMs - 1800_000 && /定时|等待|C10/.test(st)) {
+    if (effMs > nowMs - 1800_000 && isSched) {
       futureScheduled.push(recInfo);
     }
     if (Math.abs(targetMs - effMs) < gapMs) {
@@ -1331,14 +1461,21 @@ async function syncPrePublishToFeishu(payload = {}) {
   if (payload.postUrl && fmPub.postUrl) rawCFields[fmPub.postUrl] = payload.postUrl;
   if (payload.notes && fmPub.notes) rawCFields[fmPub.notes] = payload.notes;
 
+  let cWriteRes = null;
   if (targetCId) {
-    await smartBatchUpdateRecord(cfg, cfg.tables.publishes, targetCId, pubFieldsMeta, rawCFields);
+    cWriteRes = await smartBatchUpdateRecord(cfg, cfg.tables.publishes, targetCId, pubFieldsMeta, rawCFields);
   } else {
     targetCId = await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, rawCFields);
   }
 
+  const statusDelegatedToAutomation =
+    cfg.statusSyncMode === 'time_only' ||
+    Boolean(cWriteRes?.skippedSingleSelect) ||
+    dynamicSingleSelectTables.has(cfg.tables.publishes);
+
   let bAutoClosed = false;
   if (
+    !statusDelegatedToAutomation &&
     cfg.schemaMode === 'multi_table' &&
     cfg.tables.works &&
     targetBId &&
@@ -1369,8 +1506,8 @@ async function syncPrePublishToFeishu(payload = {}) {
         await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, {
           [fmWork.status]: cfg.statusValues.workCompleted || 'B21已完成',
         })
-          .then(() => {
-            bAutoClosed = true;
+          .then((res) => {
+            bAutoClosed = !res?.skippedSingleSelect;
           })
           .catch(() => {});
       }
@@ -1379,7 +1516,11 @@ async function syncPrePublishToFeishu(payload = {}) {
 
   invalidateFeishuMemCache();
   const modeCn = isScheduled ? `定时 ${timeStr.slice(5)}` : `立即发布 (${timeStr.slice(11)})`;
-  const closeSuffix = bAutoClosed ? '（全渠道收口 → B21已完成）' : '';
+  const closeSuffix = statusDelegatedToAutomation
+    ? '（时间与文案已落表，状态交由飞书自动化流转）'
+    : bAutoClosed
+      ? '（全渠道收口 → B21已完成）'
+      : '';
   return {
     ok: true,
     saved: true,
@@ -1387,6 +1528,7 @@ async function syncPrePublishToFeishu(payload = {}) {
     bRecordId: targetBId,
     cRecordId: targetCId,
     bAutoClosed,
+    statusDelegatedToAutomation,
     workLabel,
     accountName,
     recordedState: desiredStatus,

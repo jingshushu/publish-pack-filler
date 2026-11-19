@@ -101,6 +101,19 @@
         </label>
       </div>
 
+      <div class="grid2">
+        <label class="field" style="grid-column: 1 / -1;">
+          <span>状态列写入策略（完美兼容飞书「引用选项」动态状态列与自动化）</span>
+          <select id="status-sync-mode">
+            <option value="auto">🤖 智能自愈（默认：优先写状态；若遇 1254062 引用选项限制自动切换为仅写发布时间与文案，零报错）</option>
+            <option value="time_only">⚡ 仅写发布时间与文案，状态交由飞书自动化流转（极速 1 次请求直通 · 强烈推荐配合飞书自动化）</option>
+          </select>
+        </label>
+      </div>
+      <div class="desc" style="margin-top:4px;margin-bottom:8px;font-size:12px;color:#475569;">
+        💡 <b>飞书多维表自动化推荐配法（30秒一劳永逸）</b>：在「发布记录表」右上角点「自动化」添加 2 条规则 —— ① 当<b>计划发布时间</b>不为空且<b>真实发布日期</b>为空 → 改状态为 <code>C10等待定时发布</code>；② 当<b>真实发布日期</b>不为空 → 改状态为 <code>C21已发布</code>。
+      </div>
+
       <div class="row">
         <button class="primary" id="btn-discover">🔍 测试连接并自动识别数据表与字段</button>
         <button id="btn-ensure-snapshot">☁️ 一键在内容表创建「发布包快照」云端兜底列</button>

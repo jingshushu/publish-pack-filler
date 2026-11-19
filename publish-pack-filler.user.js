@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.0.2
+// @version      2.0.3
 // @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（配置码5秒跨设备迁移）、云端兜底文案（兼容NAS未同步）、发前关联作品与黄转绿警示同步按钮
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -3763,8 +3763,10 @@
             if (res.cRecordId) currentPack.meta.cRecordId = res.cRecordId;
             savePackState(currentPack);
           }
-          if (isCreateNew && res.bRecordId) {
+          if (res.bRecordId) {
             prePubState.selectedWorkKey = `b:${res.bRecordId}`;
+          } else if (res.cRecordId) {
+            prePubState.selectedWorkKey = `c:${res.cRecordId}`;
           }
           prePubState.syncedLabel =
             schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';

@@ -51,6 +51,8 @@ const {
   extractCleanWorkSlug,
   buildSafeWriteFields,
   buildSafeV3WriteFields,
+  smartBatchUpdateRecord,
+  smartBatchCreateRecord,
   evaluateScheduleConflicts,
 } = sandbox.self.PPFFeishuClient;
 
@@ -200,4 +202,132 @@ assert.equal(conflictCheck.hasConflict, true);
 assert.equal(conflictCheck.conflicts.length, 1);
 assert.equal(conflictCheck.conflicts[0].diffHours, 2);
 
-console.log('✅ All Feishu pure-JS client, config code migration & conflict radar tests passed!');
+// ==================== Test 5: 飞书自动化模式兼容 (状态仍为 C00未发布但已写入计划发布时间时，雷达照常防撞) ====================
+const autoRadarCheck = evaluateScheduleConflicts({
+  cRows: [
+    {
+      record_id: 'recC_auto_pending',
+      fields: {
+        分发账号: [{ id: 'recAcc_Bili' }],
+        内容运营表: [{ id: 'recB_other2' }],
+        状态: 'C00未发布', // 飞书自动化尚未异步改状态，但计划发布时间已写入
+        计划发布时间: baseMs + 1.5 * 3600 * 1000,
+        标题: '刚写入时间待自动化流转的视频',
+      },
+    },
+  ],
+  bById: new Map(),
+  fmPub: {
+    accountLink: '分发账号',
+    workLink: '内容运营表',
+    status: '状态',
+    plannedAt: '计划发布时间',
+    publishedAt: '真实发布日期',
+    title: '标题',
+  },
+  fmWork: { title: '作品名称' },
+  accountId: 'recAcc_Bili',
+  platCn: 'B站',
+  targetMs: baseMs,
+  excludeBId: 'recB_current',
+  excludeCId: '',
+  minGapHours: 6,
+});
+assert.equal(autoRadarCheck.hasConflict, true);
+assert.equal(autoRadarCheck.conflicts[0].diffHours, 1.5);
+
+// ==================== Test 6: 模拟 1254062 SingleSelectFieldConvFail & 权限降级三级自愈实测 ====================
+const httpCalls = [];
+sandbox.fetch = async (url, init = {}) => {
+  const bodyObj = init.body ? JSON.parse(init.body) : null;
+  httpCalls.push({ url, method: init.method, body: bodyObj });
+
+  if (url.includes('/tenant_access_token/internal')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, tenant_access_token: 'tat_mock_ok', expire: 7200 }),
+    };
+  }
+  // 模拟应用仅开通 bitable:app 未开通 base/v3 权限 -> 返回 403 / 99991672
+  if (url.includes('/open-apis/base/v3/')) {
+    return {
+      ok: false,
+      status: 403,
+      json: async () => ({ code: 99991672, msg: 'Access denied. Required scope base:record:update missing' }),
+    };
+  }
+  // 模拟 Bitable v1 遇到「引用选项单选列」：只要带了 `状态` 就报 1254062 SingleSelectFieldConvFail！
+  if (url.includes('/open-apis/bitable/v1/')) {
+    const recFields = bodyObj?.records?.[0]?.fields || {};
+    if ('状态' in recFields) {
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ code: 1254062, msg: 'SingleSelectFieldConvFail' }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { records: [{ record_id: 'recCreatedOrUpdated01' }] } }),
+    };
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+
+const appCfgOnlyV1 = {
+  authType: 'app',
+  apiDomain: 'https://open.feishu.cn',
+  appId: 'cli_only_v1',
+  appSecret: 'sec_only_v1',
+  baseToken: 'bascnTestV1',
+  statusSyncMode: 'auto',
+};
+
+// 第一次写入：base/v3 403 -> 降级 v1 -> 命中 1254062 -> 自动剥离「状态」并剔除未收录新词，保留计划发布时间+标题+已收录标签成功落表！
+const healRes1 = await smartBatchUpdateRecord(appCfgOnlyV1, 'tblPubDynamic', 'recRow001', mockDynamicMeta, {
+  状态: 'C10等待定时发布',
+  计划发布时间: '2026-11-19 17:00',
+  真实发布日期: null,
+  话题标签: ['ESP32', '未收录野生词ABC'],
+  内容运营表: ['recWork123'],
+});
+assert.equal(healRes1.skippedSingleSelect, true);
+const lastV1Body1 = httpCalls[httpCalls.length - 1].body.records[0].fields;
+assert.equal('状态' in lastV1Body1, false, '自动剥离动态引用单选状态列');
+assert.equal(typeof lastV1Body1['计划发布时间'], 'number', '计划发布时间毫秒时间戳必须成功写入');
+assert.deepEqual(lastV1Body1['话题标签'], ['ESP32'], '仅保留已收录标签防 1254063');
+
+// 第二次同表写入（已记住 tblPubDynamic 的引用选项特征）：v1 首轮即自动跳过状态列，不再触发 1254062！
+const countBefore = httpCalls.length;
+const ptCfg = {
+  authType: 'personal_token',
+  apiDomain: 'https://open.feishu.cn',
+  personalBaseToken: 'pt-demo-token',
+  baseToken: 'bascnTestV1',
+  statusSyncMode: 'auto',
+};
+const healRes2 = await smartBatchUpdateRecord(ptCfg, 'tblPubDynamic', 'recRow002', mockDynamicMeta, {
+  状态: 'C21已发布',
+  真实发布日期: '2026-11-19 18:30',
+});
+assert.equal(healRes2.skippedSingleSelect, true);
+assert.equal(httpCalls.length - countBefore, 1, '已记忆动态状态表在个人授权码下仅需 1 次 HTTP 请求直通');
+
+// 显式开启 time_only 模式：全新表也直接 1 次请求仅写时间与文案
+const countBefore3 = httpCalls.length;
+const createdId = await smartBatchCreateRecord(
+  { ...ptCfg, statusSyncMode: 'time_only' },
+  'tblBrandNew',
+  mockDynamicMeta,
+  {
+    状态: 'C10等待定时发布',
+    计划发布时间: '2026-11-20 12:00',
+    内容运营表: ['recWork999'],
+  }
+);
+assert.equal(createdId, 'recCreatedOrUpdated01');
+assert.equal(httpCalls.length - countBefore3, 1, 'time_only 模式首轮直接 1 次请求写入成功');
+
+console.log('✅ All Feishu pure-JS client, 1254062 self-healing, time_only automation & conflict radar tests passed!');

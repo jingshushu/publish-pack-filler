@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.0.2) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.0.3) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -3732,8 +3732,10 @@
             if (res.cRecordId) currentPack.meta.cRecordId = res.cRecordId;
             savePackState(currentPack);
           }
-          if (isCreateNew && res.bRecordId) {
+          if (res.bRecordId) {
             prePubState.selectedWorkKey = `b:${res.bRecordId}`;
+          } else if (res.cRecordId) {
+            prePubState.selectedWorkKey = `c:${res.cRecordId}`;
           }
           prePubState.syncedLabel =
             schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
