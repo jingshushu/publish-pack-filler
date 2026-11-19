@@ -102,6 +102,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   const bodyEl = new MockElement('BODY');
   const memStorage = {};
 
+  const openedUrls = [];
   const win = {
     innerWidth: 1440,
     innerHeight: 900,
@@ -112,6 +113,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       origin: parsedUrl.origin,
       search: parsedUrl.search,
     },
+    open: (url) => openedUrls.push(url),
     getComputedStyle: () => ({ position: 'static', display: 'block', visibility: 'visible', opacity: '1' }),
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -127,7 +129,10 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
     top: win,
     self: win,
     location: win.location,
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+      clipboard: { writeText: async () => {} },
+    },
     URL: Object.assign(URL, {
       createObjectURL: () => 'blob:mock',
       revokeObjectURL: () => {},
@@ -170,6 +175,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
+        getManifest: () => ({ version: '2.2.0' }),
         sendMessage: (msg, cb) => {
           if (msg.type === 'PPF_FEISHU_QUERY_CONTEXT') {
             cb?.({
@@ -269,6 +275,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   return {
     docEl,
     bodyEl,
+    openedUrls,
     getShadowRoot: () => lastShadowRoot,
     flushTimers: async () => {
       while (timers.length > 0) {
@@ -353,4 +360,33 @@ const dataHtml = dataEnv.getShadowRoot().children.map((c) => c.innerHTML).join('
 assert.ok(dataHtml.includes('ppf-btn-exp-account'), '数据中心页必须渲染账号导出按钮');
 assert.ok(dataHtml.includes('ppf-btn-exp-works'), '数据中心页必须渲染作品导出按钮');
 
-console.log('✅ UI Mount & Render Smoke Tests (Publish-Only Route Gate + Collapsed Red/Green Quick Sync + A/B/C Sections) ALL PASSED!');
+// 6. 验证飞书通用「用户反馈收集表」契约：点击 💬 按钮必须准确拼接全部 8 个 prefill_ 与 hide_=1 参数且剥离隐私查询串
+const fbEnv = createMockDomEnv('https://creator.xiaohongshu.com/publish/publish?secret_token=abc123', true);
+await fbEnv.flushTimers();
+const fbBtn = fbEnv.getShadowRoot().getElementById('ppf-open-feedback');
+assert.ok(fbBtn && typeof fbBtn.onclick === 'function', '顶部栏必须挂载 💬 反馈按钮');
+await fbBtn.onclick();
+assert.equal(fbEnv.openedUrls.length, 1, '点击反馈按钮应打开飞书表单新标签页');
+const fbUrl = new URL(fbEnv.openedUrls[0]);
+assert.equal(
+  `${fbUrl.origin}${fbUrl.pathname}`,
+  'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9',
+  '反馈表单基础链接必须对齐契约'
+);
+for (const key of ['所属产品', '产品代号', '产品形态', '版本号', '页面路径', '运行环境', '设备标识', '诊断信息']) {
+  assert.ok(fbUrl.searchParams.get(`prefill_${key}`), `必须携带 prefill_${key}`);
+  assert.equal(fbUrl.searchParams.get(`hide_${key}`), '1', `必须携带 hide_${key}=1`);
+}
+assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
+assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
+assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.2.0');
+assert.equal(
+  fbUrl.searchParams.get('prefill_页面路径'),
+  '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
+  '页面路径必须剥离 URL 中可能含隐私的 query 参数'
+);
+assert.ok(fbUrl.searchParams.get('prefill_运行环境').includes('macOS · Chrome 131 · 左侧分屏停靠'));
+assert.match(fbUrl.searchParams.get('prefill_设备标识'), /^ppf_[a-z0-9]{10}$/);
+
+console.log('✅ UI Mount & Render Smoke Tests (Publish-Only Route Gate + Collapsed Red/Green Quick Sync + Feishu Feedback Contract) ALL PASSED!');

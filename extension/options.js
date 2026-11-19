@@ -3,6 +3,73 @@
 let currentConfig = null;
 let discoveredTables = [];
 
+const STORAGE_KEY_DEVICE_ID = 'ppf_device_id_v1';
+const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
+
+async function getOrCreateDeviceId() {
+  const res = await chrome.storage.local.get(STORAGE_KEY_DEVICE_ID);
+  let devId = String(res?.[STORAGE_KEY_DEVICE_ID] || '').trim();
+  if (!devId || !devId.startsWith('ppf_')) {
+    let rand = '';
+    for (let i = 0; i < 10; i++) rand += Math.floor(Math.random() * 36).toString(36);
+    devId = `ppf_${rand}`;
+    await chrome.storage.local.set({ [STORAGE_KEY_DEVICE_ID]: devId });
+  }
+  return devId;
+}
+
+function detectRuntimeOsAndBrowser() {
+  const ua = navigator.userAgent || '';
+  const os = /Mac OS X|Macintosh/i.test(ua)
+    ? 'macOS'
+    : /Windows NT/i.test(ua)
+    ? 'Windows'
+    : /Linux/i.test(ua)
+    ? 'Linux'
+    : 'Desktop';
+  const edg = ua.match(/Edg\/(\d+)/);
+  const chr = ua.match(/Chrome\/(\d+)/);
+  const browser = edg ? `Edge ${edg[1]}` : chr ? `Chrome ${chr[1]}` : 'Browser';
+  return `${os} · ${browser}`;
+}
+
+async function openOptionsFeedbackForm() {
+  const ver = chrome.runtime.getManifest?.()?.version || '2.2.0';
+  const deviceId = await getOrCreateDeviceId();
+  let bridgeState = 'offline';
+  try {
+    const r = await Promise.race([
+      fetch('http://127.0.0.1:8765/api/status', { cache: 'no-store' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 500)),
+    ]);
+    if (r && r.ok) bridgeState = 'online';
+  } catch {
+    bridgeState = 'offline';
+  }
+  const cfg = currentConfig || {};
+  const tblCount = Object.values(cfg.tables || {}).filter(Boolean).length;
+  const diag = `bridge:${bridgeState} | feishu:${cfg.enabled ? `enabled(${cfg.authType || 'app'})` : 'disabled'} | schema:${
+    cfg.schemaMode || 'multi_table'
+  } | syncMode:${cfg.statusSyncMode || 'auto'} | tables:${tblCount}`;
+
+  const fields = {
+    所属产品: '全平台发布助手',
+    产品代号: 'publish-pack-filler',
+    产品形态: '浏览器插件',
+    版本号: ver,
+    页面路径: '[插件配置页] options.html',
+    运行环境: `${detectRuntimeOsAndBrowser()} · 扩展配置页`,
+    设备标识: deviceId,
+    诊断信息: diag.slice(0, 280),
+  };
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(fields)) {
+    qs.set(`prefill_${k}`, String(v));
+    qs.set(`hide_${k}`, '1');
+  }
+  window.open(`${FEISHU_FEEDBACK_FORM_URL}?${qs.toString()}`, '_blank', 'noopener,noreferrer');
+}
+
 function showMessage(text, isError = false) {
   const box = document.getElementById('global-msg');
   box.textContent = text;
@@ -244,6 +311,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       showMessage(`❌ 导入或连接验证失败：${err.message}`, true);
     }
   });
+
+  const verEl = document.getElementById('ext-ver');
+  const mfVer = chrome.runtime.getManifest?.()?.version;
+  if (verEl && mfVer) {
+    verEl.textContent = `v${mfVer} · 零本地依赖`;
+  }
+  const fbBtn = document.getElementById('btn-open-feedback');
+  if (fbBtn) {
+    fbBtn.addEventListener('click', openOptionsFeedbackForm);
+  }
 
   document.getElementById('btn-load-local-bridge').addEventListener('click', async () => {
     try {

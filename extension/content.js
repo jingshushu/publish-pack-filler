@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.1.1) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.2.0) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -18,6 +18,9 @@
   const STORAGE_KEY_PACK = 'ppf_current_pack_v1';
   const STORAGE_KEY_SETTINGS = 'ppf_settings_v2';
   const STORAGE_KEY_EXPORT_CACHE = 'ppf_export_cache_v1';
+  const STORAGE_KEY_DEVICE_ID = 'ppf_device_id_v1';
+  const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
+  const EXT_FALLBACK_VERSION = '2.2.0';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -317,6 +320,64 @@
     return String(str || '')
       .toLowerCase()
       .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '');
+  }
+
+  async function getOrCreateDeviceId() {
+    let devId = String((await xStorageGet(STORAGE_KEY_DEVICE_ID, '')) || '').trim();
+    if (!devId || !devId.startsWith('ppf_')) {
+      let rand = '';
+      for (let i = 0; i < 10; i++) {
+        rand += Math.floor(Math.random() * 36).toString(36);
+      }
+      devId = `ppf_${rand}`;
+      await xStorageSet(STORAGE_KEY_DEVICE_ID, devId);
+    }
+    return devId;
+  }
+
+  function detectRuntimeOsAndBrowser() {
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    const os = /Mac OS X|Macintosh/i.test(ua)
+      ? 'macOS'
+      : /Windows NT/i.test(ua)
+      ? 'Windows'
+      : /Linux/i.test(ua)
+      ? 'Linux'
+      : 'Desktop';
+    const edg = ua.match(/Edg\/(\d+)/);
+    const chr = ua.match(/Chrome\/(\d+)/);
+    const browser = edg ? `Edge ${edg[1]}` : chr ? `Chrome ${chr[1]}` : 'Browser';
+    return `${os} · ${browser}`;
+  }
+
+  function sanitizeDiagSnippet(text = '') {
+    return String(text || '')
+      .replace(/\/Users\/[^/\s"']+/g, '/Users/***')
+      .replace(/[A-Za-z]:\\Users\\[^\\\s"']+/gi, 'C:\\Users\\***')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function buildFeishuFeedbackUrl({ pageLabel, panelModeLabel, deviceId, diagSummary }) {
+    const ver =
+      (IS_CHROME_EXT && typeof chrome !== 'undefined' && chrome.runtime?.getManifest?.()?.version) ||
+      EXT_FALLBACK_VERSION;
+    const fields = {
+      所属产品: '全平台发布助手',
+      产品代号: 'publish-pack-filler',
+      产品形态: IS_CHROME_EXT ? '浏览器插件' : 'Tampermonkey脚本',
+      版本号: ver,
+      页面路径: pageLabel,
+      运行环境: `${detectRuntimeOsAndBrowser()} · ${panelModeLabel}`,
+      设备标识: deviceId,
+      诊断信息: sanitizeDiagSnippet(diagSummary).slice(0, 280),
+    };
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(fields)) {
+      qs.set(`prefill_${k}`, String(v ?? ''));
+      qs.set(`hide_${k}`, '1');
+    }
+    return `${FEISHU_FEEDBACK_FORM_URL}?${qs.toString()}`;
   }
 
   // 严格判定文件是否为合法的 PublishPack 发布包（自动排除 publish_receipt.json / words.json / sources.json 等回执与元数据文件）
@@ -2591,6 +2652,53 @@
         : '就绪 · 打开封面编辑框后点「注入封面」将自动匹配裁剪比例';
     let activeThumbUrl = '';
 
+    async function openFeedbackEntry() {
+      const dataCtx = getDataCenterContext();
+      const pageTag = dataCtx.isDataMode ? `${pMeta.name}数据页` : `${pMeta.name}发布页`;
+      const cleanPageUrl = `[${pageTag}] ${location.origin}${location.pathname}`;
+      const panelModeLabel = dataCtx.isDataMode
+        ? '数据导出面板'
+        : settings.layoutMode === 'float'
+        ? '自由悬浮窗'
+        : (settings.dockSide || 'left') === 'left'
+        ? '左侧分屏停靠'
+        : '右侧分屏停靠';
+
+      let bridgeState = 'offline';
+      try {
+        const probe = await Promise.race([
+          gmRequestJson(`${settings.bridgeUrl}/api/status`),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 500)),
+        ]);
+        if (probe && probe.ok) bridgeState = 'online';
+      } catch {
+        bridgeState = 'offline';
+      }
+
+      const effCand = getEffectiveFeishuCandidate();
+      const curSig = getCurrentSyncSignature();
+      const isSynced = Boolean(
+        feishuState.configured && prePubState.syncedSig && prePubState.syncedSig === curSig && !prePubState.lastAlertIsError
+      );
+      const bindRec = effCand?.cSerialNo || effCand?.cRecordId || effCand?.bRecordId || 'none';
+      const packFmt = currentPack.meta?.isPresetDefault
+        ? 'preset'
+        : `${currentPack.meta?.format || 'unknown'}(covers:${coverBlobsMap.size})`;
+      const lastErr = sanitizeDiagSnippet(prePubState.lastAlert || feishuState.error || 'none').slice(0, 90);
+      const diagSummary = `bridge:${bridgeState} | feishu:${
+        feishuState.configured ? 'configured' : 'unconfigured'
+      } | syncStatus:${isSynced ? '已同步' : '未同步'} | bindRecord:${bindRec} | pack:${packFmt} | lastError:${lastErr}`;
+
+      const deviceId = await getOrCreateDeviceId();
+      const fbUrl = buildFeishuFeedbackUrl({
+        pageLabel: cleanPageUrl,
+        panelModeLabel,
+        deviceId,
+        diagSummary,
+      });
+      window.open(fbUrl, '_blank', 'noopener,noreferrer');
+    }
+
     function setStatus(msg) {
       statusText = msg;
       const isErr = /^(?:❌|⚠️|🚨|🔴)/.test(String(msg || '').trim());
@@ -4510,6 +4618,7 @@
                 <span style="overflow:hidden; text-overflow:ellipsis;">${dataCtx.pageTitle}</span>
               </div>
               <div class="ppf-row-nowrap">
+                <button class="ppf-icon-btn" id="ppf-open-feedback" title="问题反馈与建议（自动附带匿名诊断信息）">💬</button>
                 <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换深浅皮肤">${
                   settings.theme === 'light' ? '🌙' : '☀️'
                 }</button>
@@ -4574,6 +4683,8 @@
         };
         shadow.getElementById('ppf-collapse-btn').onclick = toggleCollapseData;
         shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapseData;
+        const dataFbBtn = shadow.getElementById('ppf-open-feedback');
+        if (dataFbBtn) dataFbBtn.onclick = openFeedbackEntry;
         shadow.getElementById('ppf-toggle-theme').onclick = () => {
           settings.theme = settings.theme === 'light' ? 'dark' : 'light';
           saveSettings(settings);
@@ -4743,6 +4854,7 @@
                 ${settings.layoutMode === 'dock' ? '🪟' : '📌'}
               </button>
               <button class="ppf-icon-btn" id="ppf-sync-bridge" title="从本地桥接服务重新同步作品与封面">🔄</button>
+              <button class="ppf-icon-btn" id="ppf-open-feedback" title="反馈问题或建议">💬</button>
               <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">${collapseArrow}</button>
             </div>
           </div>
@@ -5443,6 +5555,8 @@
       shadow.getElementById('ppf-collapse-btn').onclick = toggleCollapse;
       shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapse;
       shadow.getElementById('ppf-sync-bridge').onclick = () => syncFromLocalBridge(false);
+      const pubFbBtn = shadow.getElementById('ppf-open-feedback');
+      if (pubFbBtn) pubFbBtn.onclick = openFeedbackEntry;
 
       // 渲染平台子选项与合规徽章
       const optBadgesWrap = shadow.getElementById('ppf-opt-badges');
