@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.4.0
-// @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连、Cutcheck在线审片直连免选文件、发前红转绿警示同步与A/B/C极简工作台
+// @version      2.5.0
+// @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（防429平滑限流）、Cutcheck右侧统一审片工作台、发前红转绿警示同步与A/B/C极简工作台
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
 // @match        https://creator.douyin.com/*
@@ -54,7 +54,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.4.0';
+  const EXT_FALLBACK_VERSION = '2.5.0';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -261,6 +261,7 @@
 
   function detectPlatform() {
     const host = location.hostname;
+    if (host.includes('cutcheck-alpha.vercel.app')) return 'cutcheck';
     if (host.includes('xiaohongshu.com')) return 'xiaohongshu';
     if (host.includes('douyin.com')) return 'douyin';
     if (host.includes('channels.weixin.qq.com')) return 'weixin';
@@ -274,6 +275,7 @@
   }
 
   const PLATFORM_META = {
+    cutcheck: { name: '🎬 飞书审片', accent: '#16624f', preferredRatios: ['16:9', '3:4'] },
     xiaohongshu: { name: '小红书', accent: '#ff2442', preferredRatios: ['3:4', '9:16', '4:3', '1:1', '16:9'] },
     douyin: { name: '抖音', accent: '#fe2c55', preferredRatios: ['3:4', '9:16', '16:9', '4:3'] },
     weixin: { name: '微信视频号', accent: '#07c160', preferredRatios: ['3:4', '4:3', '9:16', '16:9'] },
@@ -477,6 +479,15 @@
       return /\/videos\/upload/i.test(href) || /^\/video\/[^/]+\/edit/i.test(p);
     }
     return false;
+  }
+
+  function isCutcheckReviewContext(href = location.href) {
+    try {
+      const parsed = new URL(href || location.href);
+      return parsed.hostname.toLowerCase().includes('cutcheck-alpha.vercel.app');
+    } catch {
+      return false;
+    }
   }
 
   // ==================== Markdown 发布包解析器 ====================
@@ -2526,7 +2537,6 @@
     const defaults = {
       theme: 'light',
       layoutMode: 'dock',
-      dockSide: 'left',
       pushPage: true,
       collapsed: false,
       width: 368,
@@ -2546,6 +2556,7 @@
       if (raw) {
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
         const merged = { ...defaults, ...parsed };
+        delete merged.dockSide;
         if (!merged.selectedCoverByPlat || typeof merged.selectedCoverByPlat !== 'object') {
           merged.selectedCoverByPlat = {};
         }
@@ -2598,15 +2609,13 @@
     }
 
     function syncPagePushMargin() {
-      const isPubPage = isPublishPageContext();
-      const shouldPush = isPubPage && settings.layoutMode === 'dock' && settings.pushPage && !settings.collapsed;
-      const isLeftDock = (settings.dockSide || 'left') === 'left';
+      const isDockTarget = isPublishPageContext() || isCutcheckReviewContext();
+      const shouldPush = isDockTarget && settings.layoutMode === 'dock' && settings.pushPage && !settings.collapsed;
       const docEl = document.documentElement;
       const bodyEl = document.body;
       if (docEl.style.marginRight) docEl.style.marginRight = '';
       if (docEl.style.marginLeft) docEl.style.marginLeft = '';
 
-      // 先还原可能残留的反向 padding 与 fixed 容器偏移
       const clearShiftedFixed = () => {
         const shiftedR = document.querySelectorAll('[data-ppf-orig-right]');
         for (const el of shiftedR) {
@@ -2623,8 +2632,8 @@
       if (shouldPush) {
         clearShiftedFixed();
         docEl.style.boxSizing = 'border-box';
-        docEl.style.paddingLeft = isLeftDock ? `${settings.width}px` : '';
-        docEl.style.paddingRight = isLeftDock ? '' : `${settings.width}px`;
+        docEl.style.paddingLeft = '';
+        docEl.style.paddingRight = `${settings.width}px`;
         docEl.style.minWidth = '0px';
         if (bodyEl) {
           if (bodyEl.dataset.ppfOrigMinW === undefined) {
@@ -2640,18 +2649,15 @@
           const cs = window.getComputedStyle(el);
           if (cs.position !== 'fixed') continue;
           const rect = el.getBoundingClientRect();
-          if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.45) {
-            if (isLeftDock && Math.abs(rect.left) <= 20) {
-              if (el.dataset.ppfOrigLeft === undefined) {
-                el.dataset.ppfOrigLeft = el.style.left || '';
-              }
-              el.style.left = `${settings.width}px`;
-            } else if (!isLeftDock && Math.abs(window.innerWidth - rect.right) <= 20) {
-              if (el.dataset.ppfOrigRight === undefined) {
-                el.dataset.ppfOrigRight = el.style.right || '';
-              }
-              el.style.right = `${settings.width}px`;
+          if (
+            rect.width > window.innerWidth * 0.5 &&
+            rect.height > window.innerHeight * 0.45 &&
+            Math.abs(window.innerWidth - rect.right) <= 20
+          ) {
+            if (el.dataset.ppfOrigRight === undefined) {
+              el.dataset.ppfOrigRight = el.style.right || '';
             }
+            el.style.right = `${settings.width}px`;
           }
         }
       } else {
@@ -2683,20 +2689,26 @@
         ? '视频号就绪 · 请点页面「发表视频」并拖入视频，再点下方一键填表或注入双封面'
         : platform === 'douyin'
         ? '抖音就绪 · 打开封面弹窗后点注入将自动切换横/竖封面并避开 AI 参考图槽'
+        : platform === 'cutcheck'
+        ? '审片就绪 · 批注快捷键 M/C/V 原生保留，Alt+S 可快速贴边收起面板'
         : '就绪 · 打开封面编辑框后点「注入封面」将自动匹配裁剪比例';
     let activeThumbUrl = '';
 
     async function openFeedbackEntry() {
       const dataCtx = getDataCenterContext();
-      const pageTag = dataCtx.isDataMode ? `${pMeta.name}数据页` : `${pMeta.name}发布页`;
+      const isCutPage = isCutcheckReviewContext();
+      const pageTag = isCutPage
+        ? 'Cutcheck审片页'
+        : dataCtx.isDataMode
+        ? `${pMeta.name}数据页`
+        : `${pMeta.name}发布页`;
       const cleanPageUrl = `[${pageTag}] ${location.origin}${location.pathname}`;
+      const layoutLabel = settings.layoutMode === 'float' ? '自由悬浮窗' : '右侧分屏停靠';
       const panelModeLabel = dataCtx.isDataMode
         ? '数据导出面板'
-        : settings.layoutMode === 'float'
-        ? '自由悬浮窗'
-        : (settings.dockSide || 'left') === 'left'
-        ? '左侧分屏停靠'
-        : '右侧分屏停靠';
+        : isCutPage
+        ? `审片面板(${layoutLabel})`
+        : layoutLabel;
 
       let bridgeState = 'offline';
       try {
@@ -2709,19 +2721,29 @@
         bridgeState = 'offline';
       }
 
-      const effCand = getEffectiveFeishuCandidate();
-      const curSig = getCurrentSyncSignature();
-      const isSynced = Boolean(
-        feishuState.configured && prePubState.syncedSig && prePubState.syncedSig === curSig && !prePubState.lastAlertIsError
-      );
-      const bindRec = effCand?.cSerialNo || effCand?.cRecordId || effCand?.bRecordId || 'none';
-      const packFmt = currentPack.meta?.isPresetDefault
-        ? 'preset'
-        : `${currentPack.meta?.format || 'unknown'}(covers:${coverBlobsMap.size})`;
-      const lastErr = sanitizeDiagSnippet(prePubState.lastAlert || feishuState.error || 'none').slice(0, 90);
-      const diagSummary = `bridge:${bridgeState} | feishu:${
-        feishuState.configured ? 'configured' : 'unconfigured'
-      } | syncStatus:${isSynced ? '已同步' : '未同步'} | bindRecord:${bindRec} | pack:${packFmt} | lastError:${lastErr}`;
+      let diagSummary = '';
+      if (isCutPage) {
+        const pCnt = ccState.pendingWorks.length;
+        const bindRec = ccState.activeWork?.bRecordId || ccState.boundBId || 'none';
+        const lastErr = sanitizeDiagSnippet(ccState.alertIsErr ? ccState.alertMsg : 'none').slice(0, 90);
+        diagSummary = `scene:cutcheck | bridge:${bridgeState} | feishu:${
+          ccState.configured ? 'configured' : 'unconfigured'
+        } | pending:${pCnt} | bindRecord:${bindRec} | lastError:${lastErr}`;
+      } else {
+        const effCand = getEffectiveFeishuCandidate();
+        const curSig = getCurrentSyncSignature();
+        const isSynced = Boolean(
+          feishuState.configured && prePubState.syncedSig && prePubState.syncedSig === curSig && !prePubState.lastAlertIsError
+        );
+        const bindRec = effCand?.cSerialNo || effCand?.cRecordId || effCand?.bRecordId || 'none';
+        const packFmt = currentPack.meta?.isPresetDefault
+          ? 'preset'
+          : `${currentPack.meta?.format || 'unknown'}(covers:${coverBlobsMap.size})`;
+        const lastErr = sanitizeDiagSnippet(prePubState.lastAlert || feishuState.error || 'none').slice(0, 90);
+        diagSummary = `bridge:${bridgeState} | feishu:${
+          feishuState.configured ? 'configured' : 'unconfigured'
+        } | syncStatus:${isSynced ? '已同步' : '未同步'} | bindRecord:${bindRec} | pack:${packFmt} | lastError:${lastErr}`;
+      }
 
       const deviceId = await getOrCreateDeviceId();
       const fbUrl = buildFeishuFeedbackUrl({
@@ -2756,15 +2778,13 @@
       syncPagePushMargin();
       const isDataPage = getDataCenterContext().isDataMode;
       const isPubPage = isPublishPageContext();
-      if (!isPubPage && !isDataPage) {
+      const isCutPage = isCutcheckReviewContext();
+      if (!isPubPage && !isDataPage && !isCutPage) {
         hostEl.style.cssText = 'all: initial; display: none !important; pointer-events: none;';
         return;
       }
-      const isLeftDock = !isDataPage && (settings.dockSide || 'left') === 'left';
       if (settings.collapsed) {
-        hostEl.style.cssText = isLeftDock
-          ? 'all: initial; position: fixed; z-index: 2147483646; top: 84px; left: 0; pointer-events: none;'
-          : 'all: initial; position: fixed; z-index: 2147483646; top: 84px; right: 0; pointer-events: none;';
+        hostEl.style.cssText = 'all: initial; position: fixed; z-index: 2147483646; top: 84px; right: 0; pointer-events: none;';
         return;
       }
       if (isDataPage) {
@@ -2774,9 +2794,7 @@
         return;
       }
       if (settings.layoutMode === 'dock') {
-        hostEl.style.cssText = isLeftDock
-          ? `all: initial; position: fixed; z-index: 2147483646; top: 0; left: 0; width: ${settings.width}px; height: 100vh; pointer-events: none;`
-          : `all: initial; position: fixed; z-index: 2147483646; top: 0; right: 0; width: ${settings.width}px; height: 100vh; pointer-events: none;`;
+        hostEl.style.cssText = `all: initial; position: fixed; z-index: 2147483646; top: 0; right: 0; width: ${settings.width}px; height: 100vh; pointer-events: none;`;
       } else {
         const clampedW = Math.min(Math.max(320, settings.width), window.innerWidth - 24);
         const clampedH = Math.min(Math.max(380, settings.height), window.innerHeight - 24);
@@ -2786,9 +2804,6 @@
 
     function buildStyles() {
       const isLight = settings.theme === 'light';
-      const isDataPage = getDataCenterContext().isDataMode;
-      const isLeftDock = !isDataPage && settings.layoutMode === 'dock' && (settings.dockSide || 'left') === 'left';
-      const isLeftCollapsed = !isDataPage && (settings.dockSide || 'left') === 'left';
       const bg = isLight ? 'rgba(255, 255, 255, 0.98)' : 'rgba(22, 24, 30, 0.97)';
       const fg = isLight ? '#1f2329' : '#f3f4f6';
       const subFg = isLight ? '#646a73' : '#9ca3af';
@@ -2802,18 +2817,11 @@
       const chipFg = isLight ? '#1d4ed8' : '#93c5fd';
       const statusFg = isLight ? '#059669' : '#34d399';
       const shadowCss = isLight
-        ? isLeftDock
-          ? '8px 0 28px rgba(15, 23, 42, 0.10), 0 8px 24px rgba(15, 23, 42, 0.08)'
-          : '-8px 0 28px rgba(15, 23, 42, 0.10), 0 8px 24px rgba(15, 23, 42, 0.08)'
+        ? '-8px 0 28px rgba(15, 23, 42, 0.10), 0 8px 24px rgba(15, 23, 42, 0.08)'
         : '0 16px 42px rgba(0, 0, 0, 0.45)';
-      const radius = settings.layoutMode === 'dock' ? (isLeftDock ? '0 14px 14px 0' : '14px 0 0 14px') : '14px';
-      const earPosCss = isLeftDock
-        ? `right: -25px; border: 1px solid ${border}; border-left: none; border-radius: 0 10px 10px 0; box-shadow: 4px 2px 12px rgba(0,0,0,0.08);`
-        : `left: -25px; border: 1px solid ${border}; border-right: none; border-radius: 10px 0 0 10px; box-shadow: -4px 2px 12px rgba(0,0,0,0.08);`;
-      const collapsedTabCss = isLeftCollapsed
-        ? `border: 1px solid ${border}; border-left: none; border-radius: 0 12px 12px 0; box-shadow: 4px 4px 16px rgba(0,0,0,0.12);`
-        : `border: 1px solid ${border}; border-right: none; border-radius: 12px 0 0 12px; box-shadow: -4px 4px 16px rgba(0,0,0,0.12);`;
-      const resizeWPos = isLeftDock ? 'right: -4px;' : 'left: -4px;';
+      const radius = settings.layoutMode === 'dock' ? '14px 0 0 14px' : '14px';
+      const earPosCss = `left: -25px; border: 1px solid ${border}; border-right: none; border-radius: 10px 0 0 10px; box-shadow: -4px 2px 12px rgba(0,0,0,0.08);`;
+      const collapsedTabCss = `border: 1px solid ${border}; border-right: none; border-radius: 12px 0 0 12px; box-shadow: -4px 4px 16px rgba(0,0,0,0.12);`;
 
       styleEl.textContent = `
         * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
@@ -2824,7 +2832,7 @@
         .ppf-ear:hover { color: ${pMeta.accent}; }
         .ppf-collapsed-tab { pointer-events: auto; display: flex; align-items: center; gap: 5px; padding: 10px 10px 10px 12px; background: ${bg}; color: ${fg}; ${collapsedTabCss} cursor: pointer; user-select: none; font-size: 12.5px; font-weight: 600; writing-mode: vertical-rl; letter-spacing: 2px; align-self: center; }
         .ppf-dot { width: 8px; height: 8px; border-radius: 50%; background: ${pMeta.accent}; display: inline-block; }
-        .ppf-resize-w { position: absolute; ${resizeWPos} top: 0; width: 8px; height: 100%; cursor: ew-resize; z-index: 10; }
+        .ppf-resize-w { position: absolute; left: -4px; top: 0; width: 8px; height: 100%; cursor: ew-resize; z-index: 10; }
         .ppf-resize-s { position: absolute; left: 0; bottom: -4px; width: 100%; height: 8px; cursor: ns-resize; z-index: 10; }
         .ppf-resize-sw { position: absolute; left: 0; bottom: 0; width: 16px; height: 16px; cursor: nesw-resize; z-index: 12; display: flex; align-items: flex-end; justify-content: flex-start; padding: 2px; color: ${subFg}; font-size: 10px; opacity: 0.6; user-select: none; }
         .ppf-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 11px; background: ${headBg}; border-bottom: 1px solid ${border}; cursor: ${settings.layoutMode === 'float' ? 'move' : 'default'}; user-select: none; flex-shrink: 0; gap: 6px; }
@@ -2845,6 +2853,7 @@
         .ppf-row-nowrap { display: flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; }
         .ppf-btn { background: ${btnBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 6px; padding: 4px 8px; font-size: 11.5px; cursor: pointer; font-weight: 500; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; transition: all 0.14s; }
         .ppf-btn:hover { background: ${btnHover}; }
+        .ppf-btn:disabled { opacity: 0.55; cursor: not-allowed; }
         .ppf-btn-accent { background: ${pMeta.accent}; border-color: transparent; color: #fff; font-weight: 600; padding: 7px 11px; font-size: 12.5px; }
         .ppf-btn-accent:hover { filter: brightness(1.06); background: ${pMeta.accent}; }
         .ppf-btn-block { width: 100%; justify-content: center; display: inline-flex; align-items: center; gap: 5px; }
@@ -2863,6 +2872,11 @@
         .ppf-foot { font-size: 10.5px; color: ${subFg}; border-top: 1px solid ${border}; padding-top: 6px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         select.ppf-select, input.ppf-input { background: ${inputBg}; color: ${fg}; border: 1px solid ${border}; border-radius: 6px; padding: 4px 7px; font-size: 11.5px; width: 100%; outline: none; }
         select.ppf-select:focus, input.ppf-input:focus { border-color: ${pMeta.accent}; }
+        .ppf-cc-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px; border-radius: 7px; background: ${inputBg}; border: 1px solid ${border}; cursor: pointer; transition: all 0.12s; }
+        .ppf-cc-item:hover { background: ${btnHover}; border-color: ${pMeta.accent}; }
+        .ppf-cc-item.active { border: 1.5px solid ${pMeta.accent}; background: ${isLight ? '#eef7f4' : 'rgba(22,98,79,0.22)'}; }
+        .ppf-cc-pill { text-decoration: none; background: ${inputBg}; color: ${isLight ? '#0f503f' : '#6ee7b7'}; border: 1px solid rgba(16,185,129,0.45); border-radius: 999px; padding: 3px 9px; font-size: 11.5px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.12s; }
+        .ppf-cc-pill:hover { background: ${isLight ? '#d1fae5' : 'rgba(16,185,129,0.25)'}; }
       `;
     }
 
@@ -2941,6 +2955,238 @@
       lastAlert: '',
       lastAlertIsError: false,
     };
+    let ccState = {
+      configured: true,
+      loading: false,
+      switching: false,
+      approving: false,
+      brandFilter: 'all',
+      pendingWorks: [],
+      activeWork: null,
+      boundBId: '',
+      boundSlug: '',
+      boundProject: '',
+      boundVideoPath: '',
+      boundVersion: '',
+      alertMsg: '',
+      alertIsErr: false,
+      showQuickSetup: false,
+    };
+    let ccRefreshTimer = null;
+
+    async function loadInitialCutcheckBound() {
+      try {
+        const rawBound = await xStorageGet(STORAGE_KEY_CUTCHECK_BOUND, '');
+        if (rawBound) {
+          const b = typeof rawBound === 'string' ? JSON.parse(rawBound) : rawBound;
+          if (b && Date.now() - Number(b.updatedAt || 0) < 12 * 3600 * 1000) {
+            ccState.boundBId = b.bRecordId || '';
+            ccState.boundSlug = b.workSlug || '';
+            ccState.boundProject = b.project || '';
+            ccState.boundVideoPath = b.videoPath || '';
+            ccState.boundVersion = b.version || '';
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    function parseCutcheckHashContext(href = location.href) {
+      let h = '';
+      try {
+        h = String(new URL(href || location.href).hash || '').replace(/^#/, '');
+      } catch {
+        h = String(location.hash || '').replace(/^#/, '');
+      }
+      if (!h) return { filePath: '', project: '', version: '', slug: '' };
+      const p = new URLSearchParams(h);
+      const filePath = p.get('file') || '';
+      const project = p.get('project') || '';
+      const version = p.get('version') || '';
+      const slug = extractWorkSlugFront(filePath);
+      return { filePath, project, version, slug };
+    }
+
+    function syncCutcheckBoundWithHash() {
+      const hc = parseCutcheckHashContext();
+      if (hc.slug && ccState.boundSlug && hc.slug !== ccState.boundSlug) {
+        ccState.boundBId = '';
+        ccState.boundSlug = hc.slug;
+        ccState.boundProject = hc.project || '';
+        ccState.boundVideoPath = hc.filePath || '';
+        ccState.boundVersion = hc.version || '';
+      } else {
+        if (!ccState.boundSlug && hc.slug) ccState.boundSlug = hc.slug;
+        if (!ccState.boundProject && hc.project) ccState.boundProject = hc.project;
+        if (!ccState.boundVideoPath && hc.filePath) ccState.boundVideoPath = hc.filePath;
+        if (!ccState.boundVersion && hc.version) ccState.boundVersion = hc.version;
+      }
+    }
+
+    async function refreshCutcheckQueue(force = false) {
+      if (!isCutcheckReviewContext()) return;
+      if (ccState.approving) return;
+      if (!IS_CHROME_EXT) {
+        ccState.configured = false;
+        render();
+        return;
+      }
+      syncCutcheckBoundWithHash();
+      const hc = parseCutcheckHashContext();
+      ccState.loading = true;
+      render();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_QUERY_REVIEW_QUEUE',
+          params: {
+            bRecordId: ccState.boundBId,
+            workSlug: ccState.boundSlug || hc.slug,
+            videoPath: hc.filePath || ccState.boundVideoPath,
+            project: ccState.boundProject || hc.project,
+            forceRefresh: Boolean(force),
+          },
+        });
+        const d = resp?.data || {};
+        ccState.configured = Boolean(d.configured);
+        ccState.pendingWorks = d.pendingWorks || [];
+        ccState.activeWork = d.activeWork || null;
+        if (ccState.activeWork?.bRecordId) {
+          ccState.boundBId = ccState.activeWork.bRecordId;
+          ccState.boundSlug = ccState.activeWork.slug || ccState.boundSlug;
+          ccState.boundProject = ccState.activeWork.title || ccState.boundProject;
+        }
+        if (ccState.alertIsErr && /429|读取飞书待审列表失败/.test(ccState.alertMsg)) {
+          ccState.alertMsg = '';
+          ccState.alertIsErr = false;
+        }
+      } catch (err) {
+        ccState.alertMsg = `⚠️ 读取飞书待审列表失败：${err?.message || err}`;
+        ccState.alertIsErr = true;
+      } finally {
+        ccState.loading = false;
+        render();
+      }
+    }
+
+    function scheduleRefreshCutcheckQueue(force = false, delayMs = 320) {
+      if (ccRefreshTimer) clearTimeout(ccRefreshTimer);
+      ccRefreshTimer = setTimeout(() => {
+        ccRefreshTimer = null;
+        refreshCutcheckQueue(force);
+      }, delayMs);
+    }
+
+    async function switchCutcheckVideoToWork(targetWork) {
+      if (!targetWork || ccState.switching) return;
+      if (!targetWork.slug) {
+        ccState.alertMsg = `⚠️《${targetWork.title}》在飞书尚未填写本地作品目录`;
+        ccState.alertIsErr = true;
+        render();
+        return;
+      }
+      ccState.switching = true;
+      ccState.alertMsg = `⏳ 正在定位本机《${targetWork.title}》最新正片...`;
+      ccState.alertIsErr = false;
+      render();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_BRIDGE_PREPARE_REVIEW',
+          dir: targetWork.slug,
+          project: targetWork.title,
+          bid: targetWork.bRecordId,
+        });
+        const prep = resp?.data || {};
+        ccState.boundBId = targetWork.bRecordId;
+        ccState.boundSlug = prep.workSlug || targetWork.slug;
+        ccState.boundProject = prep.project || targetWork.title;
+        ccState.boundVideoPath = prep.videoPath || '';
+        ccState.boundVersion = prep.version || '';
+
+        const payload = {
+          token: prep.token,
+          videoPath: prep.videoPath,
+          fileName: prep.fileName,
+          size: Number(prep.size || 0),
+          mime: prep.mime || 'video/mp4',
+          lastModified: Number(prep.lastModified || Date.now()),
+          project: prep.project || targetWork.title,
+          version: prep.version || '',
+          workSlug: ccState.boundSlug,
+          bRecordId: targetWork.bRecordId,
+          bridgeOrigin: BRIDGE_DEFAULT_URL,
+          createdAt: Date.now(),
+        };
+        await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, JSON.stringify(payload));
+        await xStorageSet(
+          STORAGE_KEY_CUTCHECK_BOUND,
+          JSON.stringify({
+            bRecordId: targetWork.bRecordId,
+            workSlug: ccState.boundSlug,
+            project: ccState.boundProject,
+            videoPath: prep.videoPath,
+            version: prep.version || '',
+            updatedAt: Date.now(),
+          })
+        );
+        ccState.activeWork = targetWork;
+        ccState.alertMsg = '';
+        ccState.alertIsErr = false;
+        ccState.switching = false;
+        setStatus(`🎬 已载入正片：《${targetWork.title}》${prep.version ? ` (${prep.version})` : ''}`);
+        render();
+
+        const nextHash = new URL(prep.cutcheckUrl).hash;
+        if (location.hash === nextHash) {
+          handleCutcheckAutoLoad();
+        } else {
+          location.hash = nextHash;
+        }
+      } catch (err) {
+        ccState.switching = false;
+        ccState.alertMsg = `❌ 切换失败：${err?.message || '请确认本机 8765 桥接服务已启动且已同步该成片'}`;
+        ccState.alertIsErr = true;
+        render();
+      }
+    }
+
+    async function approveCurrentCutcheckWork() {
+      const cur = ccState.activeWork;
+      if (!cur || ccState.approving) return;
+      ccState.approving = true;
+      ccState.alertMsg = '⏳ 正在写入审片通过时间，并触发飞书流转 B12 与生成全渠道发布任务...';
+      ccState.alertIsErr = false;
+      render();
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_FEISHU_APPROVE_REVIEW',
+          payload: {
+            bRecordId: cur.bRecordId,
+            workSlug: cur.slug,
+            project: cur.title,
+          },
+        });
+        const res = resp?.data || {};
+        ccState.approving = false;
+        ccState.pendingWorks = res.pendingWorks || ccState.pendingWorks.filter((w) => w.bRecordId !== cur.bRecordId);
+        ccState.activeWork = {
+          ...cur,
+          status: res.newStatus || 'B12等待发布至平台',
+          approvedAt: res.approvedAtStr || '',
+          isApproved: true,
+          cTasks: res.cTasks || [],
+        };
+        ccState.alertMsg = '';
+        ccState.alertIsErr = false;
+        setStatus(res.summary || `✅《${cur.title}》已审片通过！`);
+        render();
+      } catch (err) {
+        ccState.approving = false;
+        ccState.alertMsg = `❌ 审片通过失败：${err?.message || err}`;
+        ccState.alertIsErr = true;
+        render();
+      }
+    }
 
     async function loadExportCache() {
       try {
@@ -4016,19 +4262,21 @@
           }
           prePubState.syncedLabel =
             schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
-          // 强制跳过缓存立即回读飞书表内的「真实发布日期」与最新记录名，并标记顶部横幅为绿色
-          await refreshFeishuPublishContext(false);
-          const refreshedCand = getEffectiveFeishuCandidate();
-          prePubState.syncedFeishuTime = refreshedCand?.feishuPublishedAt || res.recordedTime || '';
+          // 立即回显本次落表的真实发布日期并标记顶部横幅为绿色，避免连续两次强刷接口冲高 QPS
+          const curCandAfterSave = getEffectiveFeishuCandidate();
+          if (curCandAfterSave && res.recordedTime) {
+            curCandAfterSave.feishuPublishedAt = res.recordedTime;
+          }
+          prePubState.syncedFeishuTime = res.recordedTime || curCandAfterSave?.feishuPublishedAt || '';
           prePubState.syncedSig = getCurrentSyncSignature();
           feishuState.summary = res.summary || '✅ 已写入飞书发布记录表';
           feishuState.hasConflict = false;
           setStatus(`${res.summary} · 可放心点击网页「发布」按钮！`);
           render();
-          // 2.2秒后静默二次回读，自动同步飞书工作流异步流转后的「✅@账号_片名」图标
+          // 2.4秒后静默单次回读，自动同步飞书工作流异步流转后的「✅@账号_片名」与最新真实发布时间
           setTimeout(() => {
             refreshFeishuPublishContext(false).catch(() => {});
-          }, 2200);
+          }, 2400);
           return true;
         }
       } catch (err) {
@@ -4482,6 +4730,137 @@
       }
     }
 
+    function bindCommonShellControls({ onRefreshClick = null } = {}) {
+      const toggleThemeBtn = shadow.getElementById('ppf-toggle-theme');
+      if (toggleThemeBtn) {
+        toggleThemeBtn.onclick = () => {
+          settings.theme = settings.theme === 'light' ? 'dark' : 'light';
+          saveSettings(settings);
+          render();
+        };
+      }
+      const toggleLayoutBtn = shadow.getElementById('ppf-toggle-layout');
+      if (toggleLayoutBtn) {
+        toggleLayoutBtn.onclick = () => {
+          settings.layoutMode = settings.layoutMode === 'dock' ? 'float' : 'dock';
+          saveSettings(settings);
+          render();
+        };
+      }
+      const toggleCollapse = () => {
+        settings.collapsed = true;
+        saveSettings(settings);
+        render();
+      };
+      const collapseBtn = shadow.getElementById('ppf-collapse-btn');
+      if (collapseBtn) collapseBtn.onclick = toggleCollapse;
+      const earBtn = shadow.getElementById('ppf-ear-collapse');
+      if (earBtn) earBtn.onclick = toggleCollapse;
+      const fbBtn = shadow.getElementById('ppf-open-feedback');
+      if (fbBtn) fbBtn.onclick = openFeedbackEntry;
+      if (onRefreshClick) {
+        const refBtn = shadow.getElementById('ppf-sync-bridge') || shadow.getElementById('ppf-cc-refresh');
+        if (refBtn) refBtn.onclick = onRefreshClick;
+      }
+
+      const chkPush = shadow.getElementById('ppf-chk-push');
+      if (chkPush) {
+        chkPush.onchange = (e) => {
+          settings.pushPage = e.target.checked;
+          saveSettings(settings);
+          syncPagePushMargin();
+        };
+      }
+
+      const resizeW = shadow.getElementById('ppf-resize-w');
+      if (resizeW) {
+        resizeW.onmousedown = (e) => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const startWidth = settings.width;
+          const onMove = (me) => {
+            const delta = startX - me.clientX;
+            settings.width = Math.round(Math.min(760, Math.max(320, startWidth + delta)));
+            applyHostGeometry();
+          };
+          const onUp = () => {
+            saveSettings(settings);
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        };
+      }
+
+      if (settings.layoutMode === 'float') {
+        const resizeS = shadow.getElementById('ppf-resize-s');
+        const resizeSW = shadow.getElementById('ppf-resize-sw');
+        if (resizeS) {
+          resizeS.onmousedown = (e) => {
+            e.preventDefault();
+            const startY = e.clientY;
+            const startHeight = settings.height;
+            const onMove = (me) => {
+              settings.height = Math.round(Math.min(window.innerHeight - 24, Math.max(380, startHeight + (me.clientY - startY))));
+              applyHostGeometry();
+            };
+            const onUp = () => {
+              saveSettings(settings);
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          };
+        }
+        if (resizeSW) {
+          resizeSW.onmousedown = (e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const startW = settings.width;
+            const startH = settings.height;
+            const onMove = (me) => {
+              settings.width = Math.round(Math.min(760, Math.max(320, startW + (startX - me.clientX))));
+              settings.height = Math.round(Math.min(window.innerHeight - 24, Math.max(380, startH + (me.clientY - startY))));
+              applyHostGeometry();
+            };
+            const onUp = () => {
+              saveSettings(settings);
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          };
+        }
+
+        const dragHandle = shadow.getElementById('ppf-drag-handle');
+        if (dragHandle) {
+          dragHandle.onmousedown = (e) => {
+            if (e.target.closest('button, select, input')) return;
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const initTop = settings.floatTop;
+            const initRight = settings.floatRight;
+            const onMove = (me) => {
+              settings.floatTop = Math.max(8, Math.min(window.innerHeight - 80, initTop + (me.clientY - startY)));
+              settings.floatRight = Math.max(8, Math.min(window.innerWidth - 120, initRight - (me.clientX - startX)));
+              applyHostGeometry();
+            };
+            const onUp = () => {
+              saveSettings(settings);
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          };
+        }
+      }
+    }
+
     function render() {
       if (activeThumbUrl) {
         URL.revokeObjectURL(activeThumbUrl);
@@ -4490,8 +4869,9 @@
       applyHostGeometry();
       const dataCtx = getDataCenterContext();
       const isPubPage = isPublishPageContext();
-      // 严格只在「真实发布页」与「数据中心页」渲染界面，其他任何页面完全隐身且零副作用
-      if (!isPubPage && !dataCtx.isDataMode) {
+      const isCutPage = isCutcheckReviewContext();
+      // 严格只在「真实发布页」「数据中心页」与「Cutcheck在线审片页」渲染界面，其他任何页面完全隐身且零副作用
+      if (!isPubPage && !dataCtx.isDataMode && !isCutPage) {
         rootWrap.innerHTML = '';
         return;
       }
@@ -4500,11 +4880,31 @@
       rootWrap.innerHTML = '';
 
       if (settings.collapsed) {
-        const isLeftCol = !dataCtx.isDataMode && (settings.dockSide || 'left') === 'left';
         const wrapCol = document.createElement('div');
-        wrapCol.style.cssText = `display:flex; flex-direction:column; align-items:${
-          isLeftCol ? 'flex-start' : 'flex-end'
-        }; gap:6px; pointer-events:auto;`;
+        wrapCol.style.cssText = 'display:flex; flex-direction:column; align-items:flex-end; gap:6px; pointer-events:auto;';
+
+        if (isCutPage) {
+          const pCnt = ccState.pendingWorks.length;
+          const cur = ccState.activeWork;
+          const pill = document.createElement('div');
+          pill.id = 'ppf-cc-collapsed-pill';
+          pill.title = '点击展开右侧审片工作台（快捷键 Alt+S）';
+          const bgGrad = cur?.isApproved
+            ? 'linear-gradient(135deg, #10b981, #059669)'
+            : 'linear-gradient(135deg, #16624f, #0f503f)';
+          pill.style.cssText = `pointer-events:auto; display:flex; align-items:center; gap:6px; padding:8px 11px; background:${bgGrad}; color:#fff; border:2px solid rgba(255,255,255,0.88); border-right:none; border-radius:12px 0 0 12px; box-shadow:-4px 6px 18px rgba(22,98,79,0.34); cursor:pointer; font-size:12px; font-weight:800; white-space:nowrap;`;
+          pill.innerHTML = cur?.isApproved
+            ? `<span>✅ 已通过 · 待审 ${pCnt}</span><span style="opacity:0.9; font-size:11px;">❮</span>`
+            : `<span>🎬 飞书审片</span><span style="background:rgba(255,255,255,0.2);padding:1px 6px;border-radius:999px;font-size:11px;">待审 ${pCnt}</span><span style="opacity:0.9; font-size:11px;">❮</span>`;
+          pill.onclick = () => {
+            settings.collapsed = false;
+            saveSettings(settings);
+            render();
+          };
+          wrapCol.appendChild(pill);
+          rootWrap.appendChild(wrapCol);
+          return;
+        }
 
         if (dataCtx.isDataMode) {
           const mkMiniBtn = (label, dim) => {
@@ -4551,13 +4951,12 @@
           ? effCand?.feishuPublishedAt || prePubState.syncedFeishuTime || ''
           : '';
         const modeTag = schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
-        const pillRadius = isLeftCol ? '0 12px 12px 0' : '12px 0 0 12px';
-        const borderSideFix = isLeftCol ? 'border-left:none;' : 'border-right:none;';
 
         if (!isSyncedGreen) {
           const redCard = document.createElement('div');
           redCard.id = 'ppf-collapsed-unsynced-card';
-          redCard.style.cssText = `pointer-events:auto; display:flex; flex-direction:column; gap:5px; padding:8px 10px; background:linear-gradient(135deg, #ef4444, #dc2626); color:#fff; border:2px solid rgba(255,255,255,0.88); ${borderSideFix} border-radius:${pillRadius}; box-shadow:0 6px 20px rgba(220,38,38,0.42); max-width:210px;`;
+          redCard.style.cssText =
+            'pointer-events:auto; display:flex; flex-direction:column; gap:5px; padding:8px 10px; background:linear-gradient(135deg, #ef4444, #dc2626); color:#fff; border:2px solid rgba(255,255,255,0.88); border-right:none; border-radius:12px 0 0 12px; box-shadow:0 6px 20px rgba(220,38,38,0.42); max-width:210px;';
           const subHint = !feishuState.configured
             ? '未连接飞书配置'
             : prePubState.lastAlert
@@ -4566,9 +4965,7 @@
           redCard.innerHTML = `
             <div id="ppf-collapsed-expand-btn" style="display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer; font-size:12px; font-weight:800; white-space:nowrap;" title="点击展开完整发布助手面板 (Alt+S)">
               <span>🚨 未同步发布时间</span>
-              <span style="font-size:11px; opacity:0.92; background:rgba(0,0,0,0.18); padding:1px 5px; border-radius:4px;">展开 ${
-                isLeftCol ? '❯' : '❮'
-              }</span>
+              <span style="font-size:11px; opacity:0.92; background:rgba(0,0,0,0.18); padding:1px 5px; border-radius:4px;">展开 ❮</span>
             </div>
             <div style="font-size:10.5px; opacity:0.94; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(
               subHint
@@ -4617,10 +5014,11 @@
         const greenTab = document.createElement('div');
         greenTab.id = 'ppf-collapsed-synced-tab';
         greenTab.title = '已同步飞书真实发布时间 · 点击展开面板 (Alt+S)';
-        greenTab.style.cssText = `pointer-events:auto; display:flex; align-items:center; gap:6px; padding:8px 11px; background:linear-gradient(135deg, #10b981, #059669); color:#fff; border:2px solid rgba(255,255,255,0.88); ${borderSideFix} border-radius:${pillRadius}; box-shadow:0 4px 14px rgba(16,185,129,0.34); cursor:pointer; font-size:12px; font-weight:800; white-space:nowrap;`;
+        greenTab.style.cssText =
+          'pointer-events:auto; display:flex; align-items:center; gap:6px; padding:8px 11px; background:linear-gradient(135deg, #10b981, #059669); color:#fff; border:2px solid rgba(255,255,255,0.88); border-right:none; border-radius:12px 0 0 12px; box-shadow:0 4px 14px rgba(16,185,129,0.34); cursor:pointer; font-size:12px; font-weight:800; white-space:nowrap;';
         greenTab.innerHTML = `<span>✅ 已同步 ${escapeHtml(
           feishuRealTime ? feishuRealTime.slice(5) : modeTag
-        )}</span><span style="opacity:0.9; font-size:11px;">${isLeftCol ? '❯' : '❮'}</span>`;
+        )}</span><span style="opacity:0.9; font-size:11px;">❮</span>`;
         greenTab.onclick = () => {
           settings.collapsed = false;
           saveSettings(settings);
@@ -4628,6 +5026,462 @@
         };
         wrapCol.appendChild(greenTab);
         rootWrap.appendChild(wrapCol);
+        return;
+      }
+
+      // ==================== 独立面板零：Cutcheck 在线审片右侧统一工作台（支持右侧分屏停靠 / 自由悬浮窗 / 贴边收起） ====================
+      if (isCutPage) {
+        const isLight = settings.theme === 'light';
+        const hc = parseCutcheckHashContext();
+        const cur = ccState.activeWork;
+        const allPending = ccState.pendingWorks || [];
+        const brands = Array.from(
+          new Set(allPending.map((w) => (w.brand ? w.brand.split('·')[0].trim() : '')).filter(Boolean))
+        );
+        if (ccState.brandFilter !== 'all' && !brands.includes(ccState.brandFilter)) {
+          ccState.brandFilter = 'all';
+        }
+        const filteredPending =
+          ccState.brandFilter === 'all'
+            ? allPending
+            : allPending.filter((w) => (w.brand || '').startsWith(ccState.brandFilter));
+        const pCnt = filteredPending.length;
+
+        const listItems = [];
+        if (cur && !filteredPending.some((w) => w.bRecordId === cur.bRecordId)) {
+          listItems.push({ ...cur, _isCurrentExtra: true });
+        }
+        for (const w of filteredPending) {
+          listItems.push(w);
+        }
+
+        let prevCandidate = null;
+        let nextCandidate = null;
+        if (filteredPending.length > 0) {
+          const curIdx = cur ? filteredPending.findIndex((w) => w.bRecordId === cur.bRecordId) : -1;
+          if (curIdx === -1) {
+            nextCandidate = filteredPending[0];
+          } else if (filteredPending.length > 1) {
+            prevCandidate = filteredPending[(curIdx - 1 + filteredPending.length) % filteredPending.length];
+            nextCandidate = filteredPending[(curIdx + 1) % filteredPending.length];
+          }
+        }
+
+        const displaySlug = cur?.slug || ccState.boundSlug || hc.slug || '未关联本地成片目录';
+        const fullVideoTip = ccState.boundVideoPath || hc.filePath || displaySlug;
+        const verTag = ccState.boundVersion || hc.version || '';
+
+        const ccShell = document.createElement('div');
+        ccShell.className = 'ppf-shell';
+        ccShell.innerHTML = `
+          <div class="ppf-ear" id="ppf-ear-collapse" title="贴边收起面板，零遮挡看片 (快捷键 Alt+S)">❯</div>
+          <div class="ppf-resize-w" id="ppf-resize-w" title="左右拖拽调整面板宽度"></div>
+          ${
+            settings.layoutMode === 'float'
+              ? `<div class="ppf-resize-s" id="ppf-resize-s" title="上下拖拽调整面板高度"></div>
+                 <div class="ppf-resize-sw" id="ppf-resize-sw" title="拖拽左下角同时调整宽高">↙</div>`
+              : ''
+          }
+          <div class="ppf-wrap">
+            <div class="ppf-head" id="ppf-drag-handle">
+              <div class="ppf-head-title">
+                <span class="ppf-badge">${pMeta.name}</span>
+                <span style="overflow:hidden; text-overflow:ellipsis;">全平台半自动发布助手</span>
+              </div>
+              <div class="ppf-row-nowrap">
+                <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换 浅色纯白 / 深色暗夜 皮肤">
+                  ${isLight ? '🌙' : '☀️'}
+                </button>
+                <button class="ppf-icon-btn" id="ppf-open-feedback" title="问题反馈与建议（自动附带匿名诊断信息）">💬</button>
+                <button class="ppf-icon-btn" id="ppf-toggle-layout" title="${
+                  settings.layoutMode === 'dock' ? '当前：右侧分屏停靠（点击切换为自由悬浮窗）' : '当前：自由悬浮窗（点击切换为右侧分屏停靠）'
+                }">
+                  ${settings.layoutMode === 'dock' ? '🪟' : '📌'}
+                </button>
+                <button class="ppf-icon-btn" id="ppf-cc-refresh" title="刷新飞书待审列表">🔄</button>
+                <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">❯</button>
+              </div>
+            </div>
+
+            <div class="ppf-body">
+              ${(() => {
+                if (!ccState.configured) {
+                  return `<div class="ppf-sec" id="ppf-cc-status-card" style="border:2px solid #d97706; background:${
+                    isLight ? '#fffbeb' : 'rgba(217,119,6,0.16)'
+                  }; gap:6px; padding:9px 10px;">
+                    <div class="ppf-sec-hd" style="color:${isLight ? '#b45309' : '#fcd34d'}; font-size:12px; font-weight:800;">
+                      <span>⚙️ 尚未连接飞书多维表格</span>
+                      <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="打开飞书连接设置">⚙️</button>
+                    </div>
+                    <div style="font-size:11.5px; opacity:0.9; line-height:1.4;">连接后即可在右侧快速切换全部 B11 待审成片，并一键审片通过生成各平台发布任务。</div>
+                    <div style="display:flex; gap:6px;">
+                      <button class="ppf-btn" id="ppf-toggle-quick-code" style="flex:1; font-weight:600;">📥 粘贴配置码秒连</button>
+                      <button class="ppf-btn" id="ppf-open-feishu-opts-btn" style="background:#16624f; color:#fff; border:none; font-weight:700; padding:4px 10px;">⚙️ 设置</button>
+                    </div>
+                    ${
+                      ccState.showQuickSetup
+                        ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+                            <input class="ppf-input" id="ppf-quick-code-inp" placeholder="在此粘贴 PPF2:... 跨设备配置码" />
+                            <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-quick-code-apply">⚡ 立即验证并连接飞书</button>
+                          </div>`
+                        : ''
+                    }
+                  </div>`;
+                }
+
+                const isApproved = Boolean(cur?.isApproved);
+                const cardBorder = isApproved ? '#10b981' : '#16624f';
+                const cardBg = isApproved
+                  ? isLight
+                    ? '#ecfdf5'
+                    : 'rgba(16,185,129,0.16)'
+                  : isLight
+                  ? '#f2f8f6'
+                  : 'rgba(22,98,79,0.20)';
+                const hdColor = isApproved
+                  ? isLight
+                    ? '#047857'
+                    : '#6ee7b7'
+                  : isLight
+                  ? '#16624f'
+                  : '#6ee7b7';
+
+                return `<div class="ppf-sec" id="ppf-cc-status-card" style="border:2px solid ${cardBorder}; background:${cardBg}; gap:7px; padding:9px 10px;">
+                  <div class="ppf-sec-hd" style="color:${hdColor}; font-size:12px; font-weight:800;">
+                    <span>${
+                      cur
+                        ? isApproved
+                          ? `✅ 已审片通过 · ${escapeHtml(cur.status)}`
+                          : `🟠 当前审阅 · ${escapeHtml(cur.status)}`
+                        : '🎬 请从下方待审片单选择作品'
+                    }</span>
+                    <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="飞书连接设置">⚙️</button>
+                  </div>
+
+                  ${
+                    cur
+                      ? `<div style="font-size:13px; font-weight:800; line-height:1.38; word-break:break-word;">《${escapeHtml(
+                          cur.title
+                        )}》${
+                          cur.brand
+                            ? `<span style="font-size:11px; font-weight:600; opacity:0.75; margin-left:4px;">· ${escapeHtml(
+                                cur.brand
+                              )}</span>`
+                            : ''
+                        }</div>`
+                      : ''
+                  }
+
+                  ${
+                    ccState.alertMsg
+                      ? `<div id="ppf-top-alert-msg" style="background:${
+                          ccState.alertIsErr
+                            ? isLight
+                              ? 'rgba(220,38,38,0.10)'
+                              : 'rgba(239,68,68,0.22)'
+                            : isLight
+                            ? 'rgba(22,98,79,0.10)'
+                            : 'rgba(16,185,129,0.18)'
+                        }; color:${
+                          ccState.alertIsErr ? (isLight ? '#991b1b' : '#fecaca') : hdColor
+                        }; border-left:3px solid ${
+                          ccState.alertIsErr ? '#dc2626' : '#16624f'
+                        }; padding:5px 8px; border-radius:5px; font-size:11.5px; font-weight:700; line-height:1.4; word-break:break-word;">${escapeHtml(
+                          ccState.alertMsg
+                        )}</div>`
+                      : ''
+                  }
+
+                  ${
+                    cur
+                      ? isApproved
+                        ? `<div style="display:flex; flex-direction:column; gap:6px;">
+                            <div style="font-size:11.5px; font-weight:700; color:${hdColor};">
+                              已生成 ${cur.cTasks?.length || 0} 条待发任务（点击直达平台发布页）：
+                            </div>
+                            ${
+                              cur.cTasks && cur.cTasks.length > 0
+                                ? `<div class="ppf-row">
+                                    ${cur.cTasks
+                                      .map((t) => {
+                                        const href = `${BRIDGE_DEFAULT_URL}/open?dir=${encodeURIComponent(
+                                          cur.slug || ''
+                                        )}&account=${encodeURIComponent(t.accountName || '')}&cno=${encodeURIComponent(
+                                          t.cSerialNo || ''
+                                        )}&cid=${encodeURIComponent(t.cRecordId || '')}&bid=${encodeURIComponent(
+                                          cur.bRecordId
+                                        )}`;
+                                        const isDone = /C21|已发布/.test(t.cStatus);
+                                        return `<a class="ppf-cc-pill" href="${escapeHtml(
+                                          href
+                                        )}" target="_blank" rel="noopener noreferrer" title="点击直接打开该渠道发布后台并自动带入发布包与记录ID">${
+                                          isDone ? '✅' : '🚀'
+                                        } ${escapeHtml(t.accountName)}</a>`;
+                                      })
+                                      .join('')}
+                                  </div>`
+                                : `<div style="font-size:11px; opacity:0.8;">点右上角 🔄 可刷新读取最新生成的渠道任务</div>`
+                            }
+                          </div>`
+                        : `<button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-cc-approve-btn" ${
+                            ccState.approving ? 'disabled' : ''
+                          } style="padding:8px 11px; font-size:12.5px; font-weight:800; box-shadow:0 3px 10px rgba(22,98,79,0.25);">
+                            ${
+                              ccState.approving
+                                ? '⏳ 正在流转 B12 并生成各平台发布任务...'
+                                : '✅ 审片通过 · 生成发布任务'
+                            }
+                          </button>`
+                      : ''
+                  }
+                </div>`;
+              })()}
+
+              <!-- 结构 A：本地成片文件栏 -->
+              <div class="ppf-compact-card" id="ppf-sec-local">
+                <div class="ppf-compact-row">
+                  <span class="ppf-part-tag">A 本地</span>
+                  <span class="ppf-compact-path" id="ppf-local-slug-text" title="${escapeHtml(fullVideoTip)}">📁 ${escapeHtml(
+          displaySlug
+        )}${verTag ? ` (${escapeHtml(verTag)})` : ''}</span>
+                  <button class="ppf-btn" id="ppf-open-local-dir" style="padding:2px 8px; font-size:11px; flex-shrink:0;" title="${escapeHtml(
+                    `在 Finder 打开：${displaySlug}`
+                  )}">打开路径</button>
+                </div>
+              </div>
+
+              <!-- 结构 B：飞书待审片单快切区 -->
+              ${
+                ccState.configured
+                  ? `<div class="ppf-sec" id="ppf-sec-cc-queue" style="flex:1 1 auto; min-height:0; overflow:hidden;">
+                      <div class="ppf-sec-hd">
+                        <span><span class="ppf-part-tag" style="margin-right:5px;">B 待审</span>${
+                          ccState.loading ? '正在同步待审列表...' : `待审 ${pCnt} 部`
+                        }</span>
+                        <div class="ppf-row-nowrap">
+                          ${
+                            prevCandidate
+                              ? `<button class="ppf-btn" id="ppf-cc-prev-btn" ${
+                                  ccState.switching ? 'disabled' : ''
+                                } style="padding:2px 7px; font-size:11px;" title="切换到上一部：《${escapeHtml(
+                                  prevCandidate.title
+                                )}》">◀ 上一部</button>`
+                              : ''
+                          }
+                          ${
+                            nextCandidate
+                              ? `<button class="ppf-btn" id="ppf-cc-next-btn" ${
+                                  ccState.switching ? 'disabled' : ''
+                                } style="padding:2px 8px; font-size:11px; font-weight:700;" title="切换到下一部待审：《${escapeHtml(
+                                  nextCandidate.title
+                                )}》">下一部 ▶</button>`
+                              : ''
+                          }
+                        </div>
+                      </div>
+
+                      ${
+                        brands.length > 1
+                          ? `<div class="ppf-row" id="ppf-cc-brand-chips">
+                              <span class="ppf-chip ${ccState.brandFilter === 'all' ? 'active' : ''}" data-brand="all">全部 (${
+                              allPending.length
+                            })</span>
+                              ${brands
+                                .map((b) => {
+                                  const cnt = allPending.filter((w) => (w.brand || '').startsWith(b)).length;
+                                  return `<span class="ppf-chip ${
+                                    ccState.brandFilter === b ? 'active' : ''
+                                  }" data-brand="${escapeHtml(b)}">${escapeHtml(b)} (${cnt})</span>`;
+                                })
+                                .join('')}
+                            </div>`
+                          : ''
+                      }
+
+                      <select class="ppf-select" id="ppf-cc-queue-select" style="font-weight:600;" title="下拉快速切换任意待审成片">
+                        ${
+                          !cur && listItems.length > 0
+                            ? `<option value="" selected>👇 选择待审作品直接装入播放器（共 ${pCnt} 部）...</option>`
+                            : ''
+                        }
+                        ${
+                          listItems.length === 0
+                            ? `<option value="">🎉 当前暂无 B11待审核 作品</option>`
+                            : listItems
+                                .map((w) => {
+                                  const isSel = cur && w.bRecordId === cur.bRecordId;
+                                  const icon = w.isApproved ? '✅' : /B11|待审核/.test(w.status) ? '🟠' : '🎬';
+                                  const brandShort = w.brand ? ` · ${w.brand.split('·')[0]}` : '';
+                                  return `<option value="${escapeHtml(w.bRecordId)}" ${
+                                    isSel ? 'selected' : ''
+                                  }>${icon} ${escapeHtml(w.title)}${escapeHtml(brandShort)} (${escapeHtml(
+                                    w.status
+                                  )})</option>`;
+                                })
+                                .join('')
+                        }
+                      </select>
+
+                      <div id="ppf-cc-queue-list" style="display:flex; flex-direction:column; gap:5px; overflow-y:auto; flex:1 1 auto; min-height:60px; padding-right:2px;">
+                        ${
+                          filteredPending.length === 0
+                            ? `<div style="font-size:11.5px; opacity:0.7; text-align:center; padding:14px 6px;">🎉 当前筛选下暂无待审片子</div>`
+                            : filteredPending
+                                .map((w) => {
+                                  const isCur = cur && w.bRecordId === cur.bRecordId;
+                                  const stIcon = /B11|待审核/.test(w.status) ? '🟠' : '🎬';
+                                  const brandShort = w.brand ? w.brand.split('·')[0] : '';
+                                  return `<div class="ppf-cc-item ${isCur ? 'active' : ''}" data-bid="${escapeHtml(
+                                    w.bRecordId
+                                  )}" title="${escapeHtml(`${w.title} (${w.slug || '未填目录'})`)}">
+                                    <div style="display:flex; flex-direction:column; gap:2px; min-width:0; flex:1;">
+                                      <div style="font-size:12px; font-weight:${
+                                        isCur ? '800' : '600'
+                                      }; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${stIcon} ${escapeHtml(
+                                    w.title
+                                  )}</div>
+                                      <div style="font-size:10.5px; opacity:0.72; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                                        ${brandShort ? `${escapeHtml(brandShort)} · ` : ''}${escapeHtml(w.slug || w.status)}
+                                      </div>
+                                    </div>
+                                    <span style="font-size:11px; font-weight:700; color:${
+                                      isCur ? '#16624f' : 'inherit'
+                                    }; opacity:${isCur ? '1' : '0.65'}; flex-shrink:0;">${isCur ? '当前审阅' : '切入 ▶'}</span>
+                                  </div>`;
+                                })
+                                .join('')
+                        }
+                      </div>
+                    </div>`
+                  : ''
+              }
+
+              <div class="ppf-row" style="justify-content:space-between; margin-top:auto;">
+                <label class="ppf-toggle" title="右侧分屏停靠时自动收缩网页宽度，避免遮挡播放器与右侧批注区">
+                  <input type="checkbox" id="ppf-chk-push" ${settings.pushPage ? 'checked' : ''} ${
+          settings.layoutMode !== 'dock' ? 'disabled' : ''
+        } />
+                  <span>推开网页防遮挡</span>
+                </label>
+                <span style="font-size:11px; opacity:0.72;">右上角 🪟 可切悬浮窗</span>
+              </div>
+
+              <div class="ppf-status" id="ppf-status-line">${escapeHtml(statusText)}</div>
+              <div class="ppf-foot">
+                <span>🎬 零上传本机直读 · 原生批注保留</span>
+                <span>左边缘可拖宽 · Alt+S 收起</span>
+              </div>
+            </div>
+          </div>
+        `;
+        rootWrap.appendChild(ccShell);
+
+        bindCommonShellControls({ onRefreshClick: () => refreshCutcheckQueue(true) });
+
+        const openCcOpts = () => {
+          sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {
+            setStatus('💡 请点击浏览器右上角插件图标 →「⚙️ 飞书直连与跨设备配置码设置」');
+          });
+        };
+        const ccOptsIcon = shadow.getElementById('ppf-open-feishu-opts');
+        if (ccOptsIcon) ccOptsIcon.onclick = openCcOpts;
+        const ccOptsBtn = shadow.getElementById('ppf-open-feishu-opts-btn');
+        if (ccOptsBtn) ccOptsBtn.onclick = openCcOpts;
+
+        const ccQuickToggle = shadow.getElementById('ppf-toggle-quick-code');
+        if (ccQuickToggle) {
+          ccQuickToggle.onclick = () => {
+            ccState.showQuickSetup = !ccState.showQuickSetup;
+            render();
+          };
+        }
+        const ccQuickApply = shadow.getElementById('ppf-quick-code-apply');
+        if (ccQuickApply) {
+          ccQuickApply.onclick = async () => {
+            const code = (shadow.getElementById('ppf-quick-code-inp')?.value || '').trim();
+            if (!code) {
+              setStatus('⚠️ 请先粘贴 PPF2:... 跨设备配置码');
+              return;
+            }
+            ccQuickApply.disabled = true;
+            try {
+              await sendExtMessage({ type: 'PPF_FEISHU_IMPORT_CODE', code });
+              ccState.showQuickSetup = false;
+              setStatus('✅ 飞书多维表连接成功！正在拉取待审列表...');
+              await refreshCutcheckQueue(true);
+            } catch (err) {
+              setStatus(`❌ 配置码导入失败：${err?.message || err}`);
+            } finally {
+              ccQuickApply.disabled = false;
+            }
+          };
+        }
+
+        const ccOpenDirBtn = shadow.getElementById('ppf-open-local-dir');
+        if (ccOpenDirBtn) {
+          ccOpenDirBtn.onclick = async () => {
+            const targetDir = cur?.slug || ccState.boundSlug || hc.slug || ccState.boundVideoPath || hc.filePath || '';
+            if (!targetDir) {
+              setStatus('⚠️ 当前尚未关联本地成片路径，请从下方待审片单点选一部作品');
+              return;
+            }
+            ccOpenDirBtn.disabled = true;
+            try {
+              if (IS_CHROME_EXT) {
+                const resp = await sendExtMessage({ type: 'PPF_BRIDGE_OPEN_FINDER', dir: targetDir });
+                setStatus(`📂 已在 Finder 打开：${resp?.path || targetDir}`);
+              } else {
+                await gmRequestJson(`${settings.bridgeUrl}/api/open-finder?dir=${encodeURIComponent(targetDir)}`);
+                setStatus(`📂 已在 Finder 打开：${targetDir}`);
+              }
+            } catch (err) {
+              setStatus(`❌ 打开本地路径失败：${err?.message || '请确认本机 8765 桥接服务已运行'}`);
+            } finally {
+              ccOpenDirBtn.disabled = false;
+            }
+          };
+        }
+
+        const ccApproveBtn = shadow.getElementById('ppf-cc-approve-btn');
+        if (ccApproveBtn) {
+          ccApproveBtn.onclick = approveCurrentCutcheckWork;
+        }
+        const ccPrevBtn = shadow.getElementById('ppf-cc-prev-btn');
+        if (ccPrevBtn && prevCandidate) {
+          ccPrevBtn.onclick = () => switchCutcheckVideoToWork(prevCandidate);
+        }
+        const ccNextBtn = shadow.getElementById('ppf-cc-next-btn');
+        if (ccNextBtn && nextCandidate) {
+          ccNextBtn.onclick = () => switchCutcheckVideoToWork(nextCandidate);
+        }
+        const ccQueueSel = shadow.getElementById('ppf-cc-queue-select');
+        if (ccQueueSel) {
+          ccQueueSel.onchange = (e) => {
+            const pickedId = e.target.value;
+            if (!pickedId) return;
+            const found = listItems.find((w) => w.bRecordId === pickedId);
+            if (found) switchCutcheckVideoToWork(found);
+          };
+        }
+        const brandChipsWrap = shadow.getElementById('ppf-cc-brand-chips');
+        if (brandChipsWrap) {
+          for (const chip of brandChipsWrap.querySelectorAll('[data-brand]')) {
+            chip.onclick = () => {
+              ccState.brandFilter = chip.getAttribute('data-brand') || 'all';
+              render();
+            };
+          }
+        }
+        const queueListEl = shadow.getElementById('ppf-cc-queue-list');
+        if (queueListEl) {
+          for (const rowEl of queueListEl.querySelectorAll('.ppf-cc-item[data-bid]')) {
+            rowEl.onclick = () => {
+              const bid = rowEl.getAttribute('data-bid');
+              const found = filteredPending.find((w) => w.bRecordId === bid);
+              if (found) switchCutcheckVideoToWork(found);
+            };
+          }
+        }
         return;
       }
 
@@ -4852,13 +5706,11 @@
           : `⚡ 注入封面 (${activeRatioLabel})`;
 
       const isLight = settings.theme === 'light';
-      const isLeftDock = settings.layoutMode === 'dock' && (settings.dockSide || 'left') === 'left';
-      const collapseArrow = isLeftDock ? '❮' : '❯';
 
       const shell = document.createElement('div');
       shell.className = 'ppf-shell';
       shell.innerHTML = `
-        <div class="ppf-ear" id="ppf-ear-collapse" title="贴边收起面板，避免遮挡下方按钮 (快捷键 Alt+S)">${collapseArrow}</div>
+        <div class="ppf-ear" id="ppf-ear-collapse" title="贴边收起面板，避免遮挡下方按钮 (快捷键 Alt+S)">❯</div>
         <div class="ppf-resize-w" id="ppf-resize-w" title="左右拖拽调整面板宽度"></div>
         ${
           settings.layoutMode === 'float'
@@ -4877,19 +5729,14 @@
               <button class="ppf-icon-btn" id="ppf-toggle-theme" title="切换 浅色纯白 / 深色暗夜 皮肤">
                 ${isLight ? '🌙' : '☀️'}
               </button>
-              <button class="ppf-icon-btn" id="ppf-toggle-dock-side" title="${
-                isLeftDock ? '当前：左侧分屏停靠（防遮挡右侧发布按钮 · 点击切到右侧）' : '点击切换为左侧分屏停靠（防遮挡右侧发布按钮）'
-              }">
-                ${isLeftDock ? '◨' : '◧'}
-              </button>
+              <button class="ppf-icon-btn" id="ppf-open-feedback" title="问题反馈与建议（自动附带匿名诊断信息）">💬</button>
               <button class="ppf-icon-btn" id="ppf-toggle-layout" title="${
-                settings.layoutMode === 'dock' ? '当前：分屏停靠（点击切换为自由悬浮窗）' : '当前：自由悬浮窗（点击切换为分屏停靠）'
+                settings.layoutMode === 'dock' ? '当前：右侧分屏停靠（点击切换为自由悬浮窗）' : '当前：自由悬浮窗（点击切换为右侧分屏停靠）'
               }">
                 ${settings.layoutMode === 'dock' ? '🪟' : '📌'}
               </button>
               <button class="ppf-icon-btn" id="ppf-sync-bridge" title="从本地桥接服务重新同步作品与封面">🔄</button>
-              <button class="ppf-icon-btn" id="ppf-open-feedback" title="反馈问题或建议">💬</button>
-              <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">${collapseArrow}</button>
+              <button class="ppf-icon-btn" id="ppf-collapse-btn" title="贴边收起 (Alt+S)">❯</button>
             </div>
           </div>
 
@@ -5330,7 +6177,7 @@
             <div class="ppf-status" id="ppf-status-line">${statusText}</div>
             <div class="ppf-foot">
               <span>🛡️ 拟人延时 · 不自动点发布</span>
-              <span>${isLeftDock ? '右边缘可拖宽' : '左边缘可拖宽'} · Alt+S 收起</span>
+              <span>左边缘可拖宽 · Alt+S 收起</span>
             </div>
           </div>
         </div>
@@ -5558,39 +6405,7 @@
         confForceBtn.onclick = () => syncPrePublishAndTurnGreen({ force: true });
       }
 
-      shadow.getElementById('ppf-toggle-theme').onclick = () => {
-        settings.theme = settings.theme === 'light' ? 'dark' : 'light';
-        saveSettings(settings);
-        render();
-      };
-      const toggleDockSideBtn = shadow.getElementById('ppf-toggle-dock-side');
-      if (toggleDockSideBtn) {
-        toggleDockSideBtn.onclick = () => {
-          if (settings.layoutMode !== 'dock') {
-            settings.layoutMode = 'dock';
-            settings.dockSide = 'left';
-          } else {
-            settings.dockSide = (settings.dockSide || 'left') === 'left' ? 'right' : 'left';
-          }
-          saveSettings(settings);
-          render();
-        };
-      }
-      shadow.getElementById('ppf-toggle-layout').onclick = () => {
-        settings.layoutMode = settings.layoutMode === 'dock' ? 'float' : 'dock';
-        saveSettings(settings);
-        render();
-      };
-      const toggleCollapse = () => {
-        settings.collapsed = true;
-        saveSettings(settings);
-        render();
-      };
-      shadow.getElementById('ppf-collapse-btn').onclick = toggleCollapse;
-      shadow.getElementById('ppf-ear-collapse').onclick = toggleCollapse;
-      shadow.getElementById('ppf-sync-bridge').onclick = () => syncFromLocalBridge(false);
-      const pubFbBtn = shadow.getElementById('ppf-open-feedback');
-      if (pubFbBtn) pubFbBtn.onclick = openFeedbackEntry;
+      bindCommonShellControls({ onRefreshClick: () => syncFromLocalBridge(false) });
 
       // 渲染平台子选项与合规徽章
       const optBadgesWrap = shadow.getElementById('ppf-opt-badges');
@@ -5744,14 +6559,6 @@
       bindCopy('ppf-copy-pin', pData.pinnedComment, '置顶首评，发后 1 分钟可直接粘贴置顶！');
       bindCopy('ppf-copy-dyn', pData.dynamicText, 'B站动态转发语');
 
-      const chkPush = shadow.getElementById('ppf-chk-push');
-      if (chkPush) {
-        chkPush.onchange = (e) => {
-          settings.pushPage = e.target.checked;
-          saveSettings(settings);
-          syncPagePushMargin();
-        };
-      }
       const chkClip = shadow.getElementById('ppf-chk-cliponly');
       if (chkClip) {
         chkClip.onchange = (e) => {
@@ -5769,95 +6576,6 @@
       }
 
       shadow.getElementById('ppf-run-all').onclick = runSafeFillAll;
-
-      // 侧边缘拖拽调宽（左侧分屏停靠时向右拉宽，右侧停靠/悬浮窗时向左拉宽）
-      const resizeW = shadow.getElementById('ppf-resize-w');
-      resizeW.onmousedown = (e) => {
-        e.preventDefault();
-        const startX = e.clientX;
-        const startWidth = settings.width;
-        const onMove = (me) => {
-          const delta =
-            settings.layoutMode === 'dock' && (settings.dockSide || 'left') === 'left'
-              ? me.clientX - startX
-              : startX - me.clientX;
-          settings.width = Math.round(Math.min(760, Math.max(320, startWidth + delta)));
-          applyHostGeometry();
-        };
-        const onUp = () => {
-          saveSettings(settings);
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-        };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
-      };
-
-      // Float 模式拖拽位置与高度调节
-      if (settings.layoutMode === 'float') {
-        const resizeS = shadow.getElementById('ppf-resize-s');
-        const resizeSW = shadow.getElementById('ppf-resize-sw');
-        if (resizeS) {
-          resizeS.onmousedown = (e) => {
-            e.preventDefault();
-            const startY = e.clientY;
-            const startHeight = settings.height;
-            const onMove = (me) => {
-              settings.height = Math.round(Math.min(window.innerHeight - 24, Math.max(380, startHeight + (me.clientY - startY))));
-              applyHostGeometry();
-            };
-            const onUp = () => {
-              saveSettings(settings);
-              window.removeEventListener('mousemove', onMove);
-              window.removeEventListener('mouseup', onUp);
-            };
-            window.addEventListener('mousemove', onMove);
-            window.addEventListener('mouseup', onUp);
-          };
-        }
-        if (resizeSW) {
-          resizeSW.onmousedown = (e) => {
-            e.preventDefault();
-            const startX = e.clientX;
-            const startY = e.clientY;
-            const startW = settings.width;
-            const startH = settings.height;
-            const onMove = (me) => {
-              settings.width = Math.round(Math.min(760, Math.max(320, startW + (startX - me.clientX))));
-              settings.height = Math.round(Math.min(window.innerHeight - 24, Math.max(380, startH + (me.clientY - startY))));
-              applyHostGeometry();
-            };
-            const onUp = () => {
-              saveSettings(settings);
-              window.removeEventListener('mousemove', onMove);
-              window.removeEventListener('mouseup', onUp);
-            };
-            window.addEventListener('mousemove', onMove);
-            window.addEventListener('mouseup', onUp);
-          };
-        }
-
-        const dragHandle = shadow.getElementById('ppf-drag-handle');
-        dragHandle.onmousedown = (e) => {
-          if (e.target.closest('button')) return;
-          const startX = e.clientX;
-          const startY = e.clientY;
-          const initTop = settings.floatTop;
-          const initRight = settings.floatRight;
-          const onMove = (me) => {
-            settings.floatTop = Math.max(8, Math.min(window.innerHeight - 80, initTop + (me.clientY - startY)));
-            settings.floatRight = Math.max(8, Math.min(window.innerWidth - 120, initRight - (me.clientX - startX)));
-            applyHostGeometry();
-          };
-          const onUp = () => {
-            saveSettings(settings);
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
-          };
-          window.addEventListener('mousemove', onMove);
-          window.addEventListener('mouseup', onUp);
-        };
-      }
     }
 
     window.addEventListener('keydown', (e) => {
@@ -5888,10 +6606,19 @@
             setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
           }
         }
-        if (changes.ppf_feishu_config_v1 || changes.ppf_feishu_config_v2) {
-          refreshFeishuPublishContext(true);
+        if (changes[STORAGE_KEY_CUTCHECK_BOUND]?.newValue && isCutcheckReviewContext()) {
+          await loadInitialCutcheckBound();
+          needRender = true;
+          scheduleRefreshCutcheckQueue(false, 280);
         }
-        if (changes[STORAGE_KEY_PACK]) {
+        if (changes.ppf_feishu_config_v1 || changes.ppf_feishu_config_v2) {
+          if (isCutcheckReviewContext()) {
+            scheduleRefreshCutcheckQueue(true, 260);
+          } else {
+            refreshFeishuPublishContext(true);
+          }
+        }
+        if (changes[STORAGE_KEY_PACK] && !isCutcheckReviewContext()) {
           currentPack = await loadPackState();
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
@@ -5901,13 +6628,26 @@
           setStatus(`🔄 已同步发布包：${currentPack.meta?.packTitle || ''}`);
           needRender = true;
           refreshFeishuPublishContext(true);
-        } else if (Object.keys(changes).some((k) => k.startsWith(CROSS_COVER_PREFIX))) {
+        } else if (!isCutcheckReviewContext() && Object.keys(changes).some((k) => k.startsWith(CROSS_COVER_PREFIX))) {
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
           needRender = true;
         }
         if (needRender) render();
       });
+    }
+
+    if (isCutcheckReviewContext()) {
+      await loadInitialCutcheckBound();
+      syncCutcheckBoundWithHash();
+      render();
+      scheduleRefreshCutcheckQueue(false, 220);
+      window.addEventListener('hashchange', () => {
+        syncCutcheckBoundWithHash();
+        render();
+        scheduleRefreshCutcheckQueue(false, 350);
+      });
+      return;
     }
 
     await loadExportCache();
@@ -6428,506 +7168,11 @@
     }
   }
 
-  // ==================== Cutcheck 在线审片场景专属微工作条（待审队列快切 + 一键审片通过生成发布任务） ====================
-  async function mountCutcheckReviewBar() {
-    const ccHost = document.createElement('aside');
-    (document.body || document.documentElement).appendChild(ccHost);
-    const ccShadow = ccHost.attachShadow({ mode: 'closed' });
-    const ccStyle = document.createElement('style');
-    const ccRoot = document.createElement('div');
-    ccShadow.appendChild(ccStyle);
-    ccShadow.appendChild(ccRoot);
-
-    const ccState = {
-      collapsed: false,
-      posLeft: 14,
-      posBottom: 14,
-      configured: true,
-      loading: false,
-      switching: false,
-      approving: false,
-      pendingWorks: [],
-      activeWork: null,
-      boundBId: '',
-      boundSlug: '',
-      boundProject: '',
-      alertMsg: '',
-      alertIsErr: false,
-    };
-
-    try {
-      const rawBound = await xStorageGet(STORAGE_KEY_CUTCHECK_BOUND, '');
-      if (rawBound) {
-        const b = typeof rawBound === 'string' ? JSON.parse(rawBound) : rawBound;
-        if (b && Date.now() - Number(b.updatedAt || 0) < 12 * 3600 * 1000) {
-          ccState.boundBId = b.bRecordId || '';
-          ccState.boundSlug = b.workSlug || '';
-          ccState.boundProject = b.project || '';
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    function parseHashContext() {
-      const h = String(location.hash || '').replace(/^#/, '');
-      if (!h) return { filePath: '', project: '', slug: '' };
-      const p = new URLSearchParams(h);
-      const filePath = p.get('file') || '';
-      const project = p.get('project') || '';
-      const slug = extractWorkSlugFront(filePath);
-      return { filePath, project, slug };
-    }
-
-    function syncBoundWithHash() {
-      const hc = parseHashContext();
-      if (hc.slug && ccState.boundSlug && hc.slug !== ccState.boundSlug) {
-        // 若用户通过 URL 手动切到了另一部作品，清空旧 bRecordId 让新 slug 自动匹配
-        ccState.boundBId = '';
-        ccState.boundSlug = hc.slug;
-        ccState.boundProject = hc.project || '';
-      } else {
-        if (!ccState.boundSlug && hc.slug) ccState.boundSlug = hc.slug;
-        if (!ccState.boundProject && hc.project) ccState.boundProject = hc.project;
-      }
-    }
-
-    function applyCcHostPos() {
-      ccHost.style.cssText = `all: initial; position: fixed; z-index: 2147483645; left: ${ccState.posLeft}px; bottom: ${ccState.posBottom}px; pointer-events: none;`;
-    }
-
-    ccStyle.textContent = `
-      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
-      .cc-card { pointer-events: auto; width: 356px; max-width: calc(100vw - 28px); background: rgba(255,255,255,0.98); color: #171a18; border: 1.5px solid #bfc8c3; border-radius: 13px; box-shadow: 0 12px 34px rgba(17,31,25,0.16); backdrop-filter: blur(12px); padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; }
-      .cc-hd { display: flex; align-items: center; justify-content: space-between; gap: 6px; cursor: move; user-select: none; }
-      .cc-title { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; color: #16624f; }
-      .cc-badge { background: #16624f; color: #fff; padding: 2px 6px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-      .cc-cnt { background: #e9f3f0; color: #16624f; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 700; }
-      .cc-icons { display: flex; align-items: center; gap: 3px; }
-      .cc-ibtn { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 5px; font-size: 12px; cursor: pointer; color: #65706b; line-height: 1.1; }
-      .cc-ibtn:hover { background: #f1f4f2; color: #171a18; border-color: #d9dedb; }
-      .cc-row { display: flex; align-items: center; gap: 6px; }
-      .cc-sel { flex: 1; min-width: 0; padding: 4px 7px; border-radius: 7px; border: 1px solid #cdd6d0; background: #fff; color: #171a18; font-size: 12px; font-weight: 600; outline: none; }
-      .cc-sel:focus { border-color: #16624f; }
-      .cc-btn { padding: 4px 9px; border-radius: 7px; border: 1px solid #cdd6d0; background: #fff; color: #171a18; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
-      .cc-btn:hover { background: #f1f4f2; }
-      .cc-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-      .cc-approve { width: 100%; padding: 7px 10px; border-radius: 8px; border: none; background: linear-gradient(135deg, #16624f, #0f503f); color: #fff; font-size: 12.5px; font-weight: 800; cursor: pointer; box-shadow: 0 3px 10px rgba(22,98,79,0.25); }
-      .cc-approve:hover { filter: brightness(1.06); }
-      .cc-approve:disabled { opacity: 0.65; cursor: wait; }
-      .cc-ok-box { background: #ecfdf5; border: 1px solid #10b981; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 5px; }
-      .cc-ok-hd { color: #047857; font-size: 11.5px; font-weight: 800; display: flex; align-items: center; justify-content: space-between; }
-      .cc-pills { display: flex; flex-wrap: wrap; gap: 5px; }
-      .cc-pill { text-decoration: none; background: #fff; color: #0f503f; border: 1px solid rgba(16,185,129,0.45); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
-      .cc-pill:hover { background: #d1fae5; }
-      .cc-alert { padding: 5px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.38; word-break: break-word; }
-      .cc-alert.err { background: #fff1ef; color: #a43d35; border-left: 3px solid #dc2626; }
-      .cc-alert.info { background: #e9f3f0; color: #16624f; }
-      .cc-mini { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; background: #16624f; color: #fff; border: 2px solid #fff; border-radius: 999px; box-shadow: 0 6px 18px rgba(22,98,79,0.34); font-size: 12px; font-weight: 700; cursor: pointer; user-select: none; }
-    `;
-
-    async function refreshReviewQueue(force = false) {
-      if (!IS_CHROME_EXT) {
-        ccState.configured = false;
-        renderCcBar();
-        return;
-      }
-      syncBoundWithHash();
-      const hc = parseHashContext();
-      ccState.loading = true;
-      renderCcBar();
-      try {
-        const resp = await sendExtMessage({
-          type: 'PPF_FEISHU_QUERY_REVIEW_QUEUE',
-          params: {
-            bRecordId: ccState.boundBId,
-            workSlug: ccState.boundSlug || hc.slug,
-            videoPath: hc.filePath,
-            project: ccState.boundProject || hc.project,
-            forceRefresh: force,
-          },
-        });
-        const d = resp?.data || {};
-        ccState.configured = Boolean(d.configured);
-        ccState.pendingWorks = d.pendingWorks || [];
-        ccState.activeWork = d.activeWork || null;
-        if (ccState.activeWork?.bRecordId) {
-          ccState.boundBId = ccState.activeWork.bRecordId;
-          ccState.boundSlug = ccState.activeWork.slug || ccState.boundSlug;
-          ccState.boundProject = ccState.activeWork.title || ccState.boundProject;
-        }
-      } catch (err) {
-        ccState.alertMsg = `⚠️ 读取飞书待审列表失败：${err?.message || err}`;
-        ccState.alertIsErr = true;
-      } finally {
-        ccState.loading = false;
-        renderCcBar();
-      }
-    }
-
-    async function switchReviewVideoToWork(targetWork) {
-      if (!targetWork || ccState.switching) return;
-      if (!targetWork.slug) {
-        ccState.alertMsg = `⚠️《${targetWork.title}》在飞书尚未填写本地作品目录`;
-        ccState.alertIsErr = true;
-        renderCcBar();
-        return;
-      }
-      ccState.switching = true;
-      ccState.alertMsg = `⏳ 正在定位本机《${targetWork.title}》最新正片...`;
-      ccState.alertIsErr = false;
-      renderCcBar();
-      try {
-        const resp = await sendExtMessage({
-          type: 'PPF_BRIDGE_PREPARE_REVIEW',
-          dir: targetWork.slug,
-          project: targetWork.title,
-          bid: targetWork.bRecordId,
-        });
-        const prep = resp?.data || {};
-        ccState.boundBId = targetWork.bRecordId;
-        ccState.boundSlug = prep.workSlug || targetWork.slug;
-        ccState.boundProject = prep.project || targetWork.title;
-
-        const payload = {
-          token: prep.token,
-          videoPath: prep.videoPath,
-          fileName: prep.fileName,
-          size: Number(prep.size || 0),
-          mime: prep.mime || 'video/mp4',
-          lastModified: Number(prep.lastModified || Date.now()),
-          project: prep.project || targetWork.title,
-          version: prep.version || '',
-          workSlug: ccState.boundSlug,
-          bRecordId: targetWork.bRecordId,
-          bridgeOrigin: BRIDGE_DEFAULT_URL,
-          createdAt: Date.now(),
-        };
-        await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, JSON.stringify(payload));
-        await xStorageSet(
-          STORAGE_KEY_CUTCHECK_BOUND,
-          JSON.stringify({
-            bRecordId: targetWork.bRecordId,
-            workSlug: ccState.boundSlug,
-            project: ccState.boundProject,
-            videoPath: prep.videoPath,
-            version: prep.version || '',
-            updatedAt: Date.now(),
-          })
-        );
-        ccState.activeWork = targetWork;
-        ccState.alertMsg = '';
-        ccState.switching = false;
-        renderCcBar();
-
-        const nextHash = new URL(prep.cutcheckUrl).hash;
-        if (location.hash === nextHash) {
-          handleCutcheckAutoLoad();
-        } else {
-          location.hash = nextHash;
-        }
-      } catch (err) {
-        ccState.switching = false;
-        ccState.alertMsg = `❌ 切换失败：${err?.message || '请确认本机 8765 桥接服务已启动且 NAS 已同步该成片'}`;
-        ccState.alertIsErr = true;
-        renderCcBar();
-      }
-    }
-
-    async function approveCurrentWork() {
-      const cur = ccState.activeWork;
-      if (!cur || ccState.approving) return;
-      ccState.approving = true;
-      ccState.alertMsg = '⏳ 正在写入审片通过时间，并触发飞书流转 B12 与生成全渠道发布任务...';
-      ccState.alertIsErr = false;
-      renderCcBar();
-      try {
-        const resp = await sendExtMessage({
-          type: 'PPF_FEISHU_APPROVE_REVIEW',
-          payload: {
-            bRecordId: cur.bRecordId,
-            workSlug: cur.slug,
-            project: cur.title,
-          },
-        });
-        const res = resp?.data || {};
-        ccState.approving = false;
-        ccState.pendingWorks = res.pendingWorks || ccState.pendingWorks.filter((w) => w.bRecordId !== cur.bRecordId);
-        ccState.activeWork = {
-          ...cur,
-          status: res.newStatus || 'B12等待发布至平台',
-          approvedAt: res.approvedAtStr || '',
-          isApproved: true,
-          cTasks: res.cTasks || [],
-        };
-        ccState.alertMsg = '';
-        ccState.alertIsErr = false;
-        renderCcBar();
-      } catch (err) {
-        ccState.approving = false;
-        ccState.alertMsg = `❌ 审片通过失败：${err?.message || err}`;
-        ccState.alertIsErr = true;
-        renderCcBar();
-      }
-    }
-
-    function renderCcBar() {
-      applyCcHostPos();
-      ccRoot.innerHTML = '';
-
-      const pCnt = ccState.pendingWorks.length;
-      const cur = ccState.activeWork;
-
-      if (ccState.collapsed) {
-        const pill = document.createElement('div');
-        pill.className = 'cc-mini';
-        pill.id = 'ppf-cc-collapsed-pill';
-        pill.title = '点击展开飞书审片工作条';
-        pill.innerHTML = `<span>🎬 飞书审片</span><span style="background:rgba(255,255,255,0.2);padding:1px 6px;border-radius:999px;">待审 ${pCnt}</span>`;
-        pill.onclick = () => {
-          ccState.collapsed = false;
-          renderCcBar();
-        };
-        ccRoot.appendChild(pill);
-        return;
-      }
-
-      const card = document.createElement('div');
-      card.className = 'cc-card';
-      card.id = 'ppf-cc-card';
-
-      if (!ccState.configured) {
-        card.innerHTML = `
-          <div class="cc-hd" id="ppf-cc-drag">
-            <div class="cc-title"><span class="cc-badge">🎬 飞书审片</span><span>未连接多维表</span></div>
-            <div class="cc-icons">
-              <button class="cc-ibtn" id="ppf-cc-opts" title="连接飞书多维表设置">⚙️</button>
-              <button class="cc-ibtn" id="ppf-cc-collapse" title="收起为胶囊">—</button>
-            </div>
-          </div>
-          <button class="cc-approve" id="ppf-cc-opts-main">⚙️ 点此连接飞书（启用待审快切与一键通过）</button>
-        `;
-        ccRoot.appendChild(card);
-        const openOpts = () => sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {});
-        ccShadow.getElementById('ppf-cc-opts').onclick = openOpts;
-        ccShadow.getElementById('ppf-cc-opts-main').onclick = openOpts;
-        ccShadow.getElementById('ppf-cc-collapse').onclick = () => {
-          ccState.collapsed = true;
-          renderCcBar();
-        };
-        return;
-      }
-
-      // 构建下拉列表：若当前活跃作品不在 pendingWorks 中（例如已通过为 B12），置顶显示当前项方便查看状态
-      const listItems = [];
-      if (cur && !ccState.pendingWorks.some((w) => w.bRecordId === cur.bRecordId)) {
-        listItems.push({ ...cur, _isCurrentExtra: true });
-      }
-      for (const w of ccState.pendingWorks) {
-        listItems.push(w);
-      }
-
-      // 计算「下一条待审」目标
-      let nextCandidate = null;
-      if (ccState.pendingWorks.length > 0) {
-        const curIdx = cur ? ccState.pendingWorks.findIndex((w) => w.bRecordId === cur.bRecordId) : -1;
-        if (curIdx === -1) {
-          nextCandidate = ccState.pendingWorks[0];
-        } else if (ccState.pendingWorks.length > 1) {
-          nextCandidate = ccState.pendingWorks[(curIdx + 1) % ccState.pendingWorks.length];
-        }
-      }
-
-      card.innerHTML = `
-        <div class="cc-hd" id="ppf-cc-drag">
-          <div class="cc-title">
-            <span class="cc-badge">🎬 飞书审片</span>
-            <span class="cc-cnt">${ccState.loading ? '读取中...' : `待审 ${pCnt} 部`}</span>
-          </div>
-          <div class="cc-icons">
-            <button class="cc-ibtn" id="ppf-cc-refresh" title="刷新飞书待审列表">🔄</button>
-            <button class="cc-ibtn" id="ppf-cc-feedback" title="反馈问题或建议">💬</button>
-            <button class="cc-ibtn" id="ppf-cc-opts" title="飞书设置">⚙️</button>
-            <button class="cc-ibtn" id="ppf-cc-collapse" title="收起为迷你胶囊">—</button>
-          </div>
-        </div>
-
-        <div class="cc-row">
-          <select class="cc-sel" id="ppf-cc-queue-select" title="选择任意待审片子，自动从本机装入 Cutcheck 审片">
-            ${
-              !cur && listItems.length > 0
-                ? `<option value="" selected>👇 请选择待审作品（共 ${pCnt} 部）...</option>`
-                : ''
-            }
-            ${
-              listItems.length === 0
-                ? `<option value="">🎉 暂无 B11待审核 作品</option>`
-                : listItems
-                    .map((w) => {
-                      const isSel = cur && w.bRecordId === cur.bRecordId;
-                      const icon = w.isApproved ? '✅' : /B11|待审核/.test(w.status) ? '🟠' : '🎬';
-                      const brandShort = w.brand ? ` · ${w.brand.split('·')[0]}` : '';
-                      return `<option value="${escapeHtml(w.bRecordId)}" ${isSel ? 'selected' : ''}>${icon} ${escapeHtml(
-                        w.title
-                      )}${escapeHtml(brandShort)} (${escapeHtml(w.status)})</option>`;
-                    })
-                    .join('')
-            }
-          </select>
-          ${
-            nextCandidate
-              ? `<button class="cc-btn" id="ppf-cc-next-btn" ${ccState.switching ? 'disabled' : ''} title="切换到下一部待审：《${escapeHtml(
-                  nextCandidate.title
-                )}》">下一条 ▶</button>`
-              : ''
-          }
-        </div>
-
-        ${
-          ccState.alertMsg
-            ? `<div class="cc-alert ${ccState.alertIsErr ? 'err' : 'info'}">${escapeHtml(ccState.alertMsg)}</div>`
-            : ''
-        }
-
-        ${
-          cur
-            ? cur.isApproved
-              ? `<div class="cc-ok-box">
-                  <div class="cc-ok-hd">
-                    <span>✅ 已通过 (${escapeHtml(cur.status)}) · 待发任务 ${cur.cTasks?.length || 0} 条</span>
-                  </div>
-                  ${
-                    cur.cTasks && cur.cTasks.length > 0
-                      ? `<div class="cc-pills">
-                          ${cur.cTasks
-                            .map((t) => {
-                              const href = `${BRIDGE_DEFAULT_URL}/open?dir=${encodeURIComponent(
-                                cur.slug || ''
-                              )}&account=${encodeURIComponent(t.accountName || '')}&cno=${encodeURIComponent(
-                                t.cSerialNo || ''
-                              )}&cid=${encodeURIComponent(t.cRecordId || '')}&bid=${encodeURIComponent(cur.bRecordId)}`;
-                              const isDone = /C21|已发布/.test(t.cStatus);
-                              return `<a class="cc-pill" href="${escapeHtml(
-                                href
-                              )}" target="_blank" rel="noopener noreferrer" title="点击直接打开该渠道发布后台并带入发布包">${
-                                isDone ? '✅' : '🚀'
-                              } ${escapeHtml(t.accountName)}</a>`;
-                            })
-                            .join('')}
-                        </div>`
-                      : ''
-                  }
-                </div>`
-              : `<button class="cc-approve" id="ppf-cc-approve-btn" ${ccState.approving ? 'disabled' : ''}>
-                  ${
-                    ccState.approving
-                      ? '⏳ 正在流转 B12 并生成各平台发布任务...'
-                      : `✅ 审片通过 · 生成发布任务（${escapeHtml(cur.title.slice(0, 14))}）`
-                  }
-                </button>`
-            : ''
-        }
-      `;
-
-      ccRoot.appendChild(card);
-
-      ccShadow.getElementById('ppf-cc-refresh').onclick = () => refreshReviewQueue(true);
-      ccShadow.getElementById('ppf-cc-opts').onclick = () =>
-        sendExtMessage({ type: 'PPF_OPEN_OPTIONS_PAGE' }).catch(() => {});
-      ccShadow.getElementById('ppf-cc-collapse').onclick = () => {
-        ccState.collapsed = true;
-        renderCcBar();
-      };
-      ccShadow.getElementById('ppf-cc-feedback').onclick = async () => {
-        const devId = await getOrCreateDeviceId();
-        const diag = `scene:cutcheck | feishu:${ccState.configured ? 'ok' : 'unconf'} | pending:${pCnt} | active:${
-          cur?.bRecordId || 'none'
-        } | err:${ccState.alertIsErr ? ccState.alertMsg : 'none'}`;
-        const url = buildFeishuFeedbackUrl({
-          pageLabel: `[Cutcheck审片页] ${location.origin}${location.pathname}`,
-          panelModeLabel: '左下角审片联动栏',
-          deviceId: devId,
-          diagSummary: diag,
-        });
-        window.open(url, '_blank', 'noopener,noreferrer');
-      };
-
-      const qSel = ccShadow.getElementById('ppf-cc-queue-select');
-      if (qSel) {
-        qSel.onchange = (e) => {
-          const pickedId = e.target.value;
-          if (!pickedId) return;
-          const found = listItems.find((w) => w.bRecordId === pickedId);
-          if (found) switchReviewVideoToWork(found);
-        };
-      }
-
-      const nextBtn = ccShadow.getElementById('ppf-cc-next-btn');
-      if (nextBtn && nextCandidate) {
-        nextBtn.onclick = () => switchReviewVideoToWork(nextCandidate);
-      }
-
-      const appBtn = ccShadow.getElementById('ppf-cc-approve-btn');
-      if (appBtn) {
-        appBtn.onclick = approveCurrentWork;
-      }
-
-      // 支持按住头部自由拖拽位置
-      const dragEl = ccShadow.getElementById('ppf-cc-drag');
-      if (dragEl) {
-        dragEl.onmousedown = (e) => {
-          if (e.target.closest('button, select')) return;
-          const startX = e.clientX;
-          const startY = e.clientY;
-          const initL = ccState.posLeft;
-          const initB = ccState.posBottom;
-          const onMove = (me) => {
-            ccState.posLeft = Math.max(8, Math.min(window.innerWidth - 200, initL + (me.clientX - startX)));
-            ccState.posBottom = Math.max(8, Math.min(window.innerHeight - 100, initB - (me.clientY - startY)));
-            applyCcHostPos();
-          };
-          const onUp = () => {
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
-          };
-          window.addEventListener('mousemove', onMove);
-          window.addEventListener('mouseup', onUp);
-        };
-      }
-    }
-
-    renderCcBar();
-    refreshReviewQueue(false);
-
-    window.addEventListener('hashchange', () => {
-      syncBoundWithHash();
-      refreshReviewQueue(false);
-    });
-    if (IS_CHROME_EXT && chrome.storage?.onChanged) {
-      chrome.storage.onChanged.addListener(async (changes, area) => {
-        if (area === 'local' && changes[STORAGE_KEY_CUTCHECK_BOUND]?.newValue) {
-          try {
-            const raw = changes[STORAGE_KEY_CUTCHECK_BOUND].newValue;
-            const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            if (b) {
-              ccState.boundBId = b.bRecordId || '';
-              ccState.boundSlug = b.workSlug || '';
-              ccState.boundProject = b.project || '';
-              refreshReviewQueue(true);
-            }
-          } catch {
-            // ignore
-          }
-        }
-      });
-    }
-  }
-
   if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
     handleFeishuLaunchpad();
   } else if (location.hostname === 'cutcheck-alpha.vercel.app') {
     handleCutcheckAutoLoad();
-    setTimeout(mountCutcheckReviewBar, 350);
+    setTimeout(mountUI, 300);
     window.addEventListener('hashchange', () => handleCutcheckAutoLoad());
     if (IS_CHROME_EXT && chrome.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {

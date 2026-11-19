@@ -78,12 +78,41 @@ let memQueryCache = {
   ts: 0,
   data: null,
 };
+let memAccountsCache = {
+  key: '',
+  ts: 0,
+  rows: null,
+};
+let inflightSnapshotPromise = null;
+let inflightSnapshotKey = '';
+
+// 全局飞书请求平滑限速队列（严格控制在 <4.8 QPS，彻底规避个人授权码 base-api 5 QPS 滑动窗口触发 HTTP 429）
+let lastFeishuReqAt = 0;
+let feishuPaceChain = Promise.resolve();
+const MIN_FEISHU_REQ_GAP_MS = 210;
+
+function acquireFeishuPaceSlot() {
+  const run = async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, lastFeishuReqAt + MIN_FEISHU_REQ_GAP_MS - now);
+    if (waitMs > 0) {
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    lastFeishuReqAt = Date.now();
+  };
+  const next = feishuPaceChain.then(run, run);
+  feishuPaceChain = next;
+  return next;
+}
 
 // 记录在 Bitable v1 接口上触发过 1254062 (引用选项单选列限制) 的 tableId，后续同步自动跳过单选状态列（交由飞书自动化流转），实现 1 次请求零报错直通
 const dynamicSingleSelectTables = new Set();
 
-function invalidateFeishuMemCache() {
+function invalidateFeishuMemCache({ keepAccounts = true } = {}) {
   memQueryCache = { key: '', ts: 0, data: null };
+  if (!keepAccounts) {
+    memAccountsCache = { key: '', ts: 0, rows: null };
+  }
 }
 
 function deepMergeConfig(saved = {}) {
@@ -189,7 +218,7 @@ async function loadFeishuConfig() {
 
 async function saveFeishuConfig(cfg) {
   const merged = deepMergeConfig(cfg);
-  invalidateFeishuMemCache();
+  invalidateFeishuMemCache({ keepAccounts: false });
   await chrome.storage.local.set({ [FEISHU_CONFIG_STORAGE_KEY]: merged });
   return merged;
 }
@@ -263,20 +292,41 @@ async function feishuApiRequest(cfg, method, path, { params = null, body = null 
     init.body = JSON.stringify(body);
   }
 
-  const res = await fetch(url, init);
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || (typeof json.code === 'number' && json.code !== 0)) {
+  const maxAttempts = 4;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await acquireFeishuPaceSlot();
+    const res = await fetch(url, init);
+    const json = await res.json().catch(() => ({}));
     const code = json.code ?? json.error?.code ?? res.status;
-    let hint = json.msg || json.message || json.error?.message || `HTTP ${res.status}`;
-    if (code === 91403 || code === 1254302) {
-      hint += '（请确认已在多维表格右上角「... -> 添加文档应用」将机器人加入并设为可编辑，且应用已开通 bitable:app 权限）';
+    const isRateLimited =
+      res.status === 429 ||
+      code === 429 ||
+      code === 99991400 ||
+      code === 1254290 ||
+      code === 1254607 ||
+      /too many requests|rate limit|frequency limit/i.test(String(json.msg || json.message || ''));
+
+    if (isRateLimited && attempt < maxAttempts - 1) {
+      const retryAfterSec = Number(res.headers?.get?.('Retry-After') || 0);
+      const baseDelay = retryAfterSec > 0 ? retryAfterSec * 1000 : 850 * Math.pow(1.85, attempt);
+      const jitter = Math.floor(Math.random() * 220);
+      await new Promise((r) => setTimeout(r, Math.min(5000, Math.round(baseDelay + jitter))));
+      continue;
     }
-    const err = new Error(`飞书接口错误 (${code}): ${hint}`);
-    err.feishuCode = code;
-    err.httpStatus = res.status;
-    throw err;
+
+    if (!res.ok || (typeof json.code === 'number' && json.code !== 0)) {
+      let hint = json.msg || json.message || json.error?.message || `HTTP ${res.status}`;
+      if (code === 91403 || code === 1254302) {
+        hint += '（请确认已在多维表格右上角「... -> 添加文档应用」将机器人加入并设为可编辑，且应用已开通 bitable:app 权限）';
+      }
+      const err = new Error(`飞书接口错误 (${code}): ${hint}`);
+      err.feishuCode = code;
+      err.httpStatus = res.status;
+      throw err;
+    }
+    return json.data || {};
   }
-  return json.data || {};
+  return {};
 }
 
 async function listAllRecords(cfg, tableId, maxRecords = 500) {
@@ -1111,6 +1161,46 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
   };
 }
 
+async function fetchBaseTablesSnapshot(cfg, { forceRefresh = false } = {}) {
+  const snapKey = `${cfg.baseToken}|${cfg.tables.accounts || ''}|${cfg.tables.works || ''}|${cfg.tables.publishes || ''}`;
+  const now = Date.now();
+  if (!forceRefresh && memQueryCache.key === snapKey && now - memQueryCache.ts < 20_000 && memQueryCache.data) {
+    return memQueryCache.data;
+  }
+  if (inflightSnapshotPromise && inflightSnapshotKey === snapKey) {
+    return inflightSnapshotPromise;
+  }
+
+  inflightSnapshotKey = snapKey;
+  inflightSnapshotPromise = (async () => {
+    try {
+      const accKey = `${cfg.baseToken}|${cfg.tables.accounts || ''}`;
+      let z3Rows = [];
+      if (cfg.tables.accounts) {
+        if (memAccountsCache.key === accKey && Date.now() - memAccountsCache.ts < 300_000 && memAccountsCache.rows) {
+          z3Rows = memAccountsCache.rows;
+        } else {
+          z3Rows = await listAllRecords(cfg, cfg.tables.accounts, 200);
+          memAccountsCache = { key: accKey, ts: Date.now(), rows: z3Rows };
+        }
+      }
+      const bRows =
+        cfg.schemaMode === 'multi_table' && cfg.tables.works
+          ? await listAllRecords(cfg, cfg.tables.works, 500)
+          : [];
+      const cRows = cfg.tables.publishes ? await listAllRecords(cfg, cfg.tables.publishes, 500) : [];
+      const data = { z3Rows, bRows, cRows };
+      memQueryCache = { key: snapKey, ts: Date.now(), data };
+      return data;
+    } finally {
+      inflightSnapshotPromise = null;
+      inflightSnapshotKey = '';
+    }
+  })();
+
+  return inflightSnapshotPromise;
+}
+
 async function queryFeishuPublishContext(params = {}) {
   const cfg = await loadFeishuConfig();
   if (!cfg.enabled) {
@@ -1126,21 +1216,9 @@ async function queryFeishuPublishContext(params = {}) {
   let explicitBId = String(params.bRecordId || '').trim();
   const targetMs = parseDateTimeMs(params.plannedAt) || Date.now();
 
-  const cacheSig = `${cfg.baseToken}|${platCn}|${accountHint}`;
-  let baseData = null;
-  if (!params.forceRefresh && memQueryCache.key === cacheSig && Date.now() - memQueryCache.ts < 15_000 && memQueryCache.data) {
-    baseData = memQueryCache.data;
-  } else {
-    const [z3Rows, bRows, cRows] = await Promise.all([
-      cfg.tables.accounts ? listAllRecords(cfg, cfg.tables.accounts, 200) : Promise.resolve([]),
-      cfg.schemaMode === 'multi_table' && cfg.tables.works ? listAllRecords(cfg, cfg.tables.works, 500) : Promise.resolve([]),
-      cfg.tables.publishes ? listAllRecords(cfg, cfg.tables.publishes, 500) : Promise.resolve([]),
-    ]);
-    baseData = { z3Rows, bRows, cRows };
-    memQueryCache = { key: cacheSig, ts: Date.now(), data: baseData };
-  }
-
-  const { z3Rows, bRows, cRows } = baseData;
+  const { z3Rows, bRows, cRows } = await fetchBaseTablesSnapshot(cfg, {
+    forceRefresh: Boolean(params.forceRefresh),
+  });
   const fmAcc = cfg.fieldMap.accounts;
   const fmWork = cfg.fieldMap.works;
   const fmPub = cfg.fieldMap.publishes;
@@ -1372,10 +1450,8 @@ async function syncPrePublishToFeishu(payload = {}) {
   const fmWork = cfg.fieldMap.works;
   const fmPub = cfg.fieldMap.publishes;
 
-  const [z3Rows, bRows, cRows, pubFieldsMeta, workFieldsMeta] = await Promise.all([
-    cfg.tables.accounts ? listAllRecords(cfg, cfg.tables.accounts, 200) : Promise.resolve([]),
-    cfg.schemaMode === 'multi_table' && cfg.tables.works ? listAllRecords(cfg, cfg.tables.works, 500) : Promise.resolve([]),
-    cfg.tables.publishes ? listAllRecords(cfg, cfg.tables.publishes, 500) : Promise.resolve([]),
+  const [{ z3Rows, bRows, cRows }, pubFieldsMeta, workFieldsMeta] = await Promise.all([
+    fetchBaseTablesSnapshot(cfg, { forceRefresh: false }),
     getTableFieldsMeta(cfg, cfg.tables.publishes),
     cfg.schemaMode === 'multi_table' && cfg.tables.works ? getTableFieldsMeta(cfg, cfg.tables.works) : Promise.resolve([]),
   ]);
@@ -1682,11 +1758,9 @@ async function queryFeishuReviewQueue(params = {}) {
   const cleanSlug = extractCleanWorkSlug(params.workSlug || params.videoPath || '');
   const projectHint = String(params.project || '').trim();
 
-  const [z3Rows, bRows, cRows] = await Promise.all([
-    cfg.tables.accounts ? listAllRecords(cfg, cfg.tables.accounts, 200) : Promise.resolve([]),
-    listAllRecords(cfg, cfg.tables.works, 500),
-    cfg.tables.publishes ? listAllRecords(cfg, cfg.tables.publishes, 500) : Promise.resolve([]),
-  ]);
+  const { z3Rows, bRows, cRows } = await fetchBaseTablesSnapshot(cfg, {
+    forceRefresh: Boolean(params.forceRefresh),
+  });
 
   const fmAcc = cfg.fieldMap.accounts;
   const fmWork = cfg.fieldMap.works;
@@ -1785,7 +1859,7 @@ async function approveWorkReviewInFeishu(payload = {}) {
   const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.videoPath || '');
   const projectHint = String(payload.project || '').trim();
 
-  const bRows = await listAllRecords(cfg, cfg.tables.works, 500);
+  const { bRows } = await fetchBaseTablesSnapshot(cfg, { forceRefresh: false });
   let targetBRow = null;
   if (explicitBId) {
     targetBRow = bRows.find((r) => r.record_id === explicitBId) || null;
@@ -1809,9 +1883,12 @@ async function approveWorkReviewInFeishu(payload = {}) {
   const workSlug = extractCleanWorkSlug(cellText(targetBRow.fields[fmWork.slug])) || cleanSlug;
   const workBrand = cellText(targetBRow.fields[fmWork.brand]);
 
-  // 强制刷新 B 表字段元数据，确保刚创建的「审片通过时间」列可被立即识别；若跨新库尚未创建则自动补建该日期列
-  let workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
+  // 优先走缓存表头，仅在尚未发现「审片通过时间」列时才请求一次表结构接口，降低 API 并发
+  let workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: false });
   let approvedCol = fmWork.approvedAt || '审片通过时间';
+  if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
+    workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
+  }
   if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
     const altCol = workFieldsMeta.find((f) => /审片.*时间|审核.*时间/.test(f.field_name));
     if (altCol) {
@@ -1835,31 +1912,31 @@ async function approveWorkReviewInFeishu(payload = {}) {
   const nowMs = Date.now();
   const rawBUpdate = {
     [approvedCol]: nowMs,
-    [fmWork.status]: cfg.statusValues?.workReadyToPublish || 'B12等待发布至平台',
+    [fmWork.status]: cfg.statusValues?.workReady || 'B12等待发布至平台',
   };
   await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, rawBUpdate);
   invalidateFeishuMemCache();
 
-  // 轮询等待飞书原生自动化工作流（wkfTvmDqtpQLG4Se：监听审片通过时间 -> 升 B12 + 遍历 Z310 账号创建 C00 待发记录）执行完毕
+  // 等待飞书原生自动化工作流（wkfTvmDqtpQLG4Se：监听审片通过时间 -> 升 B12 + 遍历 Z310 账号创建 C00 待发记录）执行完毕
   let latestQueue = null;
   let updatedWork = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  await new Promise((r) => setTimeout(r, 2600));
+  invalidateFeishuMemCache();
+  latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
+  updatedWork = latestQueue?.activeWork || null;
+  if (!updatedWork || !updatedWork.cTasks?.length) {
+    await new Promise((r) => setTimeout(r, 2200));
     invalidateFeishuMemCache();
     latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
     updatedWork = latestQueue?.activeWork || null;
-    if (updatedWork && updatedWork.cTasks?.length > 0 && /B12|等待发布/.test(updatedWork.status)) {
-      break;
-    }
   }
 
-  // 跨库零配置兜底：若目标多维表尚未配置飞书自动化导致 C 表仍无待发记录，插件自动遍历该品牌下运营中账号补齐 C 表记录！
+  // 跨库零配置兜底：若目标多维表尚未配置飞书自动化导致 C 表仍无待发记录，直接复用刚刷新的快照遍历运营中账号补齐 C 表记录！
   if ((!updatedWork || !updatedWork.cTasks || updatedWork.cTasks.length === 0) && cfg.tables.publishes && cfg.tables.accounts) {
     try {
-      const [z3Rows, pubFieldsMeta, cRowsNow] = await Promise.all([
-        listAllRecords(cfg, cfg.tables.accounts, 200),
+      const [{ z3Rows, cRows: cRowsNow }, pubFieldsMeta] = await Promise.all([
+        fetchBaseTablesSnapshot(cfg, { forceRefresh: false }),
         getTableFieldsMeta(cfg, cfg.tables.publishes),
-        listAllRecords(cfg, cfg.tables.publishes, 500),
       ]);
       const existingAccIds = new Set();
       for (const cr of cRowsNow) {
@@ -1873,17 +1950,21 @@ async function approveWorkReviewInFeishu(payload = {}) {
         if (workBrand && b && b !== workBrand) return false;
         return !st || /运营中|启用|正常|Z310/i.test(st);
       });
+      let createdAny = false;
       for (const acc of brandAccounts) {
         if (existingAccIds.has(acc.record_id)) continue;
         await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, {
           [fmPub.workLink]: [targetBId],
           [fmPub.accountLink]: [acc.record_id],
-          [fmPub.status]: cfg.statusValues?.pending || 'C00未发布',
+          [fmPub.status]: cfg.statusValues?.pubPending || 'C00未发布',
         });
+        createdAny = true;
       }
-      invalidateFeishuMemCache();
-      latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
-      updatedWork = latestQueue?.activeWork || updatedWork;
+      if (createdAny) {
+        invalidateFeishuMemCache();
+        latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
+        updatedWork = latestQueue?.activeWork || updatedWork;
+      }
     } catch {
       // ignore fallback error if workflow is still finishing asynchronously
     }

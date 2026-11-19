@@ -112,6 +112,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       pathname: parsedUrl.pathname,
       origin: parsedUrl.origin,
       search: parsedUrl.search,
+      hash: parsedUrl.hash,
     },
     open: (url) => openedUrls.push(url),
     getComputedStyle: () => ({ position: 'static', display: 'block', visibility: 'visible', opacity: '1' }),
@@ -175,7 +176,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: '2.4.0' }),
+        getManifest: () => ({ version: '2.5.0' }),
         sendMessage: (msg, cb) => {
           if (msg.type === 'PPF_FEISHU_QUERY_REVIEW_QUEUE') {
             cb?.({
@@ -356,16 +357,18 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   };
 }
 
-// 1. 验证发布页挂载（已配置飞书）：默认左侧分屏停靠 + 顶部高危红色未同步横幅 + A/B/C 三段式极简结构
+// 1. 验证发布页挂载（已配置飞书）：统一右侧分屏停靠（移除靠左停靠并替换为 💬 反馈入口）+ 顶部高危红色未同步横幅 + A/B/C 三段式极简结构
 const pubEnv = createMockDomEnv('https://member.bilibili.com/platform/upload/video/frame', true);
 await pubEnv.flushTimers();
 const pubShadow = pubEnv.getShadowRoot();
 assert.ok(pubShadow, '发布页 ShadowRoot 必须成功创建');
-assert.equal(pubEnv.docEl.style.paddingLeft, '368px', '默认必须采用左侧分屏停靠并推开网页左侧边距防遮挡发布按钮');
+assert.equal(pubEnv.docEl.style.paddingRight, '368px', '默认必须采用右侧分屏停靠并推开网页右侧边距');
+assert.equal(pubEnv.docEl.style.paddingLeft || '', '', '靠左停靠已彻底移除，严禁污染左侧边距');
 
 const pubHtml = pubShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(pubHtml.includes('全平台半自动发布助手'), '必须渲染侧边栏标题');
-assert.ok(pubHtml.includes('ppf-toggle-dock-side'), '必须渲染左/右分屏切换按钮');
+assert.ok(!pubHtml.includes('ppf-toggle-dock-side'), '必须彻底移除靠左停靠切换按钮');
+assert.ok(pubHtml.includes('ppf-open-feedback'), '必须在原靠左停靠槽位渲染 💬 反馈按钮');
 assert.ok(pubHtml.includes('border:2px solid #dc2626'), '同步前顶部状态栏必须为高危红色 (#dc2626)');
 assert.ok(pubHtml.includes('未同步真实发布时间'), '同步前顶部必须醒目提示未同步真实发布时间');
 assert.ok(pubHtml.includes('ppf-sec-local') && pubHtml.includes('ppf-open-local-dir'), 'A区必须展示极简本地路径与打开路径按钮');
@@ -375,15 +378,15 @@ assert.ok(pubHtml.includes('⏳@B站·靖蜀黍_018｜百元AI大脑'), 'B区必
 assert.ok(pubHtml.includes('id="ppf-feishu-real-time"') && !pubHtml.includes('2026-11-19 18:00'), '未点同步前飞书真实发布时间必须为空');
 assert.ok(pubHtml.includes('C 发布包'), 'C区必须清晰分隔展示发布包内容');
 
-// 验证点击同步后：顶部状态横幅翻绿 + B区记录变 ✅ + 回读展示飞书表内真实发布时间
+// 验证点击同步后：顶部状态横幅翻绿 + B区记录变 ✅ + 回显飞书真实发布时间
 const syncBtn = pubShadow.getElementById('ppf-panel-sync-pub');
 assert.ok(syncBtn && typeof syncBtn.onclick === 'function', '必须绑定顶部红色同步按钮点击事件');
 await syncBtn.onclick();
 const greenHtml = pubShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(greenHtml.includes('border:2px solid #10b981'), '点击同步后顶部状态栏必须翻为安全绿 (#10b981)');
-assert.ok(greenHtml.includes('已同步真实发布时间 (2026-11-19 18:00)'), '点击同步后顶部必须展示回读的飞书真实发布时间');
+assert.ok(greenHtml.includes('已同步真实发布时间 (2026-11-19 18:00)'), '点击同步后顶部必须展示飞书真实发布时间');
 assert.ok(greenHtml.includes('✅@B站·靖蜀黍_018｜百元AI大脑'), '点击同步后B区发布记录名称必须切换为 ✅');
-assert.ok(greenHtml.includes('>2026-11-19 18:00</span>'), '点击同步后B区必须回读展示飞书表里的真实发布时间');
+assert.ok(greenHtml.includes('>2026-11-19 18:00</span>'), '点击同步后B区必须展示飞书真实发布时间');
 
 // 2. 验证发布页挂载（新设备尚未配置飞书）：必须渲染高危红顶部警示与跨设备 PPF2 配置码激活入口，不崩溃
 const unconfEnv = createMockDomEnv('https://channels.weixin.qq.com/platform/post/create', false);
@@ -392,7 +395,7 @@ const unconfHtml = unconfEnv.getShadowRoot().children.map((c) => c.innerHTML).jo
 assert.ok(unconfHtml.includes('粘贴配置码秒连'), '未配置飞书时必须展示跨设备配置码秒连入口');
 assert.ok(unconfHtml.includes('border:2px solid #dc2626'), '未配置飞书时顶部也必须展示高危红色状态警示');
 
-// 3. 验证发布页折叠态：未同步时必须展示红色高危未同步浮窗与一键同步快捷按钮，点击快捷同步后立即翻绿
+// 3. 验证发布页折叠态：未同步时必须展示右侧红色高危未同步浮窗与一键同步快捷按钮，点击快捷同步后立即翻绿
 const colEnv = createMockDomEnv('https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page', true);
 await colEnv.flushTimers();
 const colShadow = colEnv.getShadowRoot();
@@ -419,7 +422,7 @@ for (const nonPubUrl of [
   await idleEnv.flushTimers();
   const idleHtml = idleEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n').trim();
   assert.equal(idleHtml, '', `非发布页 (${nonPubUrl}) 严禁渲染发布助手面板`);
-  assert.equal(idleEnv.docEl.style.paddingLeft || '', '', `非发布页 (${nonPubUrl}) 严禁修改页面边距`);
+  assert.equal(idleEnv.docEl.style.paddingRight || '', '', `非发布页 (${nonPubUrl}) 严禁修改页面边距`);
 }
 
 // 5. 验证数据中心页挂载：必须成功渲染紧凑型导表面板
@@ -449,33 +452,48 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.4.0');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.0');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
   '页面路径必须剥离 URL 中可能含隐私的 query 参数'
 );
-assert.ok(fbUrl.searchParams.get('prefill_运行环境').includes('macOS · Chrome 131 · 左侧分屏停靠'));
+assert.ok(fbUrl.searchParams.get('prefill_运行环境').includes('macOS · Chrome 131 · 右侧分屏停靠'));
 assert.match(fbUrl.searchParams.get('prefill_设备标识'), /^ppf_[a-z0-9]{10}$/);
 
-// 7. 验证 Cutcheck 在线审片专属微工作条：不挂载发布侧边栏、不推开页面边距，展示待审队列快切 + 一键审片通过生成各平台发布任务
+// 7. 验证 Cutcheck 在线审片统一右侧工作台：与主助手一致支持右侧分屏停靠 / 自由悬浮窗 / 贴边收起 + 待审队列快切 + 一键审片通过生成发布任务
 const ccEnv = createMockDomEnv(
   'https://cutcheck-alpha.vercel.app/#file=%2Ftmp%2F20261118_%E5%BC%80%E6%BA%90%E7%88%AC%E5%A2%99%E7%94%BB%E7%94%BB%E7%9B%92%2Fdemo_v2.mp4&project=%E5%BC%80%E6%BA%90%E7%88%AC%E5%A2%99%E7%94%BB%E7%94%BB%E7%9B%92&version=v2',
   true
 );
 await ccEnv.flushTimers();
-assert.equal(ccEnv.docEl.style.paddingLeft || '', '', 'Cutcheck 审片页严禁修改页面边距');
+assert.equal(ccEnv.docEl.style.paddingRight, '368px', 'Cutcheck 审片页默认采用右侧分屏停靠推开页面防遮挡');
+assert.equal(ccEnv.docEl.style.paddingLeft || '', '', 'Cutcheck 审片页不污染左侧边距');
 const ccShadow = ccEnv.getShadowRoot();
-assert.ok(ccShadow, 'Cutcheck 审片页应挂载左下角轻量审片微工作条');
+assert.ok(ccShadow, 'Cutcheck 审片页必须挂载统一右侧工作台');
 const ccHtmlBefore = ccShadow.children.map((c) => c.innerHTML).join('\n');
-assert.ok(!ccHtmlBefore.includes('全平台半自动发布助手'), '严禁在 Cutcheck 审片页渲染发布填表侧边栏');
-assert.ok(ccHtmlBefore.includes('待审 2 部') && ccHtmlBefore.includes('ppf-cc-queue-select'), '必须渲染飞书待审队列下拉快切器');
-assert.ok(ccHtmlBefore.includes('ppf-cc-next-btn'), '多条待审时必须提供下一条快切按钮');
+assert.ok(ccHtmlBefore.includes('全平台半自动发布助手') && ccHtmlBefore.includes('🎬 飞书审片'), '头部保持与主助手一致的统一顶栏');
+assert.ok(ccHtmlBefore.includes('ppf-toggle-layout') && ccHtmlBefore.includes('ppf-open-feedback'), 'Cutcheck 面板顶栏必须提供分屏/悬浮窗切换与 💬 反馈入口');
+assert.ok(ccHtmlBefore.includes('待审 2 部') && ccHtmlBefore.includes('ppf-cc-queue-select') && ccHtmlBefore.includes('ppf-cc-queue-list'), '必须渲染飞书待审队列下拉与可点选列表');
+assert.ok(ccHtmlBefore.includes('ppf-cc-next-btn'), '多条待审时必须提供下一部快切按钮');
+
+// 切换为自由悬浮窗模式：自动释放网页右侧 padding 并渲染左下角缩放柄
+const ccToggleLayout = ccShadow.getElementById('ppf-toggle-layout');
+ccToggleLayout.onclick();
+assert.equal(ccEnv.docEl.style.paddingRight || '', '', '切换为自由悬浮窗后应释放网页右侧边距');
+assert.ok(ccShadow.children.map((c) => c.innerHTML).join('\n').includes('ppf-resize-sw'), '自由悬浮窗模式必须提供自由拖拽缩放柄');
+
+// 一键审片通过生成各平台发布任务
 const ccApproveBtn = ccShadow.getElementById('ppf-cc-approve-btn');
 assert.ok(ccApproveBtn && typeof ccApproveBtn.onclick === 'function', '必须渲染一键审片通过按钮');
 await ccApproveBtn.onclick();
 const ccHtmlAfter = ccShadow.children.map((c) => c.innerHTML).join('\n');
-assert.ok(ccHtmlAfter.includes('B12等待发布至平台') && ccHtmlAfter.includes('待发任务 2 条'), '点击审片通过后必须展示B12流转结果与待发任务数');
+assert.ok(ccHtmlAfter.includes('B12等待发布至平台') && ccHtmlAfter.includes('2 条待发任务'), '点击审片通过后必须展示B12流转结果与待发任务数');
 assert.ok(ccHtmlAfter.includes('小红书·靖蜀黍') && ccHtmlAfter.includes('B站·靖蜀黍'), '审片通过后必须展示各渠道一键去发布入口');
 
-console.log('✅ UI Mount & Render Smoke Tests (Publish-Only + Collapsed Red/Green + Feedback + Cutcheck Review Queue & Approval) ALL PASSED!');
+// 贴边收起为右侧悬停胶囊
+const ccCollapseBtn = ccShadow.getElementById('ppf-collapse-btn');
+ccCollapseBtn.onclick();
+assert.ok(ccShadow.children.map((c) => c.innerHTML).join('\n').includes('ppf-cc-collapsed-pill'), '点击收起后必须在右侧边缘悬停展示审片迷你胶囊');
+
+console.log('✅ UI Mount & Render Smoke Tests (Right-Side Dock + Feedback Slot + Collapsed Red/Green + Unified Cutcheck Workbench) ALL PASSED!');

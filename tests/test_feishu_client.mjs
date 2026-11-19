@@ -29,6 +29,8 @@ const sandbox = {
   Object,
   RegExp,
   Error,
+  setTimeout,
+  clearTimeout,
   chrome: {
     storage: {
       local: {
@@ -46,6 +48,7 @@ vm.createContext(sandbox);
 vm.runInContext(clientCode, sandbox);
 
 const {
+  saveFeishuConfig,
   exportFeishuConfigCode,
   importFeishuConfigCode,
   extractCleanWorkSlug,
@@ -54,6 +57,8 @@ const {
   smartBatchUpdateRecord,
   smartBatchCreateRecord,
   evaluateScheduleConflicts,
+  queryFeishuPublishContext,
+  queryFeishuReviewQueue,
 } = sandbox.self.PPFFeishuClient;
 
 // ==================== Test 1: 跨机器绝对路径净化为纯 WorkSlug ====================
@@ -334,4 +339,77 @@ const createdId = await smartBatchCreateRecord(
 assert.equal(createdId, 'recCreatedOrUpdated01');
 assert.equal(httpCalls.length - countBefore3, 1, 'time_only 模式首轮直接 1 次请求写入成功');
 
-console.log('✅ All Feishu pure-JS client, 1254062 self-healing, time_only automation & conflict radar tests passed!');
+// ==================== Test 7: HTTP 429 自动退避重试 & 并发快照合并去重防刷爆 QPS ====================
+await saveFeishuConfig({
+  authType: 'personal_token',
+  apiDomain: 'https://open.feishu.cn',
+  personalBaseToken: 'pt-rate-limit-test',
+  baseToken: 'bascnRateTest',
+  schemaMode: 'multi_table',
+  tables: {
+    accounts: 'tblAcc01',
+    works: 'tblWork01',
+    publishes: 'tblPub01',
+  },
+});
+
+let listCalls = 0;
+let injected429Count = 0;
+sandbox.fetch = async (url) => {
+  listCalls++;
+  // 前 2 次请求故意返回 HTTP 429，测试自动指数退避重试能否无感恢复
+  if (injected429Count < 2) {
+    injected429Count++;
+    return {
+      ok: false,
+      status: 429,
+      headers: { get: (h) => (h === 'Retry-After' ? '0.02' : null) },
+      json: async () => ({ code: 429, msg: 'Too Many Requests' }),
+    };
+  }
+  if (url.includes('/tables/tblAcc01/records')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [{ record_id: 'recAccX', fields: { 账号名称: 'B站·靖蜀黍', 平台: 'B站', 所属品牌: '靖蜀黍', 账号状态: 'Z310运营中' } }],
+        },
+      }),
+    };
+  }
+  if (url.includes('/tables/tblWork01/records')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [
+            { record_id: 'recWorkPending', fields: { 选题方向: '十只机械眼同时盯住你', 本地作品目录: '20261119_机械眼', 状态: 'B11待审核', 所属品牌: '靖蜀黍' } },
+          ],
+        },
+      }),
+    };
+  }
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ code: 0, data: { items: [] } }),
+  };
+};
+
+// 同时发起 3 个并发查询（模拟页面初始化 + hashchange + storage 变更同时触发）
+const [qRev1, qRev2, qPub1] = await Promise.all([
+  queryFeishuReviewQueue({ workSlug: '20261119_机械眼' }),
+  queryFeishuReviewQueue({ workSlug: '20261119_机械眼' }),
+  queryFeishuPublishContext({ platform: 'bilibili' }),
+]);
+assert.equal(qRev1.pendingWorks.length, 1, 'HTTP 429 自动重试后必须成功返回待审列表');
+assert.equal(qRev2.activeWork?.title, '十只机械眼同时盯住你');
+assert.equal(qPub1.accountName, 'B站·靖蜀黍');
+// 3 张表各读 1 次 (=3) + 注入的 2 次 429 重试 (=2) = 总共仅 5 次底层 fetch（若无快照合并去重会高达 3*3+2 = 11 次！）
+assert.equal(listCalls, 5, '并发查询必须共享同一份 inflight 多维表快照，杜绝重复拉表触发 429');
+
+console.log('✅ All Feishu pure-JS client, 429 retry + snapshot coalescing, 1254062 self-healing & conflict radar tests passed!');

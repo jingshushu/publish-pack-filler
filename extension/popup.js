@@ -44,7 +44,7 @@ async function initPopup() {
   const coversEl = document.getElementById('pack-covers');
 
   const verEl = document.getElementById('popup-ver');
-  const mfVer = chrome.runtime.getManifest?.()?.version || '2.2.0';
+  const mfVer = chrome.runtime.getManifest?.()?.version || '2.5.0';
   if (verEl) verEl.textContent = `v${mfVer}`;
 
   let cachedStore = {};
@@ -112,8 +112,7 @@ async function initPopup() {
       const deviceId = await getOrCreateDeviceId(cachedStore);
       const rawSettings = cachedStore[STORAGE_KEY_SETTINGS];
       const st = rawSettings ? (typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings) : {};
-      const layoutLabel =
-        st.layoutMode === 'float' ? '自由悬浮窗' : (st.dockSide || 'left') === 'left' ? '左侧分屏停靠' : '右侧分屏停靠';
+      const layoutLabel = st.layoutMode === 'float' ? '自由悬浮窗' : '右侧分屏停靠';
       const rawFs = cachedStore.ppf_feishu_config_v2 || cachedStore.ppf_feishu_config_v1;
       const fsCfg = rawFs ? (typeof rawFs === 'string' ? JSON.parse(rawFs) : rawFs) : {};
       const diag = `feishu:${fsCfg?.enabled ? 'configured' : 'unconfigured'} | covers:${coverCount} | layout:${layoutLabel}`;
