@@ -111,7 +111,7 @@
         </label>
       </div>
       <div class="desc" style="margin-top:4px;margin-bottom:8px;font-size:12px;color:#475569;">
-        💡 <b>飞书自动化极简推荐</b>：在「发布记录表」开启自动化 —— 当<b>计划发布时间</b>或<b>真实发布日期</b>不为空时，直接将状态改为 <code>C21已发布</code>，再用公式列对比 <code>NOW()</code> 自动展示「⏳ 已定时发布」与「✅ 已发布」。
+        💡 <b>飞书自动化极简推荐</b>：统一只用 <code>真实发布日期</code> 一列记录时间（定时与立即发布均写入此列），开启自动化「当<b>真实发布日期</b>不为空 → 改状态为 <code>C21已发布</code>」，再用公式对比 <code>NOW()</code> 自动展示「⏳ 已定时发布」与「✅ 已发布」。
       </div>
 
       <div class="row">
@@ -169,7 +169,7 @@
             <label class="field"><span>内容表 · 兜底通用标题列</span><input type="text" id="fm-work-fb-title" /></label>
             <label class="field"><span>内容表 · 兜底通用文案列</span><input type="text" id="fm-work-fb-body" /></label>
             <label class="field"><span>发布表 · 状态列</span><input type="text" id="fm-pub-status" /></label>
-            <label class="field"><span>发布表 · 计划定时列</span><input type="text" id="fm-pub-planned" /></label>
+            <label class="field"><span>发布表 · 发布编号列</span><input type="text" id="fm-pub-serial" /></label>
             <label class="field"><span>发布表 · 真实发布时间列</span><input type="text" id="fm-pub-published" /></label>
             <label class="field"><span>发布表 · 实发标题列</span><input type="text" id="fm-pub-title" /></label>
             <label class="field"><span>发布表 · 实发正文列</span><input type="text" id="fm-pub-body" /></label>

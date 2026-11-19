@@ -46,13 +46,13 @@ const DEFAULT_FEISHU_CONFIG = {
       packSnapshot: '发布包快照',
     },
     publishes: {
+      serialNo: '发布编号',
       workLink: '内容运营表',
       accountLink: '分发账号',
       accountText: '分发账号',
       platformText: '平台',
       workTitleText: '作品名称',
       status: '状态',
-      plannedAt: '计划发布时间',
       publishedAt: '真实发布日期',
       title: '标题',
       body: '正文',
@@ -414,11 +414,11 @@ async function discoverAndSaveSchema(rawInputCfg) {
   if (cfg.tables.publishes) {
     const fPub = await getTableFieldsMeta(cfg, cfg.tables.publishes, { forceRefresh: true });
     schemaSummary.detectedFields.publishes = fPub.map((f) => f.field_name);
+    cfg.fieldMap.publishes.serialNo = matchCol(fPub, cfg.fieldMap.publishes.serialNo, ['发布编号', '编号', '记录编号']);
     cfg.fieldMap.publishes.workLink = matchCol(fPub, cfg.fieldMap.publishes.workLink, ['内容运营表', '关联内容', '关联作品', /内容|作品/]);
     cfg.fieldMap.publishes.accountLink = matchCol(fPub, cfg.fieldMap.publishes.accountLink, ['分发账号', '关联账号', '发布账号', '账号']);
     cfg.fieldMap.publishes.platformText = matchCol(fPub, cfg.fieldMap.publishes.platformText, ['平台', '发布平台', '渠道']);
     cfg.fieldMap.publishes.status = matchCol(fPub, cfg.fieldMap.publishes.status, ['状态', '发布状态']);
-    cfg.fieldMap.publishes.plannedAt = matchCol(fPub, cfg.fieldMap.publishes.plannedAt, ['计划发布时间', '排期时间', '定时发布时间', /计划.*时间/]);
     cfg.fieldMap.publishes.publishedAt = matchCol(fPub, cfg.fieldMap.publishes.publishedAt, ['真实发布日期', '发布日期', '实际发布时间', '发布时间']);
     cfg.fieldMap.publishes.title = matchCol(fPub, cfg.fieldMap.publishes.title, ['标题', '实发标题', '发布标题']);
     cfg.fieldMap.publishes.body = matchCol(fPub, cfg.fieldMap.publishes.body, ['正文', '描述', '实发正文', '文案']);
@@ -546,11 +546,16 @@ function extractCleanWorkSlug(raw = '') {
   const parts = s.split('/').filter(Boolean);
   if (!parts.length) return '';
   let last = parts[parts.length - 1];
-  if (/^(?:成片|04_成片|04_发布与成片|09_发布与交付|publish_pack)$/i.test(last) && parts.length >= 2) {
-    last = parts[parts.length - 2];
+  const subDirRe = /^(?:成片|04_成片|04_发布与成片|09_发布与交付|publish_pack|封面|covers|slides|images|文案)$/i;
+  if (subDirRe.test(last)) {
+    if (parts.length >= 2) {
+      last = parts[parts.length - 2];
+    } else {
+      return '';
+    }
   }
-  // 排除把磁盘盘符或纯系统目录误当成 slug
-  if (/^(?:Users|Desktop|AIHub|Code|Downloads|Volumes)$/i.test(last)) return '';
+  // 排除把磁盘盘符、子目录名或纯系统目录误当成 slug
+  if (/^(?:Users|Desktop|AIHub|Code|Downloads|Volumes)$/i.test(last) || subDirRe.test(last)) return '';
   return last;
 }
 
@@ -1036,11 +1041,10 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
     const st = cellText(cf[fmPub.status]);
     if (/取消|废弃|未通过|隐藏|C22|C23|C24/.test(st)) continue;
 
+    // 完全基于「真实发布日期」单一时间列对比当前时间（不依赖计划发布时间列，删除计划发布时间列亦零影响）
     const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
-    const planMs = parseDateTimeMs(cf[fmPub.plannedAt]);
-    // 统一以当前时间对比区分「已定时发布(未到点)」与「已真实发布(已到点)」，无需依赖 C10 中间状态
-    const effMs = planMs && planMs > nowMs ? planMs : pubMs || planMs;
-    if (!effMs) continue;
+    if (!pubMs) continue;
+    const effMs = pubMs;
     const isFutureSlot = effMs > nowMs;
 
     const linkedB = bIds[0] && bById.get(bIds[0]);
@@ -1103,8 +1107,9 @@ async function queryFeishuPublishContext(params = {}) {
   const accountHint = String(params.account || '').trim();
   const cleanSlug = extractCleanWorkSlug(params.workSlug || params.work || '');
   const titleHint = String(params.title || '').trim();
-  const explicitCId = String(params.cRecordId || '').trim();
-  const explicitBId = String(params.bRecordId || '').trim();
+  let explicitCId = String(params.cRecordId || '').trim();
+  const explicitCSerialNo = String(params.cSerialNo || '').trim();
+  let explicitBId = String(params.bRecordId || '').trim();
   const targetMs = parseDateTimeMs(params.plannedAt) || Date.now();
 
   const cacheSig = `${cfg.baseToken}|${platCn}|${accountHint}`;
@@ -1126,6 +1131,19 @@ async function queryFeishuPublishContext(params = {}) {
   const fmWork = cfg.fieldMap.works;
   const fmPub = cfg.fieldMap.publishes;
 
+  // 若从飞书点击「🚀 去发布」带入了发布编号 (如 C00258) 或 cRecordId，直接反解锁死唯一的那条 C 记录及其所属 B 记录与账号！
+  let lockedCRow = null;
+  if (explicitCId) {
+    lockedCRow = cRows.find((cr) => cr.record_id === explicitCId) || null;
+  }
+  if (!lockedCRow && explicitCSerialNo && fmPub.serialNo) {
+    lockedCRow = cRows.find((cr) => cellText(cr.fields[fmPub.serialNo]) === explicitCSerialNo) || null;
+    if (lockedCRow) explicitCId = lockedCRow.record_id;
+  }
+  if (lockedCRow && !explicitBId) {
+    explicitBId = cellLinkIds(lockedCRow.fields[fmPub.workLink])[0] || '';
+  }
+
   // 同平台全部可选账号（供用户在多矩阵号时切换）
   const platformAccounts = z3Rows
     .filter((r) => platformMatches(cellText(r.fields[fmAcc.platform]), platCn))
@@ -1137,9 +1155,11 @@ async function queryFeishuPublishContext(params = {}) {
       defaultCollection: cellText(r.fields[fmAcc.defaultCollection]),
     }));
 
+  const lockedAccId = lockedCRow ? cellLinkIds(lockedCRow.fields[fmPub.accountLink])[0] || '' : '';
   const matchedAccRow = params.accountRecordId
     ? z3Rows.find((r) => r.record_id === params.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, accountHint)
-    : matchAccountRecord(z3Rows, fmAcc, platCn, accountHint);
+    : (lockedAccId && z3Rows.find((r) => r.record_id === lockedAccId && platformMatches(cellText(r.fields[fmAcc.platform]), platCn))) ||
+      matchAccountRecord(z3Rows, fmAcc, platCn, accountHint);
 
   const accountId = matchedAccRow?.record_id || '';
   const accountName = matchedAccRow
@@ -1176,11 +1196,8 @@ async function queryFeishuPublishContext(params = {}) {
 
       const linkedC = cByBIdForAcc.get(br.record_id);
       const cSt = linkedC ? cellText(linkedC.fields[fmPub.status]) : '';
-      const plannedMs = linkedC ? parseDateTimeMs(linkedC.fields[fmPub.plannedAt]) : null;
       const publishedMs = linkedC ? parseDateTimeMs(linkedC.fields[fmPub.publishedAt]) : null;
-      const isFutureScheduled = Boolean(
-        (plannedMs && plannedMs > Date.now()) || (publishedMs && publishedMs > Date.now())
-      );
+      const isFutureScheduled = Boolean(publishedMs && publishedMs > Date.now());
       const isPendingOnThisPlat =
         !cSt || /未发布|待发布|定时|上传中|C00|C10/.test(cSt) || isFutureScheduled;
       // P1 审片闸门保护：默认仅纳入已审片放行的 B12等待发布至平台 / B21已完成 作品，拦截 B00/B10/B11 未审作品防误发
@@ -1194,15 +1211,17 @@ async function queryFeishuPublishContext(params = {}) {
       const label = cellText(bf[fmWork.title]) || cellText(bf[fmWork.slug]) || br.record_id;
       const slug = extractCleanWorkSlug(cellText(bf[fmWork.slug]));
       const snapshotRaw = fmWork.packSnapshot ? cellText(bf[fmWork.packSnapshot]) : '';
+      const cSerialNo = linkedC && fmPub.serialNo ? cellText(linkedC.fields[fmPub.serialNo]) : '';
 
       candidates.push({
         bRecordId: br.record_id,
         cRecordId: linkedC?.record_id || '',
+        cSerialNo,
         label,
         slug,
         bStatus: bSt,
         cStatus: isFutureScheduled ? '⏳已定时发布' : cSt || '未建排期行',
-        plannedAt: plannedMs ? formatMsLocalHM(plannedMs) : '',
+        plannedAt: publishedMs ? formatMsLocalHM(publishedMs) : '',
         hasCloudPack: Boolean(snapshotRaw && snapshotRaw.startsWith('{')),
         packSnapshot: snapshotRaw,
         fallbackTitle: cellText(bf[fmWork.fallbackTitle]) || label,
@@ -1216,17 +1235,19 @@ async function queryFeishuPublishContext(params = {}) {
     for (const cr of cRows) {
       const cf = cr.fields;
       const cSt = cellText(cf[fmPub.status]);
-      if (/已发布|取消|废弃|C21|C23/.test(cSt) && cr.record_id !== explicitCId) continue;
+      const publishedMs = parseDateTimeMs(cf[fmPub.publishedAt]);
+      const isFutureScheduled = Boolean(publishedMs && publishedMs > Date.now());
+      if (/已发布|取消|废弃|C21|C23/.test(cSt) && !isFutureScheduled && cr.record_id !== explicitCId) continue;
       const label = cellText(cf[fmPub.title]) || cellText(cf[fmPub.workTitleText]) || cr.record_id;
-      const plannedMs = parseDateTimeMs(cf[fmPub.plannedAt]);
       candidates.push({
         bRecordId: '',
         cRecordId: cr.record_id,
+        cSerialNo: fmPub.serialNo ? cellText(cf[fmPub.serialNo]) : '',
         label,
         slug: '',
         bStatus: '',
-        cStatus: cSt || '待发布',
-        plannedAt: plannedMs ? formatMsLocalHM(plannedMs) : '',
+        cStatus: isFutureScheduled ? '⏳已定时发布' : cSt || '待发布',
+        plannedAt: publishedMs ? formatMsLocalHM(publishedMs) : '',
         hasCloudPack: false,
         packSnapshot: '',
         fallbackTitle: cellText(cf[fmPub.title]),
@@ -1343,9 +1364,24 @@ async function syncPrePublishToFeishu(payload = {}) {
   const bById = new Map(bRows.map((r) => [r.record_id, r]));
   let targetBId = payload.createNewWork ? '' : String(payload.bRecordId || '').trim();
   let targetCId = payload.createNewWork ? '' : String(payload.cRecordId || '').trim();
+  const cSerialNo = payload.createNewWork ? '' : String(payload.cSerialNo || '').trim();
   const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
 
-  // 若未显式传 bRecordId 且非强制新建，按纯 slug 查找已有 B 记录
+  // 0. 优先按飞书「🚀 去发布」带入的 cRecordId 或 发布编号 (cno=C00xxx) 100% 精确锁死该条 C 发布记录行！
+  if (!payload.createNewWork && !targetCId && cSerialNo && fmPub.serialNo) {
+    const hitByNo = cRows.find((cr) => cellText(cr.fields[fmPub.serialNo]) === cSerialNo);
+    if (hitByNo) {
+      targetCId = hitByNo.record_id;
+    }
+  }
+  if (!payload.createNewWork && targetCId && !targetBId) {
+    const hitC = cRows.find((cr) => cr.record_id === targetCId);
+    if (hitC) {
+      targetBId = cellLinkIds(hitC.fields[fmPub.workLink])[0] || '';
+    }
+  }
+
+  // 若未显式传 cRecordId/cSerialNo/bRecordId 且非强制新建，按纯 slug 或作品名称匹配已有 B 记录（绝不擅自新建脏 B 行！）
   if (cfg.schemaMode === 'multi_table' && !targetBId && !payload.createNewWork && cleanSlug) {
     const hitB = bRows.find((r) => {
       const bBrand = cellText(r.fields[fmWork.brand]);
@@ -1353,6 +1389,45 @@ async function syncPrePublishToFeishu(payload = {}) {
       return extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug;
     });
     if (hitB) targetBId = hitB.record_id;
+  }
+  if (cfg.schemaMode === 'multi_table' && !targetBId && !targetCId && !payload.createNewWork) {
+    const probeNorm = normalizeTitleKey(payload.workLabel || payload.title || '');
+    if (probeNorm.length >= 2) {
+      const hitBByTitle = bRows.find((r) => {
+        const bBrand = cellText(r.fields[fmWork.brand]);
+        if (accountBrand && bBrand && bBrand !== accountBrand) return false;
+        const bSt = cellText(r.fields[fmWork.status]);
+        if (!/等待发布|已完成|B12|B21/.test(bSt)) return false;
+        const lNorm = normalizeTitleKey(cellText(r.fields[fmWork.title]).replace(/^[0-9？?]+｜/, ''));
+        const tNorm = normalizeTitleKey(cellText(r.fields[fmWork.fallbackTitle]));
+        return (
+          (lNorm.length >= 2 && (probeNorm.includes(lNorm) || lNorm.includes(probeNorm))) ||
+          (tNorm.length >= 4 && (probeNorm.includes(tNorm.slice(0, 8)) || tNorm.includes(probeNorm.slice(0, 8))))
+        );
+      });
+      if (hitBByTitle) targetBId = hitBByTitle.record_id;
+    }
+  }
+
+  // 提前反查对应账号下的 C 行
+  if (!payload.createNewWork && !targetCId && targetBId) {
+    const existC = cRows.find((cr) => {
+      const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
+      if (!bIds.includes(targetBId)) return false;
+      if (accountId) {
+        const aIds = cellLinkIds(cr.fields[fmPub.accountLink]);
+        return aIds.includes(accountId);
+      }
+      return true;
+    });
+    if (existC) targetCId = existC.record_id;
+  }
+
+  // 严格防脏数据守卫：除非用户在下拉框显式选择了「➕ 作为新作品登记」，否则绝不擅自在内容运营表新建记录！
+  if (cfg.schemaMode === 'multi_table' && cfg.tables.works && !payload.createNewWork && !targetCId && !targetBId) {
+    throw new Error(
+      '未匹配到飞书已有的待发记录：请先在面板上方下拉框选中对应的待发作品（或从飞书点击「🚀 去发布」进入）后再点同步！'
+    );
   }
 
   // 1. 6h 排期防撞校验
@@ -1379,7 +1454,7 @@ async function syncPrePublishToFeishu(payload = {}) {
     };
   }
 
-  // 2. 多表模式下：确保 B 内容表记录存在，并顺手把本机完整发布包快照或通用兜底文案备份上云（供 NAS 未同步的另一台电脑秒拉兜底！）
+  // 2. 多表模式下：对已有 B 记录顺手备份云端快照（仅当显式勾选 createNewWork 时才新建 B 记录）
   let workLabel = String(payload.workLabel || '').trim();
   if (cfg.schemaMode === 'multi_table' && cfg.tables.works) {
     if (targetBId && bById.has(targetBId)) {
@@ -1404,7 +1479,7 @@ async function syncPrePublishToFeishu(payload = {}) {
       if (Object.keys(bUpdates).length > 0) {
         await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, bUpdates).catch(() => {});
       }
-    } else {
+    } else if (payload.createNewWork) {
       workLabel =
         workLabel ||
         (cleanSlug ? cleanSlug.replace(/^\d{8}_/, '') : '') ||
@@ -1426,20 +1501,7 @@ async function syncPrePublishToFeishu(payload = {}) {
     workLabel = workLabel || (payload.title || '当前作品').slice(0, 28);
   }
 
-  // 3. 定位或新建 C 发布记录行，并写入状态 + 时间 + 实发标题/正文/话题标签（优先走 Base v3 彻底规避 1254062）
-  if (!targetCId && targetBId) {
-    const existC = cRows.find((cr) => {
-      const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
-      if (!bIds.includes(targetBId)) return false;
-      if (accountId) {
-        const aIds = cellLinkIds(cr.fields[fmPub.accountLink]);
-        return aIds.includes(accountId);
-      }
-      return true;
-    });
-    if (existC) targetCId = existC.record_id;
-  }
-
+  // 3. 回写原有 C 发布记录行：统一将本次发布时间（含定时发布时间或立即发布时间）回填至「真实发布日期」，完全不碰计划发布时间！
   const desiredStatus = isScheduled ? cfg.statusValues.pubScheduled : cfg.statusValues.pubPublished;
   const rawCFields = {
     [fmPub.status]: desiredStatus,
@@ -1448,13 +1510,7 @@ async function syncPrePublishToFeishu(payload = {}) {
   if (accountId && fmPub.accountLink) rawCFields[fmPub.accountLink] = [accountId];
   if (fmPub.platformText) rawCFields[fmPub.platformText] = platCn;
   if (fmPub.workTitleText && workLabel) rawCFields[fmPub.workTitleText] = workLabel;
-
-  if (isScheduled) {
-    if (fmPub.plannedAt) rawCFields[fmPub.plannedAt] = targetMs;
-    if (fmPub.publishedAt) rawCFields[fmPub.publishedAt] = null;
-  } else {
-    if (fmPub.publishedAt) rawCFields[fmPub.publishedAt] = targetMs;
-  }
+  if (fmPub.publishedAt) rawCFields[fmPub.publishedAt] = targetMs;
   if (payload.title && fmPub.title) rawCFields[fmPub.title] = payload.title;
   if (payload.body && fmPub.body) rawCFields[fmPub.body] = payload.body.slice(0, 2000);
   if (Array.isArray(payload.tags) && payload.tags.length > 0 && fmPub.tags) {

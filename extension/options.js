@@ -81,7 +81,7 @@ function fillFormFromConfig(cfg) {
   document.getElementById('fm-work-fb-body').value = cfg.fieldMap?.works?.fallbackBody || '通用文案';
 
   document.getElementById('fm-pub-status').value = cfg.fieldMap?.publishes?.status || '状态';
-  document.getElementById('fm-pub-planned').value = cfg.fieldMap?.publishes?.plannedAt || '计划发布时间';
+  document.getElementById('fm-pub-serial').value = cfg.fieldMap?.publishes?.serialNo || '发布编号';
   document.getElementById('fm-pub-published').value = cfg.fieldMap?.publishes?.publishedAt || '真实发布日期';
   document.getElementById('fm-pub-title').value = cfg.fieldMap?.publishes?.title || '标题';
   document.getElementById('fm-pub-body').value = cfg.fieldMap?.publishes?.body || '正文';
@@ -128,7 +128,7 @@ function readFormToConfig() {
       publishes: {
         ...(base.fieldMap?.publishes || {}),
         status: document.getElementById('fm-pub-status').value.trim(),
-        plannedAt: document.getElementById('fm-pub-planned').value.trim(),
+        serialNo: document.getElementById('fm-pub-serial').value.trim(),
         publishedAt: document.getElementById('fm-pub-published').value.trim(),
         title: document.getElementById('fm-pub-title').value.trim(),
         body: document.getElementById('fm-pub-body').value.trim(),

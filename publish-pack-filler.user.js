@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.0.4
+// @version      2.0.5
 // @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（配置码5秒跨设备迁移）、云端兜底文案（兼容NAS未同步）、发前关联作品与黄转绿警示同步按钮
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -332,10 +332,15 @@
     const parts = text.split('/').filter(Boolean);
     if (!parts.length) return '';
     let last = parts[parts.length - 1];
-    if (/^(?:成片|04_成片|04_发布与成片|09_发布与交付|publish_pack)$/i.test(last) && parts.length >= 2) {
-      last = parts[parts.length - 2];
+    const subDirRe = /^(?:成片|04_成片|04_发布与成片|09_发布与交付|publish_pack|封面|covers|slides|images|文案)$/i;
+    if (subDirRe.test(last)) {
+      if (parts.length >= 2) {
+        last = parts[parts.length - 2];
+      } else {
+        return '';
+      }
     }
-    if (/^(?:Users|Desktop|AIHub|Code|Downloads|Volumes)$/i.test(last)) return '';
+    if (/^(?:Users|Desktop|AIHub|Code|Downloads|Volumes)$/i.test(last) || subDirRe.test(last)) return '';
     return last;
   }
 
@@ -3610,6 +3615,7 @@
 
       let explicitBId = '';
       let explicitCId = '';
+      let explicitCSerialNo = '';
       if (prePubState.selectedWorkKey.startsWith('b:')) {
         explicitBId = prePubState.selectedWorkKey.slice(2);
       } else if (prePubState.selectedWorkKey.startsWith('c:')) {
@@ -3617,6 +3623,7 @@
       } else if (!isPreset && prePubState.selectedWorkKey === 'auto') {
         explicitBId = currentPack.meta?.bRecordId || '';
         explicitCId = currentPack.meta?.cRecordId || '';
+        explicitCSerialNo = currentPack.meta?.cSerialNo || '';
       }
 
       try {
@@ -3629,6 +3636,7 @@
             workSlug,
             bRecordId: explicitBId,
             cRecordId: explicitCId,
+            cSerialNo: explicitCSerialNo,
             title: pageRawTitle || actualTitle || '',
             plannedAt: schedInfo.plannedAt || '',
             forceRefresh: !silent,
@@ -3730,6 +3738,7 @@
             plannedAt: schedInfo.plannedAt,
             bRecordId: isCreateNew ? '' : effCand?.bRecordId || (isPreset ? '' : currentPack.meta?.bRecordId || ''),
             cRecordId: isCreateNew ? '' : effCand?.cRecordId || (isPreset ? '' : currentPack.meta?.cRecordId || ''),
+            cSerialNo: isCreateNew ? '' : effCand?.cSerialNo || (isPreset ? '' : currentPack.meta?.cSerialNo || ''),
             createNewWork: isCreateNew,
             workSlug,
             workLabel: isCreateNew ? actualTitle : effCand?.label || (isPreset ? actualTitle : currentPack.meta?.packTitle || ''),
@@ -3920,10 +3929,14 @@
         });
         availableMdFiles = packCandidates;
         const best = packCandidates[0];
+        // 若用户仅手动重选了 04_发布与成片 子目录（inferredSlug 为空）或选的就是当前已关联作品目录，保留飞书带入的排期 ID 绑定！
+        const keepBoundIds = !inferredSlug || inferredSlug === currentPack.meta?.workSlug;
         applyPackContent(best.name, best.text, subMdTextMap, {
-          workSlug: inferredSlug,
-          bRecordId: '',
-          cRecordId: '',
+          workSlug: inferredSlug || currentPack.meta?.workSlug || '',
+          bRecordId: keepBoundIds ? currentPack.meta?.bRecordId || '' : '',
+          cRecordId: keepBoundIds ? currentPack.meta?.cRecordId || '' : '',
+          cSerialNo: keepBoundIds ? currentPack.meta?.cSerialNo || '' : '',
+          targetAccount: keepBoundIds ? currentPack.meta?.targetAccount || '' : '',
         });
       } else if (imageFiles.length > 0) {
         currentPack.meta = {
@@ -3992,6 +4005,7 @@
               baseDir: '',
               workSlug: data.workSlug || '',
               cRecordId: data.cRecordId || '',
+              cSerialNo: data.cSerialNo || '',
               bRecordId: data.bRecordId || '',
               targetAccount: data.targetAccount || '',
               localMissing: true,
@@ -4030,14 +4044,24 @@
         }
         const fileName = data.packFile || data.mdFile || '';
         const rawContent = data.content || data.markdown || '';
-        const workSlug = data.workSlug || extractWorkSlugFront(data.baseDir || data.folderName || '');
+        const workSlug =
+          data.workSlug ||
+          extractWorkSlugFront(data.baseDir || data.folderName || '') ||
+          currentPack.meta?.workSlug ||
+          '';
+        const sameWork = !workSlug || workSlug === currentPack.meta?.workSlug;
+        const cRecordId = data.cRecordId || (sameWork ? currentPack.meta?.cRecordId || '' : '');
+        const cSerialNo = data.cSerialNo || (sameWork ? currentPack.meta?.cSerialNo || '' : '');
+        const bRecordId = data.bRecordId || (sameWork ? currentPack.meta?.bRecordId || '' : '');
+        const targetAccount = data.targetAccount || (sameWork ? currentPack.meta?.targetAccount || '' : '');
         if (rawContent) {
           applyPackContent(fileName || 'publish.pack.json', rawContent, data.subMarkdowns || {}, {
             baseDir: data.baseDir || '',
             workSlug,
-            cRecordId: data.cRecordId || '',
-            bRecordId: data.bRecordId || '',
-            targetAccount: data.targetAccount || '',
+            cRecordId,
+            cSerialNo,
+            bRecordId,
+            targetAccount,
           });
         } else if (data.folderName) {
           currentPack = {
@@ -4049,9 +4073,10 @@
               contentType: 'video',
               baseDir: data.baseDir || '',
               workSlug,
-              cRecordId: data.cRecordId || '',
-              bRecordId: data.bRecordId || '',
-              targetAccount: data.targetAccount || '',
+              cRecordId,
+              cSerialNo,
+              bRecordId,
+              targetAccount,
               localMissing: false,
               updatedAt: new Date().toISOString(),
             },
@@ -5654,10 +5679,19 @@
       targetUrls = [];
     }
 
-    const launchAccount = launchEl.getAttribute('data-account') || '';
-    const launchSlug = launchEl.getAttribute('data-work-slug') || '';
-    const launchCId = launchEl.getAttribute('data-c-record-id') || '';
-    const launchBId = launchEl.getAttribute('data-b-record-id') || '';
+    // 直接从飞书点击进入的 URL 参数 (?dir=...&account=...&cno=C00xxx&cid=...) 提取唯一排期身份，即使旧版 serve_pack.py 未重启也 100% 精准带入！
+    const urlQs = new URLSearchParams(window.location.search || '');
+    const qsDir = urlQs.get('dir') || urlQs.get('path') || '';
+    const qsAccount = (urlQs.get('account') || urlQs.get('acct') || '').replace(/[.。]+$/, '').trim();
+    const qsCSerialNo = (urlQs.get('cno') || urlQs.get('no') || '').trim();
+    const qsCId = (urlQs.get('cid') || '').trim();
+    const qsBId = (urlQs.get('bid') || '').trim();
+
+    const launchAccount = launchEl.getAttribute('data-account') || qsAccount || '';
+    const launchSlug = launchEl.getAttribute('data-work-slug') || extractWorkSlugFront(qsDir) || '';
+    const launchCId = launchEl.getAttribute('data-c-record-id') || qsCId || '';
+    const launchCSerialNo = launchEl.getAttribute('data-c-serial-no') || qsCSerialNo || '';
+    const launchBId = launchEl.getAttribute('data-b-record-id') || qsBId || '';
 
     try {
       setLaunchMsg('⏳ 正在将当前作品《发布包》与配图透传至插件...');
@@ -5666,9 +5700,10 @@
       if (res.ok) {
         const data = await res.json();
         const effAccount = launchAccount || data.targetAccount || '';
-        const effSlug = data.workSlug || launchSlug || extractWorkSlugFront(data.baseDir || data.folderName || '');
-        const effCId = data.cRecordId || launchCId || '';
-        const effBId = data.bRecordId || launchBId || '';
+        const effSlug = launchSlug || data.workSlug || extractWorkSlugFront(data.baseDir || data.folderName || '');
+        const effCId = launchCId || data.cRecordId || '';
+        const effCSerialNo = launchCSerialNo || data.cSerialNo || '';
+        const effBId = launchBId || data.bRecordId || '';
 
         if (data.localMissing) {
           await xStorageClearByPrefix(CROSS_COVER_PREFIX);
@@ -5682,6 +5717,7 @@
               baseDir: '',
               workSlug: effSlug,
               cRecordId: effCId,
+              cSerialNo: effCSerialNo,
               bRecordId: effBId,
               targetAccount: effAccount,
               localMissing: true,
@@ -5767,6 +5803,7 @@
               isPresetDefault: false,
               workSlug: effSlug,
               cRecordId: effCId,
+              cSerialNo: effCSerialNo,
               bRecordId: effBId,
               targetAccount: effAccount,
               localMissing: false,

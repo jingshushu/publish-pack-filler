@@ -73,6 +73,11 @@ assert.equal(
   extractCleanWorkSlug('custom_project_folder/成片'),
   'custom_project_folder'
 );
+assert.equal(
+  extractCleanWorkSlug('04_发布与成片'),
+  '',
+  '单独的 04_发布与成片 子目录名严禁误识别为作品 slug'
+);
 
 // ==================== Test 2: PPF2:... 跨设备配置码导出与导入无损往返 ====================
 const sampleCfg = {
@@ -165,7 +170,7 @@ assert.equal(safeV3Strict['计划发布时间'], '2026-11-19 17:00');
 assert.equal(safeV3Strict['真实发布日期'], null);
 assert.deepEqual(safeV3Strict['内容运营表'], [{ id: 'recWork123' }]);
 
-// ==================== Test 4: 同账号 6h 排期防撞雷达检测 ====================
+// ==================== Test 4: 同账号 6h 排期防撞雷达检测（仅依赖单一「真实发布日期」列） ====================
 const baseMs = new Date('2026-11-19T18:00:00+08:00').getTime();
 const conflictCheck = evaluateScheduleConflicts({
   cRows: [
@@ -174,8 +179,8 @@ const conflictCheck = evaluateScheduleConflicts({
       fields: {
         分发账号: [{ id: 'recAcc_Bili' }],
         内容运营表: [{ id: 'recB_other' }],
-        状态: 'C10等待定时发布',
-        计划发布时间: baseMs + 2 * 3600 * 1000, // 20:00 (仅隔 2 小时 -> 撞车!)
+        状态: 'C21已发布',
+        真实发布日期: baseMs + 2 * 3600 * 1000, // 20:00 (仅隔 2 小时 -> 撞车!)
         标题: '上一条待发视频',
       },
     },
@@ -185,7 +190,6 @@ const conflictCheck = evaluateScheduleConflicts({
     accountLink: '分发账号',
     workLink: '内容运营表',
     status: '状态',
-    plannedAt: '计划发布时间',
     publishedAt: '真实发布日期',
     title: '标题',
   },
@@ -202,7 +206,7 @@ assert.equal(conflictCheck.hasConflict, true);
 assert.equal(conflictCheck.conflicts.length, 1);
 assert.equal(conflictCheck.conflicts[0].diffHours, 2);
 
-// ==================== Test 5: 飞书自动化模式兼容 (状态仍为 C00未发布但已写入计划发布时间时，雷达照常防撞) ====================
+// ==================== Test 5: 飞书自动化模式兼容 (状态仍为 C00未发布但已写入真实发布日期时，雷达照常防撞且零依赖计划发布时间) ====================
 const autoRadarCheck = evaluateScheduleConflicts({
   cRows: [
     {
@@ -210,8 +214,9 @@ const autoRadarCheck = evaluateScheduleConflicts({
       fields: {
         分发账号: [{ id: 'recAcc_Bili' }],
         内容运营表: [{ id: 'recB_other2' }],
-        状态: 'C00未发布', // 飞书自动化尚未异步改状态，但计划发布时间已写入
-        计划发布时间: baseMs + 1.5 * 3600 * 1000,
+        状态: 'C00未发布',
+        真实发布日期: baseMs + 1.5 * 3600 * 1000,
+        计划发布时间: baseMs + 48 * 3600 * 1000, // 即使旧表残留计划发布时间列，也完全忽略不参与计算
         标题: '刚写入时间待自动化流转的视频',
       },
     },
@@ -221,7 +226,6 @@ const autoRadarCheck = evaluateScheduleConflicts({
     accountLink: '分发账号',
     workLink: '内容运营表',
     status: '状态',
-    plannedAt: '计划发布时间',
     publishedAt: '真实发布日期',
     title: '标题',
   },

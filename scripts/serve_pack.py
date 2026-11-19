@@ -153,7 +153,14 @@ def extract_clean_slug(raw_dir: str) -> str:
     m = re.search(r"(\d{8}_[^/#?\s]+)", cleaned)
     if m:
         return m.group(1)
-    return Path(cleaned).name
+    parts = [p for p in cleaned.split("/") if p]
+    if not parts:
+        return ""
+    last = parts[-1]
+    sub_names = {"成片", "04_成片", "04_发布与成片", "09_发布与交付", "publish_pack", "封面", "covers", "slides", "images", "文案"}
+    if last.lower() in {s.lower() for s in sub_names}:
+        return parts[-2] if len(parts) >= 2 else ""
+    return last
 
 
 def parse_dispatch_account(raw_account: str, raw_site: str, brand_hints_cfg: dict[str, str]) -> tuple[str, str, str]:
@@ -394,6 +401,7 @@ class BridgeState:
         self.active_project_dir: Path | None = initial_pack_dir.parent.resolve() if initial_pack_dir else None
         self.active_work_slug: str = initial_pack_dir.parent.name if initial_pack_dir else ""
         self.active_c_record_id: str = ""
+        self.active_c_serial_no: str = ""
         self.active_b_record_id: str = ""
         self.active_local_missing: bool = False
         self.active_target_account: str = ""
@@ -432,14 +440,16 @@ class BridgeState:
         work_slug: str = "",
         target_account: str = "",
         c_record_id: str = "",
+        c_serial_no: str = "",
         b_record_id: str = "",
         local_missing: bool = False,
     ) -> None:
         self.active_project_dir = project_dir.resolve() if project_dir else None
         self.active_pack_dir = pack_dir.resolve() if pack_dir else None
-        self.active_work_slug = work_slug or (project_dir.name if project_dir else "")
+        self.active_work_slug = work_slug or (extract_clean_slug(project_dir.name) if project_dir else "")
         self.active_target_account = target_account
         self.active_c_record_id = c_record_id
+        self.active_c_serial_no = c_serial_no
         self.active_b_record_id = b_record_id
         self.active_local_missing = local_missing
         suffix = self.active_work_slug or (self.active_pack_dir.name if self.active_pack_dir else "cloud")
@@ -583,6 +593,7 @@ def build_launchpad_html(
     account_label: str,
     work_slug: str,
     c_record_id: str,
+    c_serial_no: str,
     b_record_id: str,
     local_missing: bool,
     target_urls: list[str],
@@ -629,6 +640,7 @@ def build_launchpad_html(
        data-account="{esc_acct}"
        data-work-slug="{html.escape(work_slug)}"
        data-c-record-id="{html.escape(c_record_id)}"
+       data-c-serial-no="{html.escape(c_serial_no)}"
        data-b-record-id="{html.escape(b_record_id)}"
        data-local-missing="{'1' if local_missing else '0'}"
        data-pack-version="{html.escape(pack_version)}"
@@ -719,6 +731,7 @@ def make_handler(state: BridgeState):
                 raw_account = (qs.get("account") or qs.get("acct") or [""])[0]
                 raw_site = (qs.get("site") or [""])[0]
                 raw_cid = normalize_feishu_cell_text((qs.get("cid") or [""])[0])
+                raw_cno = normalize_feishu_cell_text((qs.get("cno") or qs.get("no") or [""])[0])
                 raw_bid = normalize_feishu_cell_text((qs.get("bid") or [""])[0])
                 open_finder = ((qs.get("finder") or ["1"])[0] or "1").strip() not in ("0", "false", "no")
 
@@ -776,7 +789,7 @@ def make_handler(state: BridgeState):
                     return
                 except (ValueError, FileNotFoundError):
                     # 关键升级：当 NAS 尚未同步到这台电脑时，绝不报 400 阻断！优雅切换为飞书云端兜底关联模式并照常打开平台网页！
-                    if not clean_slug and not raw_cid and not target_urls:
+                    if not clean_slug and not raw_cid and not raw_cno and not target_urls:
                         self._send_html(
                             "<div style='font-family:sans-serif;padding:32px;'><h2>⚠️ 未传入目录名且未指定目标平台</h2></div>",
                             status=400,
@@ -788,6 +801,7 @@ def make_handler(state: BridgeState):
                         work_slug=clean_slug,
                         target_account=account_label,
                         c_record_id=raw_cid,
+                        c_serial_no=raw_cno,
                         b_record_id=raw_bid,
                         local_missing=True,
                     )
@@ -802,6 +816,7 @@ def make_handler(state: BridgeState):
                         account_label=account_label,
                         work_slug=clean_slug,
                         c_record_id=raw_cid,
+                        c_serial_no=raw_cno,
                         b_record_id=raw_bid,
                         local_missing=True,
                         target_urls=target_urls,
@@ -817,6 +832,7 @@ def make_handler(state: BridgeState):
                     work_slug=resolved_slug,
                     target_account=account_label,
                     c_record_id=raw_cid,
+                    c_serial_no=raw_cno,
                     b_record_id=raw_bid,
                     local_missing=False,
                 )
@@ -854,6 +870,7 @@ def make_handler(state: BridgeState):
                     account_label=account_label,
                     work_slug=resolved_slug,
                     c_record_id=raw_cid,
+                    c_serial_no=raw_cno,
                     b_record_id=raw_bid,
                     local_missing=False,
                     target_urls=target_urls,
@@ -873,6 +890,7 @@ def make_handler(state: BridgeState):
                         "localMissing": state.active_local_missing,
                         "workSlug": state.active_work_slug,
                         "cRecordId": state.active_c_record_id,
+                        "cSerialNo": state.active_c_serial_no,
                         "bRecordId": state.active_b_record_id,
                         "packVersion": state.pack_version,
                         "targetAccount": state.active_target_account,
@@ -892,6 +910,7 @@ def make_handler(state: BridgeState):
                             "localMissing": True,
                             "workSlug": state.active_work_slug,
                             "cRecordId": state.active_c_record_id,
+                            "cSerialNo": state.active_c_serial_no,
                             "bRecordId": state.active_b_record_id,
                             "targetAccount": state.active_target_account,
                             "baseDir": "",
@@ -919,6 +938,7 @@ def make_handler(state: BridgeState):
                         "localMissing": False,
                         "workSlug": state.active_work_slug,
                         "cRecordId": state.active_c_record_id,
+                        "cSerialNo": state.active_c_serial_no,
                         "bRecordId": state.active_b_record_id,
                         "targetAccount": state.active_target_account,
                         "baseDir": str(pack_dir),
