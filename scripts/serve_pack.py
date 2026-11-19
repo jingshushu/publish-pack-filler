@@ -19,6 +19,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -60,6 +61,14 @@ SITE_URLS: dict[str, tuple[str, str]] = {
     "weibo": ("微博", "https://weibo.com/"),
     "yt": ("YouTube Studio", "https://studio.youtube.com/"),
     "youtube": ("YouTube Studio", "https://studio.youtube.com/"),
+    "cutcheck": ("Cutcheck 在线审片", "https://cutcheck-alpha.vercel.app"),
+}
+
+CUTCHECK_HOSTED_URL = "https://cutcheck-alpha.vercel.app"
+ALLOWED_CUTCHECK_ORIGINS = {
+    "https://cutcheck-alpha.vercel.app",
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
 }
 
 PLATFORM_KEYWORD_RULES: list[tuple[tuple[str, ...], str]] = [
@@ -278,30 +287,101 @@ def list_media_image_rel_paths(pack_dir: Path) -> list[str]:
     return rels
 
 
-def find_primary_video_file(pack_dir: Path, project_dir: Path) -> Path | None:
-    video_exts = (".mp4", ".mov", ".m4v")
-    search_dirs = [
-        pack_dir,
-        project_dir / "成片",
-        project_dir / "04_成片",
-        project_dir / "07_导出" / "成片",
-        project_dir / "04_发布与成片",
-        project_dir,
-    ]
-    seen: set[Path] = set()
-    for folder in search_dirs:
-        if not folder.is_dir() or folder in seen:
+def infer_video_version_label(video_path: Path) -> str:
+    m = re.search(r"(?i)(?:^|[_\-\s.])v(\d{1,3})(?:\.(\d{1,3}))?(?=$|[_\-\s.\u4e00-\u9fa5])", video_path.stem)
+    if not m:
+        return ""
+    major = int(m.group(1))
+    minor = m.group(2)
+    return f"v{major}.{int(minor)}" if minor is not None else f"v{major}"
+
+
+def score_video_candidate(video_path: Path, is_delivery_dir: bool) -> tuple:
+    """
+    正片命名优先级排序规则（由高到低）：
+    1. 排除预览/分块/分轨/草稿（is_full_film=1 优先于 720p/预览/chunk 等）；
+    2. 正式成片交付目录优先于工程/根目录；
+    3. 最大显式 vN 版本号优先（如 v3 > v2 > v1）；
+    4. 正片主关键词优先（响度标准/终版/发布版 > 成片/标准/发布 > 普通命名）；
+    5. 同等条件下取最新修改时间（mtime）。
+    """
+    stem_lower = video_path.stem.lower()
+    preview_tokens = (
+        "预览",
+        "preview",
+        "720p",
+        "480p",
+        "360p",
+        "proxy",
+        "chunk",
+        "draft",
+        "草稿",
+        "分轨",
+        "无字幕",
+    )
+    is_full_film = 0 if any(tok in stem_lower for tok in preview_tokens) else 1
+
+    ver_matches = list(
+        re.finditer(r"(?i)(?:^|[_\-\s.])v(\d{1,3})(?:\.(\d{1,3}))?(?=$|[_\-\s.\u4e00-\u9fa5])", video_path.stem)
+    )
+    if ver_matches:
+        last_m = ver_matches[-1]
+        ver_major = int(last_m.group(1))
+        ver_minor = int(last_m.group(2)) if last_m.group(2) is not None else 0
+    else:
+        ver_major, ver_minor = 0, 0
+
+    if any(k in stem_lower for k in ("响度标准", "终版", "发布版", "定稿", "master", "final")):
+        master_tier = 3
+    elif any(k in stem_lower for k in ("标准", "成片", "发布")):
+        master_tier = 2
+    else:
+        master_tier = 0
+
+    try:
+        mtime = video_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+
+    return (is_full_film, 1 if is_delivery_dir else 0, ver_major, ver_minor, master_tier, mtime, video_path.name)
+
+
+def find_primary_video_file(pack_dir: Path | None, project_dir: Path | None) -> Path | None:
+    video_exts = {".mp4", ".mov", ".m4v", ".webm"}
+    search_entries: list[tuple[Path, bool]] = []
+    if pack_dir:
+        is_deliv = pack_dir != project_dir
+        search_entries.append((pack_dir, is_deliv))
+    if project_dir:
+        for rel, is_deliv in (
+            ("04_发布与成片", True),
+            ("成片", True),
+            ("04_成片", True),
+            ("07_导出/成片", True),
+            ("09_发布与交付", True),
+            ("03_工程", False),
+            ("", False),
+        ):
+            cand_dir = (project_dir / rel) if rel else project_dir
+            search_entries.append((cand_dir, is_deliv))
+
+    seen_dirs: set[Path] = set()
+    scored_videos: list[tuple[tuple, Path]] = []
+    for folder, is_deliv in search_entries:
+        if not folder or not folder.is_dir():
             continue
-        seen.add(folder)
-        vids = [
-            p
-            for p in sorted(folder.iterdir())
-            if p.is_file() and p.suffix.lower() in video_exts and not p.name.startswith(".")
-        ]
-        if vids:
-            preferred = [v for v in vids if any(k in v.name for k in ("发布", "终版", "成片", "标准"))]
-            return preferred[-1] if preferred else vids[-1]
-    return None
+        resolved_folder = folder.resolve()
+        if resolved_folder in seen_dirs:
+            continue
+        seen_dirs.add(resolved_folder)
+        for p in sorted(resolved_folder.iterdir()):
+            if p.is_file() and p.suffix.lower() in video_exts and not p.name.startswith("."):
+                scored_videos.append((score_video_candidate(p, is_deliv), p))
+
+    if not scored_videos:
+        return None
+    scored_videos.sort(key=lambda item: item[0])
+    return scored_videos[-1][1]
 
 
 def reveal_in_file_manager(pack_dir: Path, project_dir: Path) -> str:
@@ -430,6 +510,53 @@ class BridgeState:
         self.last_finder_target = ""
         self.last_finder_ts = 0.0
         self.collect_queue: list[dict] = []
+        self.review_tokens: dict[str, dict] = {}
+        self._review_lock = threading.Lock()
+
+    def register_review_video(self, video_path: Path, project_name: str = "", version: str = "", ttl: int = 7200) -> dict:
+        checked = self.assert_inside_allowed_roots(video_path)
+        if not checked.is_file():
+            raise FileNotFoundError(f"视频文件不存在：{checked}")
+        st = checked.stat()
+        if st.st_size <= 0:
+            raise ValueError("视频文件大小为 0，无法审阅")
+        mime_map = {
+            ".mp4": "video/mp4",
+            ".m4v": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+        }
+        mime = mime_map.get(checked.suffix.lower()) or mimetypes.guess_type(str(checked))[0] or "video/mp4"
+        now = time.time()
+        token = secrets.token_urlsafe(24)
+        entry = {
+            "token": token,
+            "path": str(checked),
+            "name": checked.name,
+            "size": st.st_size,
+            "mime": mime,
+            "lastModified": int(st.st_mtime * 1000),
+            "projectName": project_name,
+            "version": version,
+            "expiresAt": now + max(60, min(86400, int(ttl))),
+        }
+        with self._review_lock:
+            expired = [k for k, v in self.review_tokens.items() if v.get("expiresAt", 0) < now]
+            for k in expired:
+                self.review_tokens.pop(k, None)
+            self.review_tokens[token] = entry
+        return entry
+
+    def get_review_video_entry(self, token: str) -> dict | None:
+        if not token or not re.fullmatch(r"[A-Za-z0-9_-]{24,48}", token):
+            return None
+        now = time.time()
+        with self._review_lock:
+            entry = self.review_tokens.get(token)
+            if not entry or entry.get("expiresAt", 0) < now:
+                self.review_tokens.pop(token, None)
+                return None
+            return dict(entry)
 
     def all_allowed_roots(self) -> list[Path]:
         roots = [self.workspace_root]
@@ -708,6 +835,69 @@ def build_launchpad_html(
 </html>"""
 
 
+def build_cutcheck_launchpad_html(
+    *,
+    tok_info: dict,
+    cutcheck_url: str,
+    work_slug: str,
+) -> str:
+    size_mb = round(int(tok_info.get("size", 0)) / (1024 * 1024), 1)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="referrer" content="no-referrer" />
+  <title>正在打开 Cutcheck 在线审片...</title>
+  <style>
+    * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }}
+    body {{ margin: 0; background: #f5f5f2; color: #171a18; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }}
+    .card {{ width: 100%; max-width: 560px; background: #fff; border-radius: 16px; border: 1px solid #d9dedb; box-shadow: 0 12px 32px rgba(17,31,25,0.08); padding: 26px 28px; }}
+    .badge {{ display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 700; background: #16624f; color: #fff; margin-bottom: 10px; }}
+    h1 {{ font-size: 18px; margin: 0 0 12px; }}
+    .meta {{ background: #f5f6f4; border-radius: 10px; padding: 12px 14px; font-size: 13px; line-height: 1.65; color: #4e5969; margin-bottom: 14px; word-break: break-all; }}
+    .meta b {{ color: #171a18; }}
+    .status {{ font-size: 13.5px; color: #16624f; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <div class="card" id="ppf-cutcheck-launchpad"
+       data-review-token="{html.escape(tok_info['token'])}"
+       data-video-path="{html.escape(tok_info['path'])}"
+       data-video-name="{html.escape(tok_info['name'])}"
+       data-video-size="{tok_info['size']}"
+       data-video-mime="{html.escape(tok_info['mime'])}"
+       data-last-modified="{tok_info['lastModified']}"
+       data-project="{html.escape(tok_info.get('projectName', ''))}"
+       data-version="{html.escape(tok_info.get('version', ''))}"
+       data-work-slug="{html.escape(work_slug)}"
+       data-target-url="{html.escape(cutcheck_url)}">
+    <span class="badge">🎬 Cutcheck 在线审片直连</span>
+    <h1>已锁定本机成片：{html.escape(tok_info['name'])}</h1>
+    <div class="meta">
+      <div><b>项目 / 版本：</b>{html.escape(tok_info.get('projectName') or work_slug or '—')} {f"({html.escape(tok_info['version'])})" if tok_info.get('version') else ""}</div>
+      <div><b>视频大小：</b>{size_mb} MB（纯本机内存回环加载 · 0 字节上传外网）</div>
+      <div><b>原始路径：</b>{html.escape(tok_info['path'])}</div>
+    </div>
+    <div class="status" id="ppf-cutcheck-msg">⏳ 正在唤起 Cutcheck 在线审片并自动注入视频...</div>
+  </div>
+  <script>
+    setTimeout(() => {{
+      const el = document.getElementById('ppf-cutcheck-launchpad');
+      if (el && el.getAttribute('data-ext-handled') === '1') return;
+      // 若浏览器未启用插件，自动在 Finder 高亮该视频并跳往线上 Cutcheck 供手动点选
+      fetch('/api/open-finder?dir=' + encodeURIComponent({json.dumps(work_slug or tok_info['path'], ensure_ascii=False)})).catch(() => {{}});
+      const a = document.createElement('a');
+      a.href = {json.dumps(cutcheck_url, ensure_ascii=False)};
+      a.rel = 'noreferrer noopener';
+      a.referrerPolicy = 'no-referrer';
+      document.body.appendChild(a);
+      a.click();
+    }}, 950);
+  </script>
+</body>
+</html>"""
+
+
 def make_handler(state: BridgeState):
     class PackBridgeHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:
@@ -716,9 +906,34 @@ def make_handler(state: BridgeState):
                 return
             sys.stdout.write(f"[Bridge] {self.address_string()} - {fmt % args}\n")
 
+        def _send_cors_headers(self) -> None:
+            origin = (self.headers.get("Origin") or "").strip()
+            if (
+                origin in ALLOWED_CUTCHECK_ORIGINS
+                or origin.startswith("chrome-extension://")
+                or origin.startswith("http://127.0.0.1:")
+                or origin.startswith("http://localhost:")
+            ):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Range, Content-Type")
+                self.send_header(
+                    "Access-Control-Expose-Headers",
+                    "Content-Length, Content-Range, Accept-Ranges, X-Video-Name, X-Video-Mtime",
+                )
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self._send_cors_headers()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def _send_json(self, payload: dict, status: int = 200) -> None:
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
+            self._send_cors_headers()
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
@@ -748,6 +963,170 @@ def make_handler(state: BridgeState):
 
             if parsed.path == "/api/feishu-bootstrap":
                 self._send_json(load_local_feishu_bootstrap(state.raw_cfg))
+                return
+
+            if parsed.path == "/review" or (
+                parsed.path == "/open" and normalize_feishu_cell_text((qs.get("site") or [""])[0]).lower() == "cutcheck"
+            ):
+                raw_dir = (qs.get("dir") or qs.get("path") or [""])[0]
+                raw_project = normalize_feishu_cell_text((qs.get("project") or qs.get("title") or [""])[0])
+                raw_version = normalize_feishu_cell_text((qs.get("version") or [""])[0])
+                raw_time = (qs.get("t") or qs.get("time") or ["0"])[0]
+                raw_host = (qs.get("host") or [CUTCHECK_HOSTED_URL])[0].strip().rstrip("/")
+                if not raw_host.startswith(("https://cutcheck-alpha.vercel.app", "http://127.0.0.1:", "http://localhost:")):
+                    raw_host = CUTCHECK_HOSTED_URL
+                try:
+                    start_time = max(0.0, float(raw_time))
+                except ValueError:
+                    start_time = 0.0
+
+                clean_slug = extract_clean_slug(raw_dir)
+                try:
+                    target_base = state.resolve_work_directory(raw_dir)
+                    proj_dir, pack_dir = state.locate_pack_dir(target_base, "")
+                except PermissionError as exc:
+                    self._send_html(
+                        f"<div style='font-family:sans-serif;padding:32px;'><h2>⚠️ 非法路径被拦截</h2><p>{html.escape(str(exc))}</p></div>",
+                        status=403,
+                    )
+                    return
+                except (ValueError, FileNotFoundError):
+                    self._send_html(
+                        f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>未找到本机作品目录</title></head>"
+                        f"<body style='font-family:-apple-system,sans-serif;padding:36px;background:#f5f5f2;color:#171a18;'>"
+                        f"<div style='max-width:560px;margin:0 auto;background:#fff;padding:24px 28px;border-radius:14px;border:1px solid #d9dedb;'>"
+                        f"<h2 style='margin:0 0 12px;color:#a43d35;'>⚠️ 本机磁盘 / NAS 暂未同步该作品目录</h2>"
+                        f"<p style='font-size:14px;line-height:1.6;'>未能在本机工作空间找到目录：<code>{html.escape(raw_dir or '（空）')}</code></p>"
+                        f"<p style='font-size:13px;color:#65706b;'>请确认极空间/NAS 已同步该目录到本机，或直接进入 <a href='{CUTCHECK_HOSTED_URL}'>Cutcheck 在线版</a> 手动选片。</p>"
+                        f"</div></body></html>",
+                        status=404,
+                    )
+                    return
+
+                video_file = (
+                    target_base
+                    if (target_base.is_file() and target_base.suffix.lower() in (".mp4", ".mov", ".m4v", ".webm"))
+                    else find_primary_video_file(pack_dir, proj_dir)
+                )
+                if not video_file or not video_file.is_file():
+                    self._send_html(
+                        f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>未找到可审阅成片</title></head>"
+                        f"<body style='font-family:-apple-system,sans-serif;padding:36px;background:#f5f5f2;color:#171a18;'>"
+                        f"<div style='max-width:560px;margin:0 auto;background:#fff;padding:24px 28px;border-radius:14px;border:1px solid #d9dedb;'>"
+                        f"<h2 style='margin:0 0 12px;color:#8a5d15;'>⚠️ 目录已找到，但暂无成片视频 (.mp4 / .mov)</h2>"
+                        f"<p style='font-size:14px;line-height:1.6;word-break:break-all;'>已定位作品目录：<code>{html.escape(str(proj_dir))}</code>，但其中尚未生成视频文件。</p>"
+                        f"<p><a href='/open?dir={urllib.parse.quote(clean_slug or proj_dir.name)}&site=finder' style='color:#16624f;font-weight:700;'>📂 在 Finder 打开该作品目录查看</a></p>"
+                        f"</div></body></html>",
+                        status=404,
+                    )
+                    return
+
+                resolved_slug = extract_clean_slug(proj_dir.name) or clean_slug
+                project_label = raw_project or resolved_slug or proj_dir.name
+                version_label = raw_version or infer_video_version_label(video_file)
+                tok_info = state.register_review_video(video_file, project_name=project_label, version=version_label, ttl=7200)
+
+                hash_dict: dict[str, str] = {"file": str(video_file)}
+                if project_label:
+                    hash_dict["project"] = project_label
+                if version_label:
+                    hash_dict["version"] = version_label
+                if start_time > 0:
+                    hash_dict["t"] = f"{start_time:g}"
+                cutcheck_url = f"{raw_host}/#" + urllib.parse.urlencode(hash_dict)
+
+                self._send_html(
+                    build_cutcheck_launchpad_html(
+                        tok_info=tok_info,
+                        cutcheck_url=cutcheck_url,
+                        work_slug=resolved_slug,
+                    )
+                )
+                return
+
+            if parsed.path.startswith("/api/review-video/"):
+                parts = [p for p in parsed.path.split("/") if p]
+                # /api/review-video/<token> 或 /api/review-video/<token>/meta
+                token = parts[2] if len(parts) >= 3 else ""
+                is_meta_only = len(parts) >= 4 and parts[3] == "meta"
+                entry = state.get_review_video_entry(token)
+                if not entry:
+                    self._send_json({"ok": False, "error": "审片视频临时令牌不存在或已过期，请从飞书重新点击『在线审片』"}, status=404)
+                    return
+                vpath = Path(entry["path"])
+                if not vpath.is_file():
+                    self._send_json({"ok": False, "error": "本机原视频文件已被移动或删除"}, status=404)
+                    return
+                total_size = vpath.stat().st_size
+                if is_meta_only:
+                    self._send_json(
+                        {
+                            "ok": True,
+                            "name": entry["name"],
+                            "size": total_size,
+                            "mime": entry["mime"],
+                            "lastModified": entry["lastModified"],
+                            "projectName": entry.get("projectName", ""),
+                            "version": entry.get("version", ""),
+                            "sourcePath": entry["path"],
+                        }
+                    )
+                    return
+
+                # 支持 ?start=0&end=8388607 分片拉取（供扩展 Service Worker 绕过 64MB 消息上限流式转发）以及标准 HTTP Range
+                qs_start = (qs.get("start") or [""])[0].strip()
+                qs_end = (qs.get("end") or [""])[0].strip()
+                range_hdr = (self.headers.get("Range") or "").strip()
+                start_byte = 0
+                end_byte = total_size - 1
+                is_partial = False
+
+                if qs_start != "" or qs_end != "":
+                    start_byte = max(0, int(qs_start)) if qs_start else 0
+                    end_byte = min(total_size - 1, int(qs_end)) if qs_end else (total_size - 1)
+                elif range_hdr.startswith("bytes="):
+                    m_rng = re.fullmatch(r"bytes=(\d*)-(\d*)", range_hdr)
+                    if m_rng and (m_rng.group(1) or m_rng.group(2)):
+                        g1, g2 = m_rng.groups()
+                        if g1:
+                            start_byte = int(g1)
+                            end_byte = min(int(g2), total_size - 1) if g2 else (total_size - 1)
+                        else:
+                            suffix_len = int(g2)
+                            start_byte = max(0, total_size - suffix_len)
+                            end_byte = total_size - 1
+                        is_partial = True
+
+                if start_byte >= total_size or start_byte > end_byte:
+                    self.send_response(416)
+                    self._send_cors_headers()
+                    self.send_header("Content-Range", f"bytes */{total_size}")
+                    self.end_headers()
+                    return
+
+                chunk_total = end_byte - start_byte + 1
+                self.send_response(206 if is_partial else 200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", entry["mime"])
+                self.send_header("Content-Length", str(chunk_total))
+                self.send_header("Accept-Ranges", "bytes")
+                if is_partial:
+                    self.send_header("Content-Range", f"bytes {start_byte}-{end_byte}/{total_size}")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+
+                try:
+                    with vpath.open("rb") as fp:
+                        fp.seek(start_byte)
+                        remaining = chunk_total
+                        while remaining > 0:
+                            buf = fp.read(min(262144, remaining))
+                            if not buf:
+                                break
+                            self.wfile.write(buf)
+                            remaining -= len(buf)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
                 return
 
             if parsed.path == "/open":

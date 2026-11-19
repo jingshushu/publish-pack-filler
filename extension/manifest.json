@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "全平台半自动发布助手",
   "short_name": "半自动发布助手",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "全平台半自动发布与飞书多维表直连助手：支持左侧分屏防遮挡停靠、顶部红转绿状态警示、A/B/C三段式极简结构与四端数据导表归档",
   "permissions": [
     "storage",
@@ -20,6 +20,7 @@
     "https://zhuanlan.zhihu.com/*",
     "https://weibo.com/*",
     "https://studio.youtube.com/*",
+    "https://cutcheck-alpha.vercel.app/*",
     "https://open.feishu.cn/*",
     "https://base-api.feishu.cn/*",
     "https://open.larksuite.com/*",
@@ -29,7 +30,7 @@
   ],
   "options_page": "options.html",
   "action": {
-    "default_title": "全平台半自动发布助手 (v2.2.0)",
+    "default_title": "全平台半自动发布助手 (v2.3.0)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -59,6 +60,7 @@
         "https://zhuanlan.zhihu.com/*",
         "https://weibo.com/*",
         "https://studio.youtube.com/*",
+        "https://cutcheck-alpha.vercel.app/*",
         "http://127.0.0.1/*",
         "http://localhost/*"
       ],

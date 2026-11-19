@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v2.2.0)
+// Background Service Worker (Manifest V3 · v2.3.0)
 // 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
 // 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
 // 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
 
-importScripts('feishu_client.js?v=2.2.0');
+importScripts('feishu_client.js?v=2.3.0');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {
@@ -439,6 +439,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const buf = await res.arrayBuffer();
         const dataUrl = `data:${mime};base64,${arrayBufferToBase64(buf)}`;
         sendResponse({ ok: true, dataUrl });
+      })
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  // Cutcheck 在线审片大视频本机分片回环拉取（单块 8MB，绕开 Chrome 扩展 sendMessage 64MB 限制且零 PNA 弹窗）
+  if (msg.type === 'PPF_FETCH_REVIEW_CHUNK') {
+    const base = String(msg.bridgeOrigin || BRIDGE_BASE).replace(/\/+$/, '');
+    const token = encodeURIComponent(String(msg.token || '').trim());
+    const start = Math.max(0, Number(msg.start || 0));
+    const end = Math.max(start, Number(msg.end || 0));
+    fetch(`${base}/api/review-video/${token}?start=${start}&end=${end}`, { cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        sendResponse({ ok: true, b64: arrayBufferToBase64(buf), byteLength: buf.byteLength });
       })
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;

@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.2.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.3.0) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -19,8 +19,9 @@
   const STORAGE_KEY_SETTINGS = 'ppf_settings_v2';
   const STORAGE_KEY_EXPORT_CACHE = 'ppf_export_cache_v1';
   const STORAGE_KEY_DEVICE_ID = 'ppf_device_id_v1';
+  const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.2.0';
+  const EXT_FALLBACK_VERSION = '2.3.0';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -5969,8 +5970,42 @@
       .catch(() => {});
   }
 
-  // ==================== 飞书跳板页 (127.0.0.1:8765/open) 极速透传处理器 ====================
+  // ==================== 飞书跳板页 (127.0.0.1:8765/open & /review) 极速透传处理器 ====================
   async function handleFeishuLaunchpad() {
+    // 1. Cutcheck 在线审片跳板页 (127.0.0.1:8765/review) 优先透传单文件令牌并跳往线上 Cutcheck
+    const cutLaunchEl = document.getElementById('ppf-cutcheck-launchpad');
+    if (cutLaunchEl) {
+      cutLaunchEl.setAttribute('data-ext-handled', '1');
+      const msgEl = document.getElementById('ppf-cutcheck-msg');
+      if (msgEl) msgEl.textContent = '⚡ 插件已接管：正在打开线上 Cutcheck 并自动注入本机成片...';
+      const targetUrl = cutLaunchEl.getAttribute('data-target-url') || '';
+      const payload = {
+        token: cutLaunchEl.getAttribute('data-review-token') || '',
+        videoPath: cutLaunchEl.getAttribute('data-video-path') || '',
+        fileName: cutLaunchEl.getAttribute('data-video-name') || '',
+        size: Number(cutLaunchEl.getAttribute('data-video-size') || 0),
+        mime: cutLaunchEl.getAttribute('data-video-mime') || 'video/mp4',
+        lastModified: Number(cutLaunchEl.getAttribute('data-last-modified') || Date.now()),
+        project: cutLaunchEl.getAttribute('data-project') || '',
+        version: cutLaunchEl.getAttribute('data-version') || '',
+        bridgeOrigin: location.origin,
+        createdAt: Date.now(),
+      };
+      await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, JSON.stringify(payload));
+      if (targetUrl) {
+        if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage({ type: 'PPF_NAVIGATE_CLEAN_TABS', urls: [targetUrl] }, (resp) => {
+            if (!resp || !resp.ok) {
+              location.replace(targetUrl);
+            }
+          });
+        } else {
+          location.replace(targetUrl);
+        }
+      }
+      return;
+    }
+
     const launchEl = document.getElementById('ppf-feishu-launchpad');
     // 严格校验标识：普通本地开发项目 (localhost:3000/5173 等) 绝不挂载任何东西！
     if (!launchEl) return;
@@ -6191,8 +6226,171 @@
     }
   }
 
+  // ==================== Cutcheck 在线审片页 (cutcheck-alpha.vercel.app) 无感本机视频喂入器（零侧边栏干扰） ====================
+  let cutcheckInjectRunning = false;
+  async function handleCutcheckAutoLoad() {
+    if (cutcheckInjectRunning) return;
+    const hashStr = String(location.hash || '').replace(/^#/, '');
+    if (!hashStr.includes('file=')) return;
+    const hashParams = new URLSearchParams(hashStr);
+    const hashFilePath = hashParams.get('file') || '';
+    if (!hashFilePath) return;
+    const expectedName = hashFilePath.split('/').pop() || '';
+
+    let pending = null;
+    try {
+      const raw = await xStorageGet(STORAGE_KEY_PENDING_CUTCHECK, '');
+      if (raw) pending = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      pending = null;
+    }
+    if (!pending || !pending.token || !pending.fileName) return;
+    if (Date.now() - Number(pending.createdAt || 0) > 15 * 60 * 1000) return;
+    if (expectedName && pending.fileName !== expectedName) return;
+
+    cutcheckInjectRunning = true;
+    try {
+      // 等待 Cutcheck 渲染出 #videoLinkNotice 提示框及隐藏的 input[type="file"]
+      let noticeEl = null;
+      let fileInp = null;
+      for (let i = 0; i < 75; i++) {
+        noticeEl = document.getElementById('videoLinkNotice');
+        fileInp =
+          document.getElementById('videoLinkFileInput') ||
+          noticeEl?.querySelector?.('input[type="file"]') ||
+          null;
+        if (noticeEl && fileInp) break;
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      if (!noticeEl || !fileInp) return;
+
+      const textEl = noticeEl.querySelector('p');
+      const btnEl = noticeEl.querySelector('button');
+      if (btnEl) btnEl.disabled = true;
+      const updateProgress = (pct, modeLabel = '本机回环') => {
+        if (textEl) {
+          textEl.textContent = `⚡ 插件正在从${modeLabel}自动载入成片《${pending.fileName}》（${pct}% · 0字节上传外网）...`;
+        }
+      };
+      updateProgress(0);
+
+      const bridgeBase = String(pending.bridgeOrigin || BRIDGE_DEFAULT_URL).replace(/\/+$/, '');
+      const totalBytes = Math.max(1, Number(pending.size || 0));
+      let videoBlob = null;
+
+      // 优先走直接本机 HTTP 回环流（~2GB/s 极速），若受浏览器 PNA 限制则自动切换扩展后台 8MB 分片流（免授权弹窗、突破 64MB 消息上限）
+      try {
+        const res = await fetch(`${bridgeBase}/api/review-video/${encodeURIComponent(pending.token)}`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (res.body && typeof res.body.getReader === 'function') {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let received = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              chunks.push(value);
+              received += value.byteLength;
+              updateProgress(Math.min(99, Math.round((received / totalBytes) * 100)));
+            }
+          }
+          videoBlob = new Blob(chunks, { type: pending.mime || 'video/mp4' });
+        } else {
+          videoBlob = await res.blob();
+        }
+      } catch {
+        // Fallback: 通过扩展后台 Service Worker 按 8MB 切片流式拉取组装
+        if (!IS_CHROME_EXT) throw new Error('本地回环连接被浏览器拦截，请使用 Chrome 扩展版');
+        const CHUNK_SIZE = 8 * 1024 * 1024;
+        const chunks = [];
+        let offset = 0;
+        while (offset < totalBytes) {
+          const end = Math.min(totalBytes - 1, offset + CHUNK_SIZE - 1);
+          const resp = await sendExtMessage({
+            type: 'PPF_FETCH_REVIEW_CHUNK',
+            bridgeOrigin: bridgeBase,
+            token: pending.token,
+            start: offset,
+            end,
+          });
+          const binStr = atob(resp.b64 || '');
+          const bytes = new Uint8Array(binStr.length);
+          for (let j = 0; j < binStr.length; j++) {
+            bytes[j] = binStr.charCodeAt(j);
+          }
+          chunks.push(bytes);
+          offset += bytes.byteLength || end - offset + 1;
+          updateProgress(Math.min(99, Math.round((offset / totalBytes) * 100)), '扩展通道');
+        }
+        videoBlob = new Blob(chunks, { type: pending.mime || 'video/mp4' });
+      }
+
+      if (!videoBlob || videoBlob.size === 0) {
+        throw new Error('读取到的本机视频内容为空');
+      }
+
+      updateProgress(100);
+      await xStorageSet(STORAGE_KEY_PENDING_CUTCHECK, '');
+
+      const fileObj = new File([videoBlob], pending.fileName, {
+        type: pending.mime || 'video/mp4',
+        lastModified: Number(pending.lastModified || Date.now()),
+      });
+      const dt = new DataTransfer();
+      dt.items.add(fileObj);
+      fileInp.files = dt.files;
+      fileInp.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // 兼容旧版缓存的 Cutcheck PWA：若页面项目名/版本输入框仍为空，主动同步补齐并触发保存
+      setTimeout(() => {
+        const projInp = document.getElementById('sourceProjectName');
+        const verInp = document.getElementById('sourceVersion');
+        const pathInp = document.getElementById('sourcePath');
+        let touched = false;
+        if (projInp && !projInp.value && pending.project) {
+          projInp.value = pending.project;
+          touched = true;
+        }
+        if (verInp && !verInp.value && pending.version) {
+          verInp.value = pending.version;
+          touched = true;
+        }
+        if (pathInp && !pathInp.value && pending.videoPath) {
+          pathInp.value = pending.videoPath;
+          touched = true;
+        }
+        if (touched && projInp) {
+          projInp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }, 450);
+    } catch (err) {
+      const noticeEl = document.getElementById('videoLinkNotice');
+      const textEl = noticeEl?.querySelector?.('p');
+      const btnEl = noticeEl?.querySelector?.('button');
+      if (btnEl) btnEl.disabled = false;
+      if (textEl) {
+        textEl.textContent = `⚠️ 自动载入未完成（${err?.message || err}），请点击右侧按钮手动选择：${hashFilePath}`;
+      }
+    } finally {
+      cutcheckInjectRunning = false;
+    }
+  }
+
   if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
     handleFeishuLaunchpad();
+  } else if (location.hostname === 'cutcheck-alpha.vercel.app') {
+    handleCutcheckAutoLoad();
+    window.addEventListener('hashchange', () => handleCutcheckAutoLoad());
+    if (IS_CHROME_EXT && chrome.storage?.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes[STORAGE_KEY_PENDING_CUTCHECK]?.newValue) {
+          handleCutcheckAutoLoad();
+        }
+      });
+    }
   } else {
     setTimeout(mountUI, 900);
   }

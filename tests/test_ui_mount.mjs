@@ -175,7 +175,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: '2.2.0' }),
+        getManifest: () => ({ version: '2.3.0' }),
         sendMessage: (msg, cb) => {
           if (msg.type === 'PPF_FEISHU_QUERY_CONTEXT') {
             cb?.({
@@ -380,7 +380,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.2.0');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.3.0');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
@@ -389,4 +389,10 @@ assert.equal(
 assert.ok(fbUrl.searchParams.get('prefill_运行环境').includes('macOS · Chrome 131 · 左侧分屏停靠'));
 assert.match(fbUrl.searchParams.get('prefill_设备标识'), /^ppf_[a-z0-9]{10}$/);
 
-console.log('✅ UI Mount & Render Smoke Tests (Publish-Only Route Gate + Collapsed Red/Green Quick Sync + Feishu Feedback Contract) ALL PASSED!');
+// 7. 验证 Cutcheck 在线审片域名严格零侧边栏污染：进入 cutcheck-alpha.vercel.app 绝不挂载发布助手 UI
+const ccEnv = createMockDomEnv('https://cutcheck-alpha.vercel.app/#file=%2Ftmp%2Fdemo_v2.mp4&project=demo&version=v2', true);
+await ccEnv.flushTimers();
+assert.equal(ccEnv.getShadowRoot(), null, 'Cutcheck 审片页严禁创建发布助手 Shadow DOM 侧边栏');
+assert.equal(ccEnv.docEl.style.paddingLeft || '', '', 'Cutcheck 审片页严禁修改页面边距');
+
+console.log('✅ UI Mount & Render Smoke Tests (Publish-Only + Collapsed Red/Green + Feedback + Cutcheck Zero-UI Handoff) ALL PASSED!');
