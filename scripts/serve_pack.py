@@ -44,10 +44,10 @@ DEFAULT_PACK_SUBDIRS = [
 SITE_URLS: dict[str, tuple[str, str]] = {
     "xhs": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video"),
     "xiaohongshu": ("小红书", "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video"),
-    "wx": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
-    "weixin": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
-    "weixin_channels": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
-    "sph": ("微信视频号", "https://channels.weixin.qq.com/platform/post/list"),
+    "wx": ("微信视频号", "https://channels.weixin.qq.com/platform/post/create"),
+    "weixin": ("微信视频号", "https://channels.weixin.qq.com/platform/post/create"),
+    "weixin_channels": ("微信视频号", "https://channels.weixin.qq.com/platform/post/create"),
+    "sph": ("微信视频号", "https://channels.weixin.qq.com/platform/post/create"),
     "dy": ("抖音", "https://creator.douyin.com/creator-micro/content/upload"),
     "douyin": ("抖音", "https://creator.douyin.com/creator-micro/content/upload"),
     "bili": ("B 站", "https://member.bilibili.com/platform/upload/video/frame"),
@@ -76,7 +76,7 @@ PLATFORM_KEYWORD_RULES: list[tuple[tuple[str, ...], str]] = [
 
 ALL_FOUR_URLS = [
     "https://creator.douyin.com/creator-micro/content/upload",
-    "https://channels.weixin.qq.com/platform/post/list",
+    "https://channels.weixin.qq.com/platform/post/create",
     "https://creator.xiaohongshu.com/publish/publish?source=official&from=menu&target=video",
     "https://member.bilibili.com/platform/upload/video/frame",
 ]
@@ -197,12 +197,30 @@ def parse_dispatch_account(raw_account: str, raw_site: str, brand_hints_cfg: dic
     return "finder", acct_clean, brand_folder_hint
 
 
+def is_valid_publish_pack_json(path: Path) -> bool:
+    """严格校验 JSON 是否为真正的 PublishPack 发布包（排除 publish_receipt.json / words.json / sources.json 等辅助文件）"""
+    if not path or not path.is_file():
+        return False
+    lower_name = path.name.lower()
+    skip_tokens = ("receipt", "state", "meta", "words", "sources", "config", "package", "manifest", "schema")
+    if any(tok in lower_name for tok in skip_tokens):
+        return False
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:
+            return False
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return isinstance(obj, dict) and any(k in obj for k in ("specVersion", "platforms", "default"))
+    except Exception:
+        return False
+
+
 def find_explicit_pack_file(base_dir: Path) -> Path | None:
     if not base_dir or not base_dir.is_dir():
         return None
-    json_packs = sorted(base_dir.glob("*.pack.json")) + sorted(base_dir.glob("publish*.json"))
-    if json_packs:
-        return json_packs[-1]
+    json_cands = sorted(base_dir.glob("*.pack.json")) + sorted(base_dir.glob("publish*.json"))
+    valid_json_packs = [p for p in json_cands if is_valid_publish_pack_json(p)]
+    if valid_json_packs:
+        return valid_json_packs[-1]
     for pattern in ("发布包*.md", "*发布文案*.md", "发布.md"):
         md_packs = [p for p in sorted(base_dir.glob(pattern)) if not p.name.endswith(".preview.md")]
         if md_packs:
@@ -460,7 +478,7 @@ class BridgeState:
         if direct.exists():
             return self.assert_inside_allowed_roots(direct)
 
-        pure_name = Path(cleaned).name
+        pure_name = extract_clean_slug(cleaned) or Path(cleaned).name
         candidates: list[Path] = []
 
         # 1. 支持标准 AIHub 多领域结构（定向拼接）
@@ -518,11 +536,18 @@ class BridgeState:
         return None
 
     def resolve_work_directory(self, raw_dir_or_path: str, brand_hint: str = "") -> Path:
-        cleaned = normalize_feishu_cell_text(raw_dir_or_path).lstrip("/\\")
-        if not cleaned:
+        norm_raw = normalize_feishu_cell_text(raw_dir_or_path)
+        if not norm_raw:
             raise ValueError("本地作品目录参数 (dir / path) 不能为空")
-        if ".." in Path(cleaned).parts:
+        if ".." in Path(norm_raw).parts:
             raise PermissionError("非法路径参数（禁止包含 ..）")
+
+        # 优先兼容直接传入本机绝对路径（例如 /Users/.../04_作品/20261118_xxx/04_发布与成片）
+        abs_cand = Path(norm_raw).expanduser()
+        if abs_cand.is_absolute() and abs_cand.exists():
+            return self.assert_inside_allowed_roots(abs_cand)
+
+        cleaned = norm_raw.lstrip("/\\")
 
         for idx, root in enumerate(self.all_allowed_roots()):
             is_fallback_mount = idx > 0 or str(root).startswith("/Volumes/")

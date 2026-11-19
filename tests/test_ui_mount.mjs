@@ -28,7 +28,9 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
     }
     get innerHTML() {
       const own = innerHtmlStore.get(this) || '';
-      const childHtml = this.children.map((c) => c.innerHTML || c.textContent || '').join('');
+      const childHtml = this.children
+        .map((c) => `${c.id ? `<div id="${c.id}"></div>` : ''}${c.innerHTML || c.textContent || ''}`)
+        .join('');
       return own + childHtml;
     }
     set innerHTML(val) {
@@ -308,17 +310,47 @@ assert.ok(greenHtml.includes('✅@B站·靖蜀黍_018｜百元AI大脑'), '点�
 assert.ok(greenHtml.includes('>2026-11-19 18:00</span>'), '点击同步后B区必须回读展示飞书表里的真实发布时间');
 
 // 2. 验证发布页挂载（新设备尚未配置飞书）：必须渲染高危红顶部警示与跨设备 PPF2 配置码激活入口，不崩溃
-const unconfEnv = createMockDomEnv('https://channels.weixin.qq.com/platform/post/list', false);
+const unconfEnv = createMockDomEnv('https://channels.weixin.qq.com/platform/post/create', false);
 await unconfEnv.flushTimers();
 const unconfHtml = unconfEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n');
 assert.ok(unconfHtml.includes('粘贴配置码秒连'), '未配置飞书时必须展示跨设备配置码秒连入口');
 assert.ok(unconfHtml.includes('border:2px solid #dc2626'), '未配置飞书时顶部也必须展示高危红色状态警示');
 
-// 3. 验证数据中心页挂载：必须成功渲染紧凑型导表面板
+// 3. 验证发布页折叠态：未同步时必须展示红色高危未同步浮窗与一键同步快捷按钮，点击快捷同步后立即翻绿
+const colEnv = createMockDomEnv('https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page', true);
+await colEnv.flushTimers();
+const colShadow = colEnv.getShadowRoot();
+const collapseBtn = colShadow.getElementById('ppf-collapse-btn');
+assert.ok(collapseBtn && typeof collapseBtn.onclick === 'function', '必须能获取收起按钮');
+collapseBtn.onclick();
+const colUnsyncedHtml = colShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(colUnsyncedHtml.includes('ppf-collapsed-unsynced-card'), '折叠且未同步时必须渲染红色高危警示胶囊');
+assert.ok(colUnsyncedHtml.includes('未同步发布时间') && colUnsyncedHtml.includes('ppf-collapsed-quick-sync'), '折叠且未同步时必须提供一键同步快捷入口');
+const quickSyncBtn = colShadow.getElementById('ppf-collapsed-quick-sync');
+await quickSyncBtn.onclick({ stopPropagation: () => {} });
+const colSyncedHtml = colShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(colSyncedHtml.includes('ppf-collapsed-synced-tab') && colSyncedHtml.includes('✅ 已同步'), '折叠态点击快捷同步后必须直接翻为绿色已同步浮标');
+
+// 4. 验证非发布页严格隐身：在创作者首页、作品/动态管理列表页、普通微博页必须完全隐藏且零页面边距污染
+for (const nonPubUrl of [
+  'https://creator.xiaohongshu.com/new/home',
+  'https://channels.weixin.qq.com/platform/post/list',
+  'https://creator.douyin.com/creator-micro/content/manage',
+  'https://member.bilibili.com/platform/upload-manager/article',
+  'https://weibo.com/',
+]) {
+  const idleEnv = createMockDomEnv(nonPubUrl, true);
+  await idleEnv.flushTimers();
+  const idleHtml = idleEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n').trim();
+  assert.equal(idleHtml, '', `非发布页 (${nonPubUrl}) 严禁渲染发布助手面板`);
+  assert.equal(idleEnv.docEl.style.paddingLeft || '', '', `非发布页 (${nonPubUrl}) 严禁修改页面边距`);
+}
+
+// 5. 验证数据中心页挂载：必须成功渲染紧凑型导表面板
 const dataEnv = createMockDomEnv('https://member.bilibili.com/platform/data-up/video', true);
 await dataEnv.flushTimers();
 const dataHtml = dataEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n');
 assert.ok(dataHtml.includes('ppf-btn-exp-account'), '数据中心页必须渲染账号导出按钮');
 assert.ok(dataHtml.includes('ppf-btn-exp-works'), '数据中心页必须渲染作品导出按钮');
 
-console.log('✅ UI Mount & Render Smoke Tests (Left Dock + Red/Green Top Status + A/B/C Sections + Data Center) ALL PASSED!');
+console.log('✅ UI Mount & Render Smoke Tests (Publish-Only Route Gate + Collapsed Red/Green Quick Sync + A/B/C Sections) ALL PASSED!');
