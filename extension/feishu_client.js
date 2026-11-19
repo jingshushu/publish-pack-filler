@@ -78,6 +78,11 @@ let memQueryCache = {
   ts: 0,
   data: null,
 };
+let memWorksCache = {
+  key: '',
+  ts: 0,
+  rows: null,
+};
 let memAccountsCache = {
   key: '',
   ts: 0,
@@ -85,6 +90,8 @@ let memAccountsCache = {
 };
 let inflightSnapshotPromise = null;
 let inflightSnapshotKey = '';
+let inflightWorksPromise = null;
+let inflightWorksKey = '';
 
 // 全局飞书请求平滑限速队列（严格控制在 <4.8 QPS，彻底规避个人授权码 base-api 5 QPS 滑动窗口触发 HTTP 429）
 let lastFeishuReqAt = 0;
@@ -110,6 +117,7 @@ const dynamicSingleSelectTables = new Set();
 
 function invalidateFeishuMemCache({ keepAccounts = true } = {}) {
   memQueryCache = { key: '', ts: 0, data: null };
+  memWorksCache = { key: '', ts: 0, rows: null };
   if (!keepAccounts) {
     memAccountsCache = { key: '', ts: 0, rows: null };
   }
@@ -1184,10 +1192,16 @@ async function fetchBaseTablesSnapshot(cfg, { forceRefresh = false } = {}) {
           memAccountsCache = { key: accKey, ts: Date.now(), rows: z3Rows };
         }
       }
-      const bRows =
-        cfg.schemaMode === 'multi_table' && cfg.tables.works
-          ? await listAllRecords(cfg, cfg.tables.works, 500)
-          : [];
+      const worksKey = `${cfg.baseToken}|${cfg.tables.works || ''}`;
+      let bRows = [];
+      if (cfg.schemaMode === 'multi_table' && cfg.tables.works) {
+        if (!forceRefresh && memWorksCache.key === worksKey && Date.now() - memWorksCache.ts < 20_000 && memWorksCache.rows) {
+          bRows = memWorksCache.rows;
+        } else {
+          bRows = await listAllRecords(cfg, cfg.tables.works, 500);
+          memWorksCache = { key: worksKey, ts: Date.now(), rows: bRows };
+        }
+      }
       const cRows = cfg.tables.publishes ? await listAllRecords(cfg, cfg.tables.publishes, 500) : [];
       const data = { z3Rows, bRows, cRows };
       memQueryCache = { key: snapKey, ts: Date.now(), data };
@@ -1199,6 +1213,40 @@ async function fetchBaseTablesSnapshot(cfg, { forceRefresh = false } = {}) {
   })();
 
   return inflightSnapshotPromise;
+}
+
+async function fetchWorksOnlyRows(cfg, { forceRefresh = false } = {}) {
+  if (!cfg.tables.works) return [];
+  const snapKey = `${cfg.baseToken}|${cfg.tables.accounts || ''}|${cfg.tables.works || ''}|${cfg.tables.publishes || ''}`;
+  const worksKey = `${cfg.baseToken}|${cfg.tables.works}`;
+  const now = Date.now();
+  if (!forceRefresh) {
+    if (memQueryCache.key === snapKey && now - memQueryCache.ts < 20_000 && memQueryCache.data?.bRows) {
+      return memQueryCache.data.bRows;
+    }
+    if (memWorksCache.key === worksKey && now - memWorksCache.ts < 20_000 && memWorksCache.rows) {
+      return memWorksCache.rows;
+    }
+  }
+  if (inflightSnapshotPromise && inflightSnapshotKey === snapKey) {
+    const snap = await inflightSnapshotPromise;
+    return snap.bRows || [];
+  }
+  if (inflightWorksPromise && inflightWorksKey === worksKey) {
+    return inflightWorksPromise;
+  }
+  inflightWorksKey = worksKey;
+  inflightWorksPromise = (async () => {
+    try {
+      const bRows = await listAllRecords(cfg, cfg.tables.works, 500);
+      memWorksCache = { key: worksKey, ts: Date.now(), rows: bRows };
+      return bRows;
+    } finally {
+      inflightWorksPromise = null;
+      inflightWorksKey = '';
+    }
+  })();
+  return inflightWorksPromise;
 }
 
 async function queryFeishuPublishContext(params = {}) {
@@ -1715,28 +1763,79 @@ async function syncPrePublishToFeishu(payload = {}) {
   };
 }
 
-// ==================== Cutcheck 在线审片队列读取 & 一键审片通过生成待发任务 ====================
-function formatWorkReviewItem(br, fmWork, cTasksByBId) {
+// ==================== Cutcheck 在线审片队列读取 & 按需拉取发布任务与状态 ====================
+function formatWorkReviewItem(br, fmWork, cTasksByBId = null) {
   const bf = br.fields || {};
   const title = cellText(bf[fmWork.title]) || cellText(bf[fmWork.slug]) || br.record_id;
   const slug = extractCleanWorkSlug(cellText(bf[fmWork.slug]));
   const status = cellText(bf[fmWork.status]);
   const brand = cellText(bf[fmWork.brand]);
   const approvedMs = fmWork.approvedAt ? parseDateTimeMs(bf[fmWork.approvedAt]) : null;
-  const cTasks = cTasksByBId.get(br.record_id) || [];
-  const isApproved = /等待发布|已完成|B12|B21/.test(status) || (Boolean(approvedMs) && cTasks.length > 0);
+  const cTasks = cTasksByBId ? cTasksByBId.get(br.record_id) || [] : [];
+  const isApproved = /等待发布|已完成|B12|B21/.test(status) || Boolean(approvedMs);
   const priority = /B11|待审核/.test(status) ? 3 : /B10|制作中/.test(status) ? 2 : isApproved ? 1 : 0;
   return {
     bRecordId: br.record_id,
     title,
     slug,
-    status: status || '未标状态',
+    status: status || (approvedMs ? 'B12等待发布至平台' : '未标状态'),
     brand,
     approvedAt: approvedMs ? formatMsLocalHM(approvedMs) : '',
     isApproved,
     cTasks,
     priority,
   };
+}
+
+function buildCTasksMapByBId(z3Rows, cRows, fmAcc, fmPub) {
+  const accNameById = new Map();
+  for (const ar of z3Rows) {
+    accNameById.set(
+      ar.record_id,
+      cellText(ar.fields[fmAcc.name]) || cellText(ar.fields[fmAcc.nickname]) || ar.record_id
+    );
+  }
+
+  const cTasksByBId = new Map();
+  for (const cr of cRows) {
+    const cf = cr.fields || {};
+    const bIds = cellLinkIds(cf[fmPub.workLink]);
+    if (!bIds.length) continue;
+    const accIds = cellLinkIds(cf[fmPub.accountLink]);
+    const accountName =
+      (accIds[0] && accNameById.get(accIds[0])) ||
+      cellText(cf[fmPub.accountText]) ||
+      cellText(cf[fmPub.platformText]) ||
+      '未指定账号';
+    const cSerialNo = fmPub.serialNo ? cellText(cf[fmPub.serialNo]) : '';
+    const cStatus = cellText(cf[fmPub.status]) || 'C00未发布';
+    const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
+    const isPublished = /C21|已发布|已完成/.test(cStatus) || Boolean(pubMs);
+    const isCancelled = /取消|废弃|暂不发布|C22|C23|C24/.test(cStatus);
+    for (const bid of bIds) {
+      if (!cTasksByBId.has(bid)) cTasksByBId.set(bid, []);
+      cTasksByBId.get(bid).push({
+        cRecordId: cr.record_id,
+        cSerialNo,
+        accountName,
+        cStatus,
+        publishedAt: pubMs ? formatMsLocalHM(pubMs) : '',
+        isPublished,
+        isCancelled,
+      });
+    }
+  }
+
+  // 待发布任务排在前面，已发布/已取消置灰任务排在后面，一目了然
+  for (const list of cTasksByBId.values()) {
+    list.sort((a, b) => {
+      const doneA = a.isPublished || a.isCancelled ? 1 : 0;
+      const doneB = b.isPublished || b.isCancelled ? 1 : 0;
+      if (doneA !== doneB) return doneA - doneB;
+      return a.accountName.localeCompare(b.accountName, 'zh-CN');
+    });
+  }
+  return cTasksByBId;
 }
 
 async function queryFeishuReviewQueue(params = {}) {
@@ -1757,44 +1856,60 @@ async function queryFeishuReviewQueue(params = {}) {
   const explicitBId = String(params.bRecordId || '').trim();
   const cleanSlug = extractCleanWorkSlug(params.workSlug || params.videoPath || '');
   const projectHint = String(params.project || '').trim();
-
-  const { z3Rows, bRows, cRows } = await fetchBaseTablesSnapshot(cfg, {
-    forceRefresh: Boolean(params.forceRefresh),
-  });
+  const includePublishTasks = Boolean(params.includePublishTasks);
 
   const fmAcc = cfg.fieldMap.accounts;
   const fmWork = cfg.fieldMap.works;
   const fmPub = cfg.fieldMap.publishes;
 
-  const accNameById = new Map();
-  for (const ar of z3Rows) {
-    accNameById.set(
-      ar.record_id,
-      cellText(ar.fields[fmAcc.name]) || cellText(ar.fields[fmAcc.nickname]) || ar.record_id
-    );
-  }
+  // 默认审片列表仅读取 B 内容运营表（1次请求极速返回）；仅当用户点击「获取发布任务 / 刷新状态」时才拉取 C 发布记录表！
+  let bRows = [];
+  let cTasksByBId = null;
+  if (includePublishTasks) {
+    let snap = await fetchBaseTablesSnapshot(cfg, { forceRefresh: Boolean(params.forceRefresh) });
+    bRows = snap.bRows;
+    cTasksByBId = buildCTasksMapByBId(snap.z3Rows, snap.cRows, fmAcc, fmPub);
 
-  const cTasksByBId = new Map();
-  for (const cr of cRows) {
-    const cf = cr.fields || {};
-    const bIds = cellLinkIds(cf[fmPub.workLink]);
-    if (!bIds.length) continue;
-    const accIds = cellLinkIds(cf[fmPub.accountLink]);
-    const accountName =
-      (accIds[0] && accNameById.get(accIds[0])) || cellText(cf[fmPub.accountText]) || cellText(cf[fmPub.platformText]) || '未指定账号';
-    const cSerialNo = fmPub.serialNo ? cellText(cf[fmPub.serialNo]) : '';
-    const cStatus = cellText(cf[fmPub.status]) || 'C00未发布';
-    const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
-    for (const bid of bIds) {
-      if (!cTasksByBId.has(bid)) cTasksByBId.set(bid, []);
-      cTasksByBId.get(bid).push({
-        cRecordId: cr.record_id,
-        cSerialNo,
-        accountName,
-        cStatus,
-        publishedAt: pubMs ? formatMsLocalHM(pubMs) : '',
-      });
+    // 若目标多维表尚未配置飞书自动化，用户主动点「获取发布任务」且当前已审片作品仍无任何 C 表记录时，兜底补齐 C00 待发记录
+    if (params.ensureIfEmpty && cfg.tables.publishes && cfg.tables.accounts) {
+      const hitBRow =
+        (explicitBId && bRows.find((r) => r.record_id === explicitBId)) ||
+        (cleanSlug && bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug)) ||
+        null;
+      if (hitBRow) {
+        const hitItem = formatWorkReviewItem(hitBRow, fmWork, cTasksByBId);
+        if (hitItem.isApproved && hitItem.cTasks.length === 0) {
+          try {
+            const pubFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.publishes);
+            const brandAccounts = snap.z3Rows.filter((ar) => {
+              const b = cellText(ar.fields[fmAcc.brand]);
+              const st = cellText(ar.fields[fmAcc.status]);
+              if (hitItem.brand && b && b !== hitItem.brand) return false;
+              return !st || /运营中|启用|正常|Z310/i.test(st);
+            });
+            let createdAny = false;
+            for (const acc of brandAccounts) {
+              await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, {
+                [fmPub.workLink]: [hitBRow.record_id],
+                [fmPub.accountLink]: [acc.record_id],
+                [fmPub.status]: cfg.statusValues?.pubPending || 'C00未发布',
+              });
+              createdAny = true;
+            }
+            if (createdAny) {
+              invalidateFeishuMemCache();
+              snap = await fetchBaseTablesSnapshot(cfg, { forceRefresh: true });
+              bRows = snap.bRows;
+              cTasksByBId = buildCTasksMapByBId(snap.z3Rows, snap.cRows, fmAcc, fmPub);
+            }
+          } catch {
+            // ignore fallback creation error
+          }
+        }
+      }
     }
+  } else {
+    bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: Boolean(params.forceRefresh) });
   }
 
   const allItems = [];
@@ -1804,15 +1919,14 @@ async function queryFeishuReviewQueue(params = {}) {
     allItems.push(item);
   }
 
-  // 待审队列：包含所有 B11待审核，以及已有本地作品目录的 B10制作中 作品
+  // 待审队列：包含所有尚未审片通过的 B11待审核，以及已有本地作品目录的 B10制作中 作品
   const pendingWorks = allItems
-    .filter((it) => /B11|待审核/.test(it.status) || (/B10|制作中/.test(it.status) && Boolean(it.slug)))
+    .filter((it) => !it.isApproved && (/B11|待审核/.test(it.status) || (/B10|制作中/.test(it.status) && Boolean(it.slug))))
     .sort((a, b) => {
       if (a.priority !== b.priority) return b.priority - a.priority;
       return (b.slug || b.title).localeCompare(a.slug || a.title, 'zh-CN', { numeric: true });
     });
 
-  // 匹配当前 Cutcheck 正在播放的作品（即使它刚刚审片通过变成了 B12，也保持准确展示其最新状态与生成的发布任务！）
   let activeWork = null;
   if (explicitBId) {
     activeWork = allItems.find((it) => it.bRecordId === explicitBId) || null;
@@ -1835,6 +1949,7 @@ async function queryFeishuReviewQueue(params = {}) {
   return {
     ok: true,
     configured: true,
+    tasksIncluded: includePublishTasks,
     activeWork,
     pendingWorks,
     totalPending: pendingWorks.length,
@@ -1852,14 +1967,11 @@ async function approveWorkReviewInFeishu(payload = {}) {
   }
 
   const fmWork = cfg.fieldMap.works;
-  const fmAcc = cfg.fieldMap.accounts;
-  const fmPub = cfg.fieldMap.publishes;
-
   const explicitBId = String(payload.bRecordId || '').trim();
   const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.videoPath || '');
   const projectHint = String(payload.project || '').trim();
 
-  const { bRows } = await fetchBaseTablesSnapshot(cfg, { forceRefresh: false });
+  const bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: false });
   let targetBRow = null;
   if (explicitBId) {
     targetBRow = bRows.find((r) => r.record_id === explicitBId) || null;
@@ -1881,9 +1993,8 @@ async function approveWorkReviewInFeishu(payload = {}) {
   const targetBId = targetBRow.record_id;
   const workTitle = cellText(targetBRow.fields[fmWork.title]) || cleanSlug || targetBId;
   const workSlug = extractCleanWorkSlug(cellText(targetBRow.fields[fmWork.slug])) || cleanSlug;
-  const workBrand = cellText(targetBRow.fields[fmWork.brand]);
 
-  // 优先走缓存表头，仅在尚未发现「审片通过时间」列时才请求一次表结构接口，降低 API 并发
+  // 优先走缓存表头，仅在尚未发现「审片通过时间」列时才请求一次表结构接口
   let workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: false });
   let approvedCol = fmWork.approvedAt || '审片通过时间';
   if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
@@ -1904,85 +2015,42 @@ async function approveWorkReviewInFeishu(payload = {}) {
         });
         workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
       } catch {
-        // 若当前 Token 无建列权限则跳过建列，继续执行后续状态/C表自愈链路
+        // 若当前 Token 无建列权限则跳过建列
       }
     }
   }
 
   const nowMs = Date.now();
+  const desiredStatus = cfg.statusValues?.workReady || 'B12等待发布至平台';
   const rawBUpdate = {
     [approvedCol]: nowMs,
-    [fmWork.status]: cfg.statusValues?.workReady || 'B12等待发布至平台',
+    [fmWork.status]: desiredStatus,
   };
   await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, rawBUpdate);
   invalidateFeishuMemCache();
 
-  // 等待飞书原生自动化工作流（wkfTvmDqtpQLG4Se：监听审片通过时间 -> 升 B12 + 遍历 Z310 账号创建 C00 待发记录）执行完毕
-  let latestQueue = null;
-  let updatedWork = null;
-  await new Promise((r) => setTimeout(r, 2600));
-  invalidateFeishuMemCache();
-  latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
-  updatedWork = latestQueue?.activeWork || null;
-  if (!updatedWork || !updatedWork.cTasks?.length) {
-    await new Promise((r) => setTimeout(r, 2200));
-    invalidateFeishuMemCache();
-    latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
-    updatedWork = latestQueue?.activeWork || null;
-  }
+  // 审片通过完成后立即返回（默认不自动拉取 C 发布记录表，避免飞书自动化尚未建完或额外消耗 QPS；由用户按需点击「获取发布任务」拉取）
+  const remainingPending = bRows
+    .filter((br) => br.record_id !== targetBId)
+    .map((br) => formatWorkReviewItem(br, fmWork, null))
+    .filter((it) => !it.isApproved && (/B11|待审核/.test(it.status) || (/B10|制作中/.test(it.status) && Boolean(it.slug))))
+    .sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      return (b.slug || b.title).localeCompare(a.slug || a.title, 'zh-CN', { numeric: true });
+    });
 
-  // 跨库零配置兜底：若目标多维表尚未配置飞书自动化导致 C 表仍无待发记录，直接复用刚刷新的快照遍历运营中账号补齐 C 表记录！
-  if ((!updatedWork || !updatedWork.cTasks || updatedWork.cTasks.length === 0) && cfg.tables.publishes && cfg.tables.accounts) {
-    try {
-      const [{ z3Rows, cRows: cRowsNow }, pubFieldsMeta] = await Promise.all([
-        fetchBaseTablesSnapshot(cfg, { forceRefresh: false }),
-        getTableFieldsMeta(cfg, cfg.tables.publishes),
-      ]);
-      const existingAccIds = new Set();
-      for (const cr of cRowsNow) {
-        if (cellLinkIds(cr.fields[fmPub.workLink]).includes(targetBId)) {
-          for (const aid of cellLinkIds(cr.fields[fmPub.accountLink])) existingAccIds.add(aid);
-        }
-      }
-      const brandAccounts = z3Rows.filter((ar) => {
-        const b = cellText(ar.fields[fmAcc.brand]);
-        const st = cellText(ar.fields[fmAcc.status]);
-        if (workBrand && b && b !== workBrand) return false;
-        return !st || /运营中|启用|正常|Z310/i.test(st);
-      });
-      let createdAny = false;
-      for (const acc of brandAccounts) {
-        if (existingAccIds.has(acc.record_id)) continue;
-        await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, {
-          [fmPub.workLink]: [targetBId],
-          [fmPub.accountLink]: [acc.record_id],
-          [fmPub.status]: cfg.statusValues?.pubPending || 'C00未发布',
-        });
-        createdAny = true;
-      }
-      if (createdAny) {
-        invalidateFeishuMemCache();
-        latestQueue = await queryFeishuReviewQueue({ bRecordId: targetBId, workSlug, forceRefresh: true });
-        updatedWork = latestQueue?.activeWork || updatedWork;
-      }
-    } catch {
-      // ignore fallback error if workflow is still finishing asynchronously
-    }
-  }
-
-  const cTasks = updatedWork?.cTasks || [];
-  const finalStatus = updatedWork?.status || 'B12等待发布至平台';
   return {
     ok: true,
     approved: true,
     bRecordId: targetBId,
     title: workTitle,
     slug: workSlug,
-    newStatus: finalStatus,
+    newStatus: desiredStatus,
     approvedAtStr: formatMsLocalHM(nowMs),
-    cTasks,
-    pendingWorks: latestQueue?.pendingWorks || [],
-    summary: `✅ 《${workTitle}》已审片通过（${finalStatus}），共生成 ${cTasks.length} 条平台待发任务！`,
+    cTasks: [],
+    tasksLoaded: false,
+    pendingWorks: remainingPending,
+    summary: `✅ 《${workTitle}》已同步审片通过！如需分发可点「📥 获取发布任务」`,
   };
 }
 

@@ -44,7 +44,7 @@ async function initPopup() {
   const coversEl = document.getElementById('pack-covers');
 
   const verEl = document.getElementById('popup-ver');
-  const mfVer = chrome.runtime.getManifest?.()?.version || '2.5.0';
+  const mfVer = chrome.runtime.getManifest?.()?.version || '2.5.1';
   if (verEl) verEl.textContent = `v${mfVer}`;
 
   let cachedStore = {};

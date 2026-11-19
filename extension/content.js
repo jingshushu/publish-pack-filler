@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.5.0) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.5.1) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -22,7 +22,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.5.0';
+  const EXT_FALLBACK_VERSION = '2.5.1';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -2845,6 +2845,8 @@
         .ppf-cc-item.active { border: 1.5px solid ${pMeta.accent}; background: ${isLight ? '#eef7f4' : 'rgba(22,98,79,0.22)'}; }
         .ppf-cc-pill { text-decoration: none; background: ${inputBg}; color: ${isLight ? '#0f503f' : '#6ee7b7'}; border: 1px solid rgba(16,185,129,0.45); border-radius: 999px; padding: 3px 9px; font-size: 11.5px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.12s; }
         .ppf-cc-pill:hover { background: ${isLight ? '#d1fae5' : 'rgba(16,185,129,0.25)'}; }
+        .ppf-cc-pill.is-done { background: ${isLight ? '#eef0f3' : 'rgba(148,163,184,0.14)'}; color: ${isLight ? '#9ca3af' : '#6b7280'}; border: 1px solid ${isLight ? '#d1d5db' : 'rgba(148,163,184,0.25)'}; cursor: not-allowed; opacity: 0.75; font-weight: 500; pointer-events: auto; }
+        .ppf-cc-pill.is-done:hover { background: ${isLight ? '#eef0f3' : 'rgba(148,163,184,0.14)'}; }
       `;
     }
 
@@ -2926,8 +2928,10 @@
     let ccState = {
       configured: true,
       loading: false,
+      loadingTasks: false,
       switching: false,
       approving: false,
+      tasksLoadedForBId: '',
       brandFilter: 'all',
       pendingWorks: [],
       activeWork: null,
@@ -2980,6 +2984,7 @@
       const hc = parseCutcheckHashContext();
       if (hc.slug && ccState.boundSlug && hc.slug !== ccState.boundSlug) {
         ccState.boundBId = '';
+        ccState.tasksLoadedForBId = '';
         ccState.boundSlug = hc.slug;
         ccState.boundProject = hc.project || '';
         ccState.boundVideoPath = hc.filePath || '';
@@ -2992,7 +2997,7 @@
       }
     }
 
-    async function refreshCutcheckQueue(force = false) {
+    async function refreshCutcheckQueue(force = false, { includeTasks = null } = {}) {
       if (!isCutcheckReviewContext()) return;
       if (ccState.approving) return;
       if (!IS_CHROME_EXT) {
@@ -3002,7 +3007,14 @@
       }
       syncCutcheckBoundWithHash();
       const hc = parseCutcheckHashContext();
+      const curBId = ccState.activeWork?.bRecordId || ccState.boundBId || '';
+      const shouldIncludeTasks =
+        includeTasks !== null
+          ? Boolean(includeTasks)
+          : Boolean(curBId && ccState.tasksLoadedForBId && ccState.tasksLoadedForBId === curBId);
+
       ccState.loading = true;
+      if (shouldIncludeTasks) ccState.loadingTasks = true;
       render();
       try {
         const resp = await sendExtMessage({
@@ -3012,6 +3024,7 @@
             workSlug: ccState.boundSlug || hc.slug,
             videoPath: hc.filePath || ccState.boundVideoPath,
             project: ccState.boundProject || hc.project,
+            includePublishTasks: shouldIncludeTasks,
             forceRefresh: Boolean(force),
           },
         });
@@ -3023,18 +3036,36 @@
           ccState.boundBId = ccState.activeWork.bRecordId;
           ccState.boundSlug = ccState.activeWork.slug || ccState.boundSlug;
           ccState.boundProject = ccState.activeWork.title || ccState.boundProject;
+          if (shouldIncludeTasks) {
+            ccState.tasksLoadedForBId = ccState.activeWork.bRecordId;
+          }
         }
         if (ccState.alertIsErr && /429|读取飞书待审列表失败/.test(ccState.alertMsg)) {
           ccState.alertMsg = '';
           ccState.alertIsErr = false;
         }
       } catch (err) {
-        ccState.alertMsg = `⚠️ 读取飞书待审列表失败：${err?.message || err}`;
+        ccState.alertMsg = `⚠️ 读取飞书状态失败：${err?.message || err}`;
         ccState.alertIsErr = true;
       } finally {
         ccState.loading = false;
+        ccState.loadingTasks = false;
         render();
       }
+    }
+
+    async function fetchCutcheckWorkTasks() {
+      const cur = ccState.activeWork;
+      if (!cur || ccState.loadingTasks) return;
+      ccState.tasksLoadedForBId = cur.bRecordId;
+      await refreshCutcheckQueue(true, { includeTasks: true });
+      const tasks = ccState.activeWork?.cTasks || [];
+      const doneCnt = tasks.filter((t) => t.isPublished || /C21|已发布|已完成/.test(t.cStatus) || Boolean(t.publishedAt)).length;
+      setStatus(
+        tasks.length > 0
+          ? `✅ 已同步最新状态：共 ${tasks.length} 条发布任务（待发 ${tasks.length - doneCnt} · 已发置灰 ${doneCnt}）`
+          : '⏳ 飞书自动化正在创建任务，稍后点「🔄 刷新状态」即可读取'
+      );
     }
 
     function scheduleRefreshCutcheckQueue(force = false, delayMs = 320) {
@@ -3065,6 +3096,9 @@
           bid: targetWork.bRecordId,
         });
         const prep = resp?.data || {};
+        if (ccState.tasksLoadedForBId && ccState.tasksLoadedForBId !== targetWork.bRecordId) {
+          ccState.tasksLoadedForBId = '';
+        }
         ccState.boundBId = targetWork.bRecordId;
         ccState.boundSlug = prep.workSlug || targetWork.slug;
         ccState.boundProject = prep.project || targetWork.title;
@@ -3122,7 +3156,7 @@
       const cur = ccState.activeWork;
       if (!cur || ccState.approving) return;
       ccState.approving = true;
-      ccState.alertMsg = '⏳ 正在写入审片通过时间，并触发飞书流转 B12 与生成全渠道发布任务...';
+      ccState.alertMsg = '⏳ 正在向飞书同步审片通过时间...';
       ccState.alertIsErr = false;
       render();
       try {
@@ -3136,17 +3170,19 @@
         });
         const res = resp?.data || {};
         ccState.approving = false;
+        // 审片完成后默认不自动拉取对应的发布任务，保留干净状态，由用户点击「获取发布任务」按需拉取
+        ccState.tasksLoadedForBId = '';
         ccState.pendingWorks = res.pendingWorks || ccState.pendingWorks.filter((w) => w.bRecordId !== cur.bRecordId);
         ccState.activeWork = {
           ...cur,
           status: res.newStatus || 'B12等待发布至平台',
           approvedAt: res.approvedAtStr || '',
           isApproved: true,
-          cTasks: res.cTasks || [],
+          cTasks: [],
         };
         ccState.alertMsg = '';
         ccState.alertIsErr = false;
-        setStatus(res.summary || `✅《${cur.title}》已审片通过！`);
+        setStatus(res.summary || `✅《${cur.title}》已同步审片通过！`);
         render();
       } catch (err) {
         ccState.approving = false;
@@ -5098,6 +5134,12 @@
                 }
 
                 const isApproved = Boolean(cur?.isApproved);
+                const isTasksShown = Boolean(cur && ccState.tasksLoadedForBId === cur.bRecordId);
+                const cTasks = isTasksShown ? cur?.cTasks || [] : [];
+                const isTaskDoneFn = (t) =>
+                  Boolean(t?.isPublished || t?.isCancelled || /C21|已发布|已完成/.test(t?.cStatus || '') || t?.publishedAt);
+                const doneTaskCnt = cTasks.filter(isTaskDoneFn).length;
+                const pendingTaskCnt = Math.max(0, cTasks.length - doneTaskCnt);
                 const cardBorder = isApproved ? '#10b981' : '#16624f';
                 const cardBg = isApproved
                   ? isLight
@@ -5123,7 +5165,18 @@
                           : `🟠 当前审阅 · ${escapeHtml(cur.status)}`
                         : '🎬 请从下方待审片单选择作品'
                     }</span>
-                    <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="飞书连接设置">⚙️</button>
+                    <div class="ppf-row-nowrap">
+                      ${
+                        cur
+                          ? `<button class="ppf-btn" id="ppf-cc-refresh-status-btn" ${
+                              ccState.loading || ccState.loadingTasks ? 'disabled' : ''
+                            } style="padding:2px 7px; font-size:11px; font-weight:700;" title="从飞书拉取当前作品与任务的最新状态">${
+                              ccState.loading || ccState.loadingTasks ? '⏳ 刷新中' : '🔄 刷新状态'
+                            }</button>`
+                          : ''
+                      }
+                      <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="飞书连接设置">⚙️</button>
+                    </div>
                   </div>
 
                   ${
@@ -5163,40 +5216,62 @@
                   ${
                     cur
                       ? isApproved
-                        ? `<div style="display:flex; flex-direction:column; gap:6px;">
-                            <div style="font-size:11.5px; font-weight:700; color:${hdColor};">
-                              已生成 ${cur.cTasks?.length || 0} 条待发任务（点击直达平台发布页）：
-                            </div>
-                            ${
-                              cur.cTasks && cur.cTasks.length > 0
-                                ? `<div class="ppf-row">
-                                    ${cur.cTasks
-                                      .map((t) => {
-                                        const href = `${BRIDGE_DEFAULT_URL}/open?dir=${encodeURIComponent(
-                                          cur.slug || ''
-                                        )}&account=${encodeURIComponent(t.accountName || '')}&cno=${encodeURIComponent(
-                                          t.cSerialNo || ''
-                                        )}&cid=${encodeURIComponent(t.cRecordId || '')}&bid=${encodeURIComponent(
-                                          cur.bRecordId
-                                        )}`;
-                                        const isDone = /C21|已发布/.test(t.cStatus);
-                                        return `<a class="ppf-cc-pill" href="${escapeHtml(
-                                          href
-                                        )}" target="_blank" rel="noopener noreferrer" title="点击直接打开该渠道发布后台并自动带入发布包与记录ID">${
-                                          isDone ? '✅' : '🚀'
-                                        } ${escapeHtml(t.accountName)}</a>`;
-                                      })
-                                      .join('')}
-                                  </div>`
-                                : `<div style="font-size:11px; opacity:0.8;">点右上角 🔄 可刷新读取最新生成的渠道任务</div>`
-                            }
-                          </div>`
+                        ? isTasksShown
+                          ? `<div style="display:flex; flex-direction:column; gap:6px;">
+                              <div class="ppf-compact-row" style="font-size:11.5px; font-weight:700; color:${hdColor};">
+                                <span>📋 发布任务（待发 ${pendingTaskCnt} · 已发 ${doneTaskCnt}）</span>
+                                <button class="ppf-btn" id="ppf-cc-refresh-tasks-btn" ${
+                                  ccState.loadingTasks ? 'disabled' : ''
+                                } style="padding:2px 8px; font-size:11px; border-color:rgba(16,185,129,0.45); color:${hdColor}; font-weight:700;" title="拉取各平台最新任务发布状态（已发布自动置灰）">${
+                              ccState.loadingTasks ? '⏳ 刷新中...' : '🔄 刷新任务'
+                            }</button>
+                              </div>
+                              ${
+                                cTasks.length > 0
+                                  ? `<div class="ppf-row" id="ppf-cc-tasks-wrap">
+                                      ${cTasks
+                                        .map((t) => {
+                                          const isDone = isTaskDoneFn(t);
+                                          if (isDone) {
+                                            const subTag = t.isCancelled ? '已取消' : '已发布';
+                                            const tipTime = t.publishedAt ? ` (${t.publishedAt})` : '';
+                                            return `<span class="ppf-cc-pill is-done" title="${escapeHtml(
+                                              `${t.accountName} · ${subTag}${tipTime}`
+                                            )}">✓ ${escapeHtml(t.accountName)} (${subTag})</span>`;
+                                          }
+                                          const href = `${BRIDGE_DEFAULT_URL}/open?dir=${encodeURIComponent(
+                                            cur.slug || ''
+                                          )}&account=${encodeURIComponent(t.accountName || '')}&cno=${encodeURIComponent(
+                                            t.cSerialNo || ''
+                                          )}&cid=${encodeURIComponent(t.cRecordId || '')}&bid=${encodeURIComponent(
+                                            cur.bRecordId
+                                          )}`;
+                                          return `<a class="ppf-cc-pill" href="${escapeHtml(
+                                            href
+                                          )}" target="_blank" rel="noopener noreferrer" title="点击直接打开该渠道发布后台并自动带入发布包与记录ID">🚀 ${escapeHtml(
+                                            t.accountName
+                                          )}</a>`;
+                                        })
+                                        .join('')}
+                                    </div>`
+                                  : `<div style="font-size:11px; opacity:0.82;">⏳ 暂未读到关联任务（若飞书自动化刚触发，稍后点右侧「🔄 刷新任务」即可获取）</div>`
+                              }
+                            </div>`
+                          : `<button class="ppf-btn ppf-btn-block" id="ppf-cc-fetch-tasks-btn" ${
+                              ccState.loadingTasks ? 'disabled' : ''
+                            } style="padding:7px 10px; font-size:12px; font-weight:800; border-color:#10b981; color:${hdColor};">
+                              ${
+                                ccState.loadingTasks
+                                  ? '⏳ 正在拉取各平台发布任务...'
+                                  : '📥 获取发布任务'
+                              }
+                            </button>`
                         : `<button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-cc-approve-btn" ${
                             ccState.approving ? 'disabled' : ''
                           } style="padding:8px 11px; font-size:12.5px; font-weight:800; box-shadow:0 3px 10px rgba(22,98,79,0.25);">
                             ${
                               ccState.approving
-                                ? '⏳ 正在流转 B12 并生成各平台发布任务...'
+                                ? '⏳ 正在同步审片通过时间...'
                                 : '✅ 审片通过 · 生成发布任务'
                             }
                           </button>`
@@ -5413,6 +5488,21 @@
         const ccApproveBtn = shadow.getElementById('ppf-cc-approve-btn');
         if (ccApproveBtn) {
           ccApproveBtn.onclick = approveCurrentCutcheckWork;
+        }
+        const ccFetchTasksBtn = shadow.getElementById('ppf-cc-fetch-tasks-btn');
+        if (ccFetchTasksBtn) {
+          ccFetchTasksBtn.onclick = fetchCutcheckWorkTasks;
+        }
+        const ccRefreshTasksBtn = shadow.getElementById('ppf-cc-refresh-tasks-btn');
+        if (ccRefreshTasksBtn) {
+          ccRefreshTasksBtn.onclick = fetchCutcheckWorkTasks;
+        }
+        const ccRefreshStatusBtn = shadow.getElementById('ppf-cc-refresh-status-btn');
+        if (ccRefreshStatusBtn) {
+          ccRefreshStatusBtn.onclick = async () => {
+            await refreshCutcheckQueue(true);
+            setStatus('✅ 已刷新最新飞书作品与任务状态');
+          };
         }
         const ccPrevBtn = shadow.getElementById('ppf-cc-prev-btn');
         if (ccPrevBtn && prevCandidate) {

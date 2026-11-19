@@ -388,6 +388,7 @@ sandbox.fetch = async (url) => {
         data: {
           items: [
             { record_id: 'recWorkPending', fields: { 选题方向: '十只机械眼同时盯住你', 本地作品目录: '20261119_机械眼', 状态: 'B11待审核', 所属品牌: '靖蜀黍' } },
+            { record_id: 'recWorkApproved', fields: { 选题方向: '015｜贵阳', 本地作品目录: '20261116_贵阳城市变迁', 状态: 'B12等待发布至平台', 所属品牌: '靖蜀黍' } },
           ],
         },
       }),
@@ -396,20 +397,46 @@ sandbox.fetch = async (url) => {
   return {
     ok: true,
     status: 200,
-    json: async () => ({ code: 0, data: { items: [] } }),
+    json: async () => ({
+      code: 0,
+      data: {
+        items: [
+          {
+            record_id: 'recCPubDone',
+            fields: {
+              内容运营表: [{ id: 'recWorkApproved' }],
+              分发账号: [{ id: 'recAccX' }],
+              状态: 'C21已发布',
+              真实发布日期: new Date('2026-11-19T18:00:00+08:00').getTime(),
+            },
+          },
+        ],
+      },
+    }),
   };
 };
 
-// 同时发起 3 个并发查询（模拟页面初始化 + hashchange + storage 变更同时触发）
-const [qRev1, qRev2, qPub1] = await Promise.all([
+// 1) 验证默认审片队列查询（includePublishTasks=false）：仅查 B 表（1次请求 + 2次429重试 = 3次），绝不提前拉取 Z3 / C 表！
+const [qRev1, qRev2] = await Promise.all([
   queryFeishuReviewQueue({ workSlug: '20261119_机械眼' }),
   queryFeishuReviewQueue({ workSlug: '20261119_机械眼' }),
-  queryFeishuPublishContext({ platform: 'bilibili' }),
 ]);
 assert.equal(qRev1.pendingWorks.length, 1, 'HTTP 429 自动重试后必须成功返回待审列表');
 assert.equal(qRev2.activeWork?.title, '十只机械眼同时盯住你');
-assert.equal(qPub1.accountName, 'B站·靖蜀黍');
-// 3 张表各读 1 次 (=3) + 注入的 2 次 429 重试 (=2) = 总共仅 5 次底层 fetch（若无快照合并去重会高达 3*3+2 = 11 次！）
-assert.equal(listCalls, 5, '并发查询必须共享同一份 inflight 多维表快照，杜绝重复拉表触发 429');
+assert.equal(listCalls, 3, '默认审片列表查询仅请求 B 表 1 次（含2次429退避重试共3次），不拉取 C 发布记录表');
 
-console.log('✅ All Feishu pure-JS client, 429 retry + snapshot coalescing, 1254062 self-healing & conflict radar tests passed!');
+// 2) 验证按需拉取发布任务（includePublishTasks=true）：复用已缓存的 B 表，仅补拉 Z3 + C 表（2次请求），且准确标记 isPublished=true 供前端置灰！
+const qWithTasks = await queryFeishuReviewQueue({
+  bRecordId: 'recWorkApproved',
+  includePublishTasks: true,
+});
+assert.equal(qWithTasks.activeWork?.cTasks?.length, 1);
+assert.equal(qWithTasks.activeWork?.cTasks[0].isPublished, true, 'C21已发布任务必须标记 isPublished=true 供前端置灰');
+assert.equal(listCalls, 5, '按需拉取任务时自动复用 20s 内的 B 表缓存，仅补拉 Z3 + C 表');
+
+// 3) 再次调用发布上下文查询直接命中 20s 全表快照缓存（0 次额外 HTTP 请求）
+const qPub1 = await queryFeishuPublishContext({ platform: 'bilibili' });
+assert.equal(qPub1.accountName, 'B站·靖蜀黍');
+assert.equal(listCalls, 5, '20s 内跨场景查询直接命中快照缓存');
+
+console.log('✅ All Feishu pure-JS client, 429 retry + on-demand tasks + published gray-out & conflict radar tests passed!');

@@ -123,6 +123,8 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   win.self = win;
   win.window = win;
 
+  let ccApprovedInMock = false;
+  let ccBiliPublishedInMock = false;
   let syncedTimeInFeishu = '';
   const timers = [];
   const sandbox = {
@@ -176,48 +178,85 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: '2.5.0' }),
+        getManifest: () => ({ version: '2.5.1' }),
         sendMessage: (msg, cb) => {
           if (msg.type === 'PPF_FEISHU_QUERY_REVIEW_QUEUE') {
+            const wantTasks = Boolean(msg.params?.includePublishTasks);
             cb?.({
               ok: true,
               data: {
                 ok: true,
                 configured: feishuConfigured,
-                pendingWorks: [
-                  {
-                    bRecordId: 'recBRev01',
-                    title: '开源爬墙画画盒',
-                    slug: '20261118_开源爬墙画画盒',
-                    status: 'B11待审核',
-                    brand: '靖蜀黍·个人IP',
-                    isApproved: false,
-                    cTasks: [],
-                  },
-                  {
-                    bRecordId: 'recBRev02',
-                    title: '百元AI大脑',
-                    slug: '20261102_百元AI大脑',
-                    status: 'B11待审核',
-                    brand: '靖蜀黍·个人IP',
-                    isApproved: false,
-                    cTasks: [],
-                  },
-                ],
+                tasksIncluded: wantTasks,
+                pendingWorks: ccApprovedInMock
+                  ? [
+                      {
+                        bRecordId: 'recBRev02',
+                        title: '百元AI大脑',
+                        slug: '20261102_百元AI大脑',
+                        status: 'B11待审核',
+                        brand: '靖蜀黍·个人IP',
+                        isApproved: false,
+                        cTasks: [],
+                      },
+                    ]
+                  : [
+                      {
+                        bRecordId: 'recBRev01',
+                        title: '开源爬墙画画盒',
+                        slug: '20261118_开源爬墙画画盒',
+                        status: 'B11待审核',
+                        brand: '靖蜀黍·个人IP',
+                        isApproved: false,
+                        cTasks: [],
+                      },
+                      {
+                        bRecordId: 'recBRev02',
+                        title: '百元AI大脑',
+                        slug: '20261102_百元AI大脑',
+                        status: 'B11待审核',
+                        brand: '靖蜀黍·个人IP',
+                        isApproved: false,
+                        cTasks: [],
+                      },
+                    ],
                 activeWork: {
                   bRecordId: 'recBRev01',
                   title: '开源爬墙画画盒',
                   slug: '20261118_开源爬墙画画盒',
-                  status: 'B11待审核',
+                  status: ccApprovedInMock ? 'B12等待发布至平台' : 'B11待审核',
                   brand: '靖蜀黍·个人IP',
-                  isApproved: false,
-                  cTasks: [],
+                  isApproved: ccApprovedInMock,
+                  cTasks:
+                    ccApprovedInMock && wantTasks
+                      ? [
+                          {
+                            cRecordId: 'recC1',
+                            cSerialNo: 'C00301',
+                            accountName: '小红书·靖蜀黍',
+                            cStatus: 'C21已发布',
+                            publishedAt: '2026-11-19 17:35',
+                            isPublished: true,
+                            isCancelled: false,
+                          },
+                          {
+                            cRecordId: 'recC2',
+                            cSerialNo: 'C00302',
+                            accountName: 'B站·靖蜀黍',
+                            cStatus: ccBiliPublishedInMock ? 'C21已发布' : 'C00未发布',
+                            publishedAt: ccBiliPublishedInMock ? '2026-11-19 18:10' : '',
+                            isPublished: ccBiliPublishedInMock,
+                            isCancelled: false,
+                          },
+                        ]
+                      : [],
                 },
               },
             });
             return;
           }
           if (msg.type === 'PPF_FEISHU_APPROVE_REVIEW') {
+            ccApprovedInMock = true;
             cb?.({
               ok: true,
               data: {
@@ -228,6 +267,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
                 slug: '20261118_开源爬墙画画盒',
                 newStatus: 'B12等待发布至平台',
                 approvedAtStr: '2026-11-19 17:30',
+                tasksLoaded: false,
                 pendingWorks: [
                   {
                     bRecordId: 'recBRev02',
@@ -239,10 +279,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
                     cTasks: [],
                   },
                 ],
-                cTasks: [
-                  { cRecordId: 'recC1', cSerialNo: 'C00301', accountName: '小红书·靖蜀黍', cStatus: 'C00未发布' },
-                  { cRecordId: 'recC2', cSerialNo: 'C00302', accountName: 'B站·靖蜀黍', cStatus: 'C00未发布' },
-                ],
+                cTasks: [],
               },
             });
             return;
@@ -346,6 +383,9 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
     docEl,
     bodyEl,
     openedUrls,
+    markMockBiliPublished: () => {
+      ccBiliPublishedInMock = true;
+    },
     getShadowRoot: () => lastShadowRoot,
     flushTimers: async () => {
       while (timers.length > 0) {
@@ -452,7 +492,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.0');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.1');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
@@ -483,13 +523,31 @@ ccToggleLayout.onclick();
 assert.equal(ccEnv.docEl.style.paddingRight || '', '', '切换为自由悬浮窗后应释放网页右侧边距');
 assert.ok(ccShadow.children.map((c) => c.innerHTML).join('\n').includes('ppf-resize-sw'), '自由悬浮窗模式必须提供自由拖拽缩放柄');
 
-// 一键审片通过生成各平台发布任务
+// 一键审片通过：默认不自动拉取发布任务，展示「📥 获取发布任务」与「🔄 刷新状态」入口
 const ccApproveBtn = ccShadow.getElementById('ppf-cc-approve-btn');
 assert.ok(ccApproveBtn && typeof ccApproveBtn.onclick === 'function', '必须渲染一键审片通过按钮');
 await ccApproveBtn.onclick();
-const ccHtmlAfter = ccShadow.children.map((c) => c.innerHTML).join('\n');
-assert.ok(ccHtmlAfter.includes('B12等待发布至平台') && ccHtmlAfter.includes('2 条待发任务'), '点击审片通过后必须展示B12流转结果与待发任务数');
-assert.ok(ccHtmlAfter.includes('小红书·靖蜀黍') && ccHtmlAfter.includes('B站·靖蜀黍'), '审片通过后必须展示各渠道一键去发布入口');
+const ccHtmlAfterApprove = ccShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(ccHtmlAfterApprove.includes('B12等待发布至平台'), '点击审片通过后必须展示 B12 状态');
+assert.ok(!ccHtmlAfterApprove.includes('ppf-cc-tasks-wrap'), '审片完成后默认绝不自动拉取发布任务');
+assert.ok(ccHtmlAfterApprove.includes('ppf-cc-fetch-tasks-btn') && ccHtmlAfterApprove.includes('获取发布任务'), '审片完成后必须展示「获取发布任务」入口');
+assert.ok(ccHtmlAfterApprove.includes('ppf-cc-refresh-status-btn') && ccHtmlAfterApprove.includes('刷新状态'), '必须提供显式「刷新状态」按钮');
+
+// 点击「📥 获取发布任务」后按需拉取任务：待发渠道可点直达，已发布渠道自动置灰 (is-done)
+const ccFetchTasksBtn = ccShadow.getElementById('ppf-cc-fetch-tasks-btn');
+await ccFetchTasksBtn.onclick();
+const ccHtmlWithTasks = ccShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(ccHtmlWithTasks.includes('待发 1 · 已发 1'), '点击获取发布任务后必须展示待发与已发计数');
+assert.ok(ccHtmlWithTasks.includes('ppf-cc-refresh-tasks-btn'), '任务列表旁必须提供「刷新任务」按钮');
+assert.ok(ccHtmlWithTasks.includes('ppf-cc-pill is-done') && ccHtmlWithTasks.includes('✓ 小红书·靖蜀黍 (已发布)'), '已发布渠道必须置灰显示');
+assert.ok(ccHtmlWithTasks.includes('🚀 B站·靖蜀黍'), '未发布渠道保持高亮可点击去发布');
+
+// 模拟 B站 也发布完成后，点击「🔄 刷新任务」按钮：B站 立即同步变为已发布置灰态！
+ccEnv.markMockBiliPublished();
+const ccRefreshTasksBtn = ccShadow.getElementById('ppf-cc-refresh-tasks-btn');
+await ccRefreshTasksBtn.onclick();
+const ccHtmlRefreshed = ccShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(ccHtmlRefreshed.includes('待发 0 · 已发 2') && ccHtmlRefreshed.includes('✓ B站·靖蜀黍 (已发布)'), '点击刷新按钮后最新已发布任务必须立即置灰');
 
 // 贴边收起为右侧悬停胶囊
 const ccCollapseBtn = ccShadow.getElementById('ppf-collapse-btn');
