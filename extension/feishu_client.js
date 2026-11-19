@@ -46,6 +46,7 @@ const DEFAULT_FEISHU_CONFIG = {
       packSnapshot: '发布包快照',
     },
     publishes: {
+      recordLabel: '文本',
       serialNo: '发布编号',
       workLink: '内容运营表',
       accountLink: '分发账号',
@@ -414,6 +415,12 @@ async function discoverAndSaveSchema(rawInputCfg) {
   if (cfg.tables.publishes) {
     const fPub = await getTableFieldsMeta(cfg, cfg.tables.publishes, { forceRefresh: true });
     schemaSummary.detectedFields.publishes = fPub.map((f) => f.field_name);
+    const primaryPubField = fPub.find((f) => f.is_primary)?.field_name;
+    cfg.fieldMap.publishes.recordLabel = matchCol(
+      fPub,
+      cfg.fieldMap.publishes.recordLabel,
+      [...(primaryPubField ? [primaryPubField] : []), '文本', '发布记录', '记录名称', '名称']
+    );
     cfg.fieldMap.publishes.serialNo = matchCol(fPub, cfg.fieldMap.publishes.serialNo, ['发布编号', '编号', '记录编号']);
     cfg.fieldMap.publishes.workLink = matchCol(fPub, cfg.fieldMap.publishes.workLink, ['内容运营表', '关联内容', '关联作品', /内容|作品/]);
     cfg.fieldMap.publishes.accountLink = matchCol(fPub, cfg.fieldMap.publishes.accountLink, ['分发账号', '关联账号', '发布账号', '账号']);
@@ -1155,11 +1162,22 @@ async function queryFeishuPublishContext(params = {}) {
       defaultCollection: cellText(r.fields[fmAcc.defaultCollection]),
     }));
 
+  // 若当前未手动指定账号且页面未能读取登录昵称，但当前加载的作品目录 (cleanSlug) 已存在于 B 内容表，自动反推该作品所属品牌的对应平台账号（避免多账号矩阵下误跳到其他品牌账号！）
+  let inferredBrandHint = '';
+  if (!params.accountRecordId && !lockedCRow && cleanSlug && bRows.length > 0) {
+    const slugHitB = bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug);
+    if (slugHitB) {
+      inferredBrandHint = cellText(slugHitB.fields[fmWork.brand]);
+    }
+  }
+  const effectiveAccountHint =
+    !accountHint || accountHint === 'auto' ? inferredBrandHint || accountHint : accountHint;
+
   const lockedAccId = lockedCRow ? cellLinkIds(lockedCRow.fields[fmPub.accountLink])[0] || '' : '';
   const matchedAccRow = params.accountRecordId
-    ? z3Rows.find((r) => r.record_id === params.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, accountHint)
+    ? z3Rows.find((r) => r.record_id === params.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, effectiveAccountHint)
     : (lockedAccId && z3Rows.find((r) => r.record_id === lockedAccId && platformMatches(cellText(r.fields[fmAcc.platform]), platCn))) ||
-      matchAccountRecord(z3Rows, fmAcc, platCn, accountHint);
+      matchAccountRecord(z3Rows, fmAcc, platCn, effectiveAccountHint);
 
   const accountId = matchedAccRow?.record_id || '';
   const accountName = matchedAccRow
@@ -1212,16 +1230,22 @@ async function queryFeishuPublishContext(params = {}) {
       const slug = extractCleanWorkSlug(cellText(bf[fmWork.slug]));
       const snapshotRaw = fmWork.packSnapshot ? cellText(bf[fmWork.packSnapshot]) : '';
       const cSerialNo = linkedC && fmPub.serialNo ? cellText(linkedC.fields[fmPub.serialNo]) : '';
+      const rawCLabel = linkedC && fmPub.recordLabel ? cellText(linkedC.fields[fmPub.recordLabel]) : '';
+      const fallbackIcon = /C21|已发布/.test(cSt) ? '✅' : '⏳';
+      const cDisplayTitle = rawCLabel || `${fallbackIcon}@${accountName}_${label}`;
+      const feishuPublishedAt = publishedMs ? formatMsLocalHM(publishedMs) : '';
 
       candidates.push({
         bRecordId: br.record_id,
         cRecordId: linkedC?.record_id || '',
         cSerialNo,
+        cDisplayTitle,
+        feishuPublishedAt,
         label,
         slug,
         bStatus: bSt,
         cStatus: isFutureScheduled ? '⏳已定时发布' : cSt || '未建排期行',
-        plannedAt: publishedMs ? formatMsLocalHM(publishedMs) : '',
+        plannedAt: feishuPublishedAt,
         hasCloudPack: Boolean(snapshotRaw && snapshotRaw.startsWith('{')),
         packSnapshot: snapshotRaw,
         fallbackTitle: cellText(bf[fmWork.fallbackTitle]) || label,
@@ -1239,15 +1263,19 @@ async function queryFeishuPublishContext(params = {}) {
       const isFutureScheduled = Boolean(publishedMs && publishedMs > Date.now());
       if (/已发布|取消|废弃|C21|C23/.test(cSt) && !isFutureScheduled && cr.record_id !== explicitCId) continue;
       const label = cellText(cf[fmPub.title]) || cellText(cf[fmPub.workTitleText]) || cr.record_id;
+      const rawCLabel = fmPub.recordLabel ? cellText(cf[fmPub.recordLabel]) : '';
+      const feishuPublishedAt = publishedMs ? formatMsLocalHM(publishedMs) : '';
       candidates.push({
         bRecordId: '',
         cRecordId: cr.record_id,
         cSerialNo: fmPub.serialNo ? cellText(cf[fmPub.serialNo]) : '',
+        cDisplayTitle: rawCLabel || `${/C21|已发布/.test(cSt) ? '✅' : '⏳'}@${accountName}_${label}`,
+        feishuPublishedAt,
         label,
         slug: '',
         bStatus: '',
         cStatus: isFutureScheduled ? '⏳已定时发布' : cSt || '待发布',
-        plannedAt: publishedMs ? formatMsLocalHM(publishedMs) : '',
+        plannedAt: feishuPublishedAt,
         hasCloudPack: false,
         packSnapshot: '',
         fallbackTitle: cellText(cf[fmPub.title]),
@@ -1345,9 +1373,18 @@ async function syncPrePublishToFeishu(payload = {}) {
     cfg.schemaMode === 'multi_table' && cfg.tables.works ? getTableFieldsMeta(cfg, cfg.tables.works) : Promise.resolve([]),
   ]);
 
+  const initCleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
+  let syncBrandHint = '';
+  if (!payload.accountRecordId && initCleanSlug && bRows.length > 0) {
+    const slugHit = bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === initCleanSlug);
+    if (slugHit) syncBrandHint = cellText(slugHit.fields[fmWork.brand]);
+  }
+  const effSyncAccHint =
+    !payload.account || payload.account === 'auto' ? syncBrandHint || payload.account : payload.account;
+
   const matchedAccRow = payload.accountRecordId
-    ? z3Rows.find((r) => r.record_id === payload.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, payload.account)
-    : matchAccountRecord(z3Rows, fmAcc, platCn, payload.account);
+    ? z3Rows.find((r) => r.record_id === payload.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint)
+    : matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint);
 
   const accountId = matchedAccRow?.record_id || '';
   const accountName = matchedAccRow

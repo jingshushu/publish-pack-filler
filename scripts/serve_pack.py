@@ -842,7 +842,7 @@ def make_handler(state: BridgeState):
                 finder_msg = "已跳过文件管理器唤起"
                 now = time.time()
                 if open_finder:
-                    if state.last_finder_target == str(pack_dir) and (now - state.last_finder_ts) < 12.0:
+                    if site_key != "finder" and state.last_finder_target == str(pack_dir) and (now - state.last_finder_ts) < 12.0:
                         finder_msg = f"目录已处于打开状态（{pack_dir.name}）"
                     else:
                         finder_msg = reveal_in_file_manager(pack_dir, project_dir)
@@ -877,6 +877,29 @@ def make_handler(state: BridgeState):
                     pack_version=state.pack_version,
                 )
                 self._send_html(page_html)
+                return
+
+            if parsed.path == "/api/open-finder":
+                raw_dir = (qs.get("dir") or [""])[0].strip()
+                pack_dir = state.active_pack_dir
+                proj_dir = state.active_project_dir
+                if raw_dir:
+                    try:
+                        target_base = state.resolve_work_directory(raw_dir)
+                        proj_dir, pack_dir = state.locate_pack_dir(target_base, "")
+                    except PermissionError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, status=403)
+                        return
+                    except (ValueError, FileNotFoundError):
+                        self._send_json({"ok": False, "error": f"本机磁盘/NAS 暂未找到目录：{raw_dir}"}, status=404)
+                        return
+                if not pack_dir or not pack_dir.is_dir():
+                    self._send_json({"ok": False, "error": "当前尚未关联有效的本机作品目录"}, status=404)
+                    return
+                msg = reveal_in_file_manager(pack_dir, proj_dir or pack_dir)
+                state.last_finder_target = str(pack_dir)
+                state.last_finder_ts = time.time()
+                self._send_json({"ok": True, "path": str(pack_dir), "msg": msg})
                 return
 
             if parsed.path == "/api/status":

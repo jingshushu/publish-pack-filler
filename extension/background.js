@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v2.0.5)
+// Background Service Worker (Manifest V3 · v2.1.0)
 // 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
 // 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
 // 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
 
-importScripts('feishu_client.js?v=2.0.5');
+importScripts('feishu_client.js?v=2.1.0');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {
@@ -383,6 +383,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (msg.type === 'PPF_BRIDGE_OPEN_FINDER') {
+    const dirParam = encodeURIComponent(String(msg.dir || '').trim());
+    (async () => {
+      const res = await fetch(`${BRIDGE_BASE}/api/open-finder?dir=${dirParam}`, { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      // 兼容旧版 serve_pack.py（未实现 /api/open-finder 时会返回根状态 service JSON）
+      if (data?.service && !data?.path) {
+        const fb = await fetch(`${BRIDGE_BASE}/open?dir=${dirParam}&site=finder`, { cache: 'no-store' });
+        if (!fb.ok) throw new Error(`HTTP ${fb.status}`);
+      }
+      sendResponse({ ok: true, path: data?.path || '', msg: data?.msg || '' });
+    })().catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
   }
 
   if (msg.type === 'PPF_BRIDGE_JSON') {
