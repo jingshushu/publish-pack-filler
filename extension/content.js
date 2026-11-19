@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.5.1) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.5.2) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -22,7 +22,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.5.1';
+  const EXT_FALLBACK_VERSION = '2.5.2';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -2945,6 +2945,35 @@
       showQuickSetup: false,
     };
     let ccRefreshTimer = null;
+    const approvedBIdsInSession = new Set();
+    const btnActionGuardMap = new Map();
+
+    // 按钮同步点击防重锁：点击瞬间立即锁死 DOM 按钮并在冷却期内拦截连点/重绘穿透
+    function guardAsyncButton(btnEl, actionKey, asyncFn, cooldownMs = 1500) {
+      return async (ev) => {
+        if (ev && typeof ev.stopPropagation === 'function' && actionKey === 'sync_pub_quick') {
+          ev.stopPropagation();
+        }
+        const now = Date.now();
+        const prev = btnActionGuardMap.get(actionKey);
+        if (prev && (prev.inFlight || now - prev.lastAt < cooldownMs)) {
+          return;
+        }
+        if (btnEl) {
+          btnEl.disabled = true;
+          btnEl.style.pointerEvents = 'none';
+        }
+        btnActionGuardMap.set(actionKey, { inFlight: true, lastAt: now });
+        try {
+          await asyncFn(ev);
+        } finally {
+          btnActionGuardMap.set(actionKey, { inFlight: false, lastAt: Date.now() });
+          if (btnEl && btnEl.isConnected) {
+            btnEl.style.pointerEvents = '';
+          }
+        }
+      };
+    }
 
     async function loadInitialCutcheckBound() {
       try {
@@ -3155,6 +3184,11 @@
     async function approveCurrentCutcheckWork() {
       const cur = ccState.activeWork;
       if (!cur || ccState.approving) return;
+      if (cur.isApproved || (cur.bRecordId && approvedBIdsInSession.has(cur.bRecordId))) {
+        setStatus(`✅《${cur.title}》已完成审片通过（防重保护：无需重复提交）`);
+        render();
+        return;
+      }
       ccState.approving = true;
       ccState.alertMsg = '⏳ 正在向飞书同步审片通过时间...';
       ccState.alertIsErr = false;
@@ -3169,6 +3203,8 @@
           },
         });
         const res = resp?.data || {};
+        if (cur.bRecordId) approvedBIdsInSession.add(cur.bRecordId);
+        if (res.bRecordId) approvedBIdsInSession.add(res.bRecordId);
         ccState.approving = false;
         // 审片完成后默认不自动拉取对应的发布任务，保留干净状态，由用户点击「获取发布任务」按需拉取
         ccState.tasksLoadedForBId = '';
@@ -4996,20 +5032,24 @@
           if (expBtn) expBtn.onclick = expandFn;
           const quickSyncBtn = shadow.getElementById('ppf-collapsed-quick-sync');
           if (quickSyncBtn) {
-            quickSyncBtn.onclick = async (ev) => {
-              ev.stopPropagation();
-              if (!feishuState.configured) {
-                expandFn();
-                return;
-              }
-              const ok = await syncPrePublishAndTurnGreen({ force: false });
-              if (!ok) {
-                // 若遇到 6h 排期撞车需二次确认或接口报错，自动展开面板展示顶部错误详情
-                settings.collapsed = false;
-                saveSettings(settings);
-                render();
-              }
-            };
+            quickSyncBtn.onclick = guardAsyncButton(
+              quickSyncBtn,
+              'sync_pub_quick',
+              async () => {
+                if (!feishuState.configured) {
+                  expandFn();
+                  return;
+                }
+                const ok = await syncPrePublishAndTurnGreen({ force: false });
+                if (!ok) {
+                  // 若遇到 6h 排期撞车需二次确认或接口报错，自动展开面板展示顶部错误详情
+                  settings.collapsed = false;
+                  saveSettings(settings);
+                  render();
+                }
+              },
+              1800
+            );
           }
           return;
         }
@@ -5487,22 +5527,32 @@
 
         const ccApproveBtn = shadow.getElementById('ppf-cc-approve-btn');
         if (ccApproveBtn) {
-          ccApproveBtn.onclick = approveCurrentCutcheckWork;
+          ccApproveBtn.onclick = guardAsyncButton(
+            ccApproveBtn,
+            `cc_approve:${cur?.bRecordId || cur?.slug || 'cur'}`,
+            approveCurrentCutcheckWork,
+            3000
+          );
         }
         const ccFetchTasksBtn = shadow.getElementById('ppf-cc-fetch-tasks-btn');
         if (ccFetchTasksBtn) {
-          ccFetchTasksBtn.onclick = fetchCutcheckWorkTasks;
+          ccFetchTasksBtn.onclick = guardAsyncButton(ccFetchTasksBtn, 'cc_fetch_tasks', fetchCutcheckWorkTasks, 900);
         }
         const ccRefreshTasksBtn = shadow.getElementById('ppf-cc-refresh-tasks-btn');
         if (ccRefreshTasksBtn) {
-          ccRefreshTasksBtn.onclick = fetchCutcheckWorkTasks;
+          ccRefreshTasksBtn.onclick = guardAsyncButton(ccRefreshTasksBtn, 'cc_refresh_tasks', fetchCutcheckWorkTasks, 900);
         }
         const ccRefreshStatusBtn = shadow.getElementById('ppf-cc-refresh-status-btn');
         if (ccRefreshStatusBtn) {
-          ccRefreshStatusBtn.onclick = async () => {
-            await refreshCutcheckQueue(true);
-            setStatus('✅ 已刷新最新飞书作品与任务状态');
-          };
+          ccRefreshStatusBtn.onclick = guardAsyncButton(
+            ccRefreshStatusBtn,
+            'cc_refresh_status',
+            async () => {
+              await refreshCutcheckQueue(true);
+              setStatus('✅ 已刷新最新飞书作品与任务状态');
+            },
+            900
+          );
         }
         const ccPrevBtn = shadow.getElementById('ppf-cc-prev-btn');
         if (ccPrevBtn && prevCandidate) {
@@ -6449,7 +6499,12 @@
 
       const panelSyncPubBtn = shadow.getElementById('ppf-panel-sync-pub');
       if (panelSyncPubBtn) {
-        panelSyncPubBtn.onclick = () => syncPrePublishAndTurnGreen({ force: false });
+        panelSyncPubBtn.onclick = guardAsyncButton(
+          panelSyncPubBtn,
+          'sync_pub',
+          () => syncPrePublishAndTurnGreen({ force: false }),
+          1800
+        );
       }
       const confCancelBtn = shadow.getElementById('ppf-conf-cancel');
       if (confCancelBtn) {
@@ -6460,7 +6515,12 @@
       }
       const confForceBtn = shadow.getElementById('ppf-conf-force');
       if (confForceBtn) {
-        confForceBtn.onclick = () => syncPrePublishAndTurnGreen({ force: true });
+        confForceBtn.onclick = guardAsyncButton(
+          confForceBtn,
+          'sync_pub_force',
+          () => syncPrePublishAndTurnGreen({ force: true }),
+          1800
+        );
       }
 
       bindCommonShellControls({ onRefreshClick: () => syncFromLocalBridge(false) });

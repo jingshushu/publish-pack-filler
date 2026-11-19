@@ -58,7 +58,10 @@ const {
   smartBatchCreateRecord,
   evaluateScheduleConflicts,
   queryFeishuPublishContext,
+  syncPrePublishToFeishu,
   queryFeishuReviewQueue,
+  approveWorkReviewInFeishu,
+  buildCTasksMapByBId,
 } = sandbox.self.PPFFeishuClient;
 
 // ==================== Test 1: 跨机器绝对路径净化为纯 WorkSlug ====================
@@ -439,4 +442,232 @@ const qPub1 = await queryFeishuPublishContext({ platform: 'bilibili' });
 assert.equal(qPub1.accountName, 'B站·靖蜀黍');
 assert.equal(listCalls, 5, '20s 内跨场景查询直接命中快照缓存');
 
-console.log('✅ All Feishu pure-JS client, 429 retry + on-demand tasks + published gray-out & conflict radar tests passed!');
+// ==================== Test 8: 防误触与「一个账号一条内容」铁律验证（并发点击合并去重 + 审片幂等 + 同号同内容绝不重建） ====================
+const dedupTasksMap = buildCTasksMapByBId(
+  [
+    { record_id: 'recAccDy', fields: { 账号名称: '抖音·万物有数', 账号昵称: '万物有数' } },
+    { record_id: 'recAccXhs', fields: { 账号名称: '小红书·万物有数', 账号昵称: '万物有数' } },
+  ],
+  [
+    {
+      record_id: 'recC_ghost_blank',
+      fields: {
+        发布编号: 'C00276',
+        内容运营表: [{ id: 'recB_110' }],
+        分发账号: [{ id: 'recAccDy' }],
+        状态: '',
+      },
+    },
+    {
+      record_id: 'recC_valid_pending',
+      fields: {
+        发布编号: 'C00275',
+        内容运营表: [{ id: 'recB_110' }],
+        分发账号: [{ id: 'recAccDy' }],
+        状态: 'C00未发布',
+      },
+    },
+    {
+      record_id: 'recC_auto_blocked',
+      fields: {
+        发布编号: 'C00277',
+        内容运营表: [{ id: 'recB_110' }],
+        分发账号: [{ id: 'recAccDy' }],
+        状态: 'C23取消/暂不发布',
+        备注: '⚠️ 防重自动拦截：同一账号同一内容仅保留首条记录',
+      },
+    },
+    {
+      record_id: 'recC_xhs_done',
+      fields: {
+        发布编号: 'C00278',
+        内容运营表: [{ id: 'recB_110' }],
+        分发账号: [{ id: 'recAccXhs' }],
+        状态: 'C21已发布',
+      },
+    },
+  ],
+  { name: '账号名称', nickname: '账号昵称' },
+  {
+    serialNo: '发布编号',
+    workLink: '内容运营表',
+    accountLink: '分发账号',
+    accountText: '分发账号',
+    platformText: '平台',
+    status: '状态',
+    publishedAt: '真实发布日期',
+    notes: '备注',
+  }
+);
+const tasksFor110 = dedupTasksMap.get('recB_110') || [];
+assert.equal(tasksFor110.length, 2, '同一作品下每个账号严格只保留唯一1条记录（彻底剔除空白重行与防重拦截行）');
+assert.equal(tasksFor110[0].cRecordId, 'recC_valid_pending', '同账号多条时优先锁定有明确状态的 C00275 主记录');
+assert.equal(tasksFor110[1].cRecordId, 'recC_xhs_done');
+
+let bBatchUpdateCount = 0;
+let cBatchUpdateCount = 0;
+let cBatchCreateCount = 0;
+let workApprovedFlag = false;
+
+await saveFeishuConfig({
+  authType: 'personal_token',
+  apiDomain: 'https://open.feishu.cn',
+  personalBaseToken: 'pt-idemp-test',
+  baseToken: 'bascnIdempTest',
+  schemaMode: 'multi_table',
+  statusSyncMode: 'time_only',
+  tables: {
+    accounts: 'tblAccIdemp',
+    works: 'tblWorkIdemp',
+    publishes: 'tblPubIdemp',
+  },
+});
+
+sandbox.fetch = async (url, init = {}) => {
+  const method = init.method || 'GET';
+  if (url.includes('/fields') && method === 'GET') {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [
+            { field_name: '选题方向', type: 1 },
+            { field_name: '本地作品目录', type: 1 },
+            { field_name: '状态', type: 3, property: { options: [] } },
+            { field_name: '审片通过时间', type: 5 },
+            { field_name: '内容运营表', type: 18 },
+            { field_name: '分发账号', type: 18 },
+            { field_name: '真实发布日期', type: 5 },
+            { field_name: '标题', type: 1 },
+            { field_name: '正文', type: 1 },
+          ],
+        },
+      }),
+    };
+  }
+  if (url.includes('/tables/tblWorkIdemp/records/batch_update')) {
+    bBatchUpdateCount++;
+    workApprovedFlag = true;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { records: [{ record_id: 'recWork110' }] } }),
+    };
+  }
+  if (url.includes('/tables/tblPubIdemp/records/batch_update')) {
+    cBatchUpdateCount++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { records: [{ record_id: 'recCExisting110' }] } }),
+    };
+  }
+  if (url.includes('/tables/tblPubIdemp/records/batch_create')) {
+    cBatchCreateCount++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { records: [{ record_id: 'recCDupBad' }] } }),
+    };
+  }
+  if (url.includes('/tables/tblAccIdemp/records')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [{ record_id: 'recAccBili110', fields: { 账号名称: 'B站·万物有数可视化', 平台: 'B站', 所属品牌: '万物皆有数', 账号状态: 'Z310运营中' } }],
+        },
+      }),
+    };
+  }
+  if (url.includes('/tables/tblWorkIdemp/records')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [
+            {
+              record_id: 'recWork110',
+              fields: {
+                选题方向: '110｜珠江口三虎',
+                本地作品目录: '20261118_珠江口三虎',
+                状态: workApprovedFlag ? 'B12等待发布至平台' : 'B11待审核',
+                审片通过时间: workApprovedFlag ? Date.now() : null,
+                所属品牌: '万物皆有数',
+              },
+            },
+          ],
+        },
+      }),
+    };
+  }
+  if (url.includes('/tables/tblPubIdemp/records')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: {
+          items: [
+            {
+              record_id: 'recCExisting110',
+              fields: {
+                发布编号: 'C00280',
+                内容运营表: [{ id: 'recWork110' }],
+                分发账号: [{ id: 'recAccBili110' }],
+                状态: 'C00未发布',
+              },
+            },
+          ],
+        },
+      }),
+    };
+  }
+  throw new Error(`Unexpected URL in Test 8: ${url}`);
+};
+
+// 8a) 模拟手抖同时三连击「审片通过」：并发锁合并后严格只发 1 次 batch_update！
+const [ap1, ap2, ap3] = await Promise.all([
+  approveWorkReviewInFeishu({ bRecordId: 'recWork110', workSlug: '20261118_珠江口三虎' }),
+  approveWorkReviewInFeishu({ bRecordId: 'recWork110', workSlug: '20261118_珠江口三虎' }),
+  approveWorkReviewInFeishu({ bRecordId: 'recWork110', workSlug: '20261118_珠江口三虎' }),
+]);
+assert.equal(ap1.approved, true);
+assert.equal(ap2.approved, true);
+assert.equal(ap3.approved, true);
+assert.equal(bBatchUpdateCount, 1, '同时三连击审片通过严格只允许写入 B 表 1 次，杜绝并发触发自动化翻倍建行');
+
+// 8b) 审片完成后再次点击（已处于 B12 / 已填审片通过时间）：幂等拦截，0 次写入！
+const apAgain = await approveWorkReviewInFeishu({ bRecordId: 'recWork110', workSlug: '20261118_珠江口三虎' });
+assert.equal(apAgain.alreadyApproved, true, '已审片作品再次点击必须命中幂等防重保护');
+assert.equal(bBatchUpdateCount, 1, '已审片作品再次点击必须 0 次写入 B 表');
+
+// 8c) 同步发布时间时即使未传 cRecordId 且手抖并发双点：必须自动反查命中已有 (作品, 账号) 行执行 batch_update，0 次 batch_create！
+const [sp1, sp2] = await Promise.all([
+  syncPrePublishToFeishu({
+    platform: 'bilibili',
+    bRecordId: 'recWork110',
+    workSlug: '20261118_珠江口三虎',
+    title: '珠江口三虎测试标题',
+    force: true,
+  }),
+  syncPrePublishToFeishu({
+    platform: 'bilibili',
+    bRecordId: 'recWork110',
+    workSlug: '20261118_珠江口三虎',
+    title: '珠江口三虎测试标题',
+    force: true,
+  }),
+]);
+assert.equal(sp1.cRecordId, 'recCExisting110');
+assert.equal(sp2.cRecordId, 'recCExisting110');
+assert.equal(cBatchCreateCount, 0, '同一账号同一内容严禁调用 batch_create 新建重复记录');
+assert.equal(cBatchUpdateCount, 1, '并发点击发前同步严格只发 1 次 batch_update 更新原记录');
+
+console.log('✅ All Feishu pure-JS client, 429 retry + anti-duplicate idempotency + 1-account-1-content tests passed!');

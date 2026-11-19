@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v2.5.1)
+// Background Service Worker (Manifest V3 · v2.5.2)
 // 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
 // 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
 // 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
 
-importScripts('feishu_client.js?v=2.5.1');
+importScripts('feishu_client.js?v=2.5.2');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {

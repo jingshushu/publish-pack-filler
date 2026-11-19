@@ -115,11 +115,30 @@ function acquireFeishuPaceSlot() {
 // 记录在 Bitable v1 接口上触发过 1254062 (引用选项单选列限制) 的 tableId，后续同步自动跳过单选状态列（交由飞书自动化流转），实现 1 次请求零报错直通
 const dynamicSingleSelectTables = new Set();
 
+// 并发写入去重互斥锁 & 审片幂等防重缓存（彻底拦截连点/并发触发重复写表）
+const inflightWritePromises = new Map();
+const recentApprovedWorksMap = new Map();
+const RECENT_APPROVE_TTL_MS = 90_000;
+
+function coalesceInflightWrite(lockKey, asyncFn) {
+  if (inflightWritePromises.has(lockKey)) {
+    return inflightWritePromises.get(lockKey);
+  }
+  const p = Promise.resolve()
+    .then(asyncFn)
+    .finally(() => {
+      inflightWritePromises.delete(lockKey);
+    });
+  inflightWritePromises.set(lockKey, p);
+  return p;
+}
+
 function invalidateFeishuMemCache({ keepAccounts = true } = {}) {
   memQueryCache = { key: '', ts: 0, data: null };
   memWorksCache = { key: '', ts: 0, rows: null };
   if (!keepAccounts) {
     memAccountsCache = { key: '', ts: 0, rows: null };
+    recentApprovedWorksMap.clear();
   }
 }
 
@@ -1322,7 +1341,7 @@ async function queryFeishuPublishContext(params = {}) {
 
   const bById = new Map(bRows.map((r) => [r.record_id, r]));
 
-  // 构建该账号下的候选关联作品列表（包含待发排期与近期作品，并携带云端兜底文案！）
+  // 构建该账号下的候选关联作品列表（严格遵守「1账号+1内容=唯一1条有效记录」，自动过滤防重拦截/取消行，优先保留已发/待发主记录）
   const cByBIdForAcc = new Map();
   for (const cr of cRows) {
     const cf = cr.fields;
@@ -1331,7 +1350,11 @@ async function queryFeishuPublishContext(params = {}) {
       if (accIds.length > 0 && !accIds.includes(accountId)) continue;
     }
     const bIds = cellLinkIds(cf[fmPub.workLink]);
-    if (bIds[0]) {
+    if (!bIds[0]) continue;
+    const score = scorePublishRecordForPair(cr, fmPub, explicitCId);
+    if (score < 0 && cr.record_id !== explicitCId) continue;
+    const prev = cByBIdForAcc.get(bIds[0]);
+    if (!prev || shouldPreferPublishRecord(prev, cr, fmPub, explicitCId)) {
       cByBIdForAcc.set(bIds[0], cr);
     }
   }
@@ -1486,6 +1509,68 @@ async function queryFeishuPublishContext(params = {}) {
   };
 }
 
+// ==================== 单账号单内容唯一性优选器（1账号+1内容严格保留唯一1条主记录） ====================
+function scorePublishRecordForPair(cr, fmPub, explicitCId = '') {
+  if (!cr) return -999;
+  if (explicitCId && cr.record_id === explicitCId) return 1000;
+  const cf = cr.fields || {};
+  const cSt = cellText(cf[fmPub.status]);
+  const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
+  const notes = fmPub.notes ? cellText(cf[fmPub.notes]) : '';
+  if (/防重自动拦截/.test(notes)) return -200;
+  if (/取消|废弃|暂不发布|C22|C23|C24/.test(cSt)) return -100;
+  if (/C21|已发布|已完成/.test(cSt) || Boolean(pubMs)) return 300;
+  if (/C00|C10|未发布|待发布|定时|上传中/.test(cSt)) return 200;
+  return cSt ? 150 : 100;
+}
+
+function shouldPreferPublishRecord(existingCr, candidateCr, fmPub, explicitCId = '') {
+  const existScore = scorePublishRecordForPair(existingCr, fmPub, explicitCId);
+  const candScore = scorePublishRecordForPair(candidateCr, fmPub, explicitCId);
+  if (candScore !== existScore) return candScore > existScore;
+  const existNo = fmPub.serialNo ? cellText(existingCr?.fields?.[fmPub.serialNo]) : '';
+  const candNo = fmPub.serialNo ? cellText(candidateCr?.fields?.[fmPub.serialNo]) : '';
+  if (existNo && candNo && existNo !== candNo) {
+    return candNo.localeCompare(existNo, 'en', { numeric: true }) < 0;
+  }
+  return false;
+}
+
+function findBestExistingPublishRecord(cRows, fmPub, { targetBId = '', accountId = '', platCn = '', titleHint = '' } = {}) {
+  let best = null;
+  const tNorm = normalizeTitleKey(titleHint || '');
+  for (const cr of cRows) {
+    const cf = cr.fields || {};
+    if (scorePublishRecordForPair(cr, fmPub, '') < 0) continue;
+    if (targetBId) {
+      const bIds = cellLinkIds(cf[fmPub.workLink]);
+      if (!bIds.includes(targetBId)) continue;
+      if (accountId) {
+        const aIds = cellLinkIds(cf[fmPub.accountLink]);
+        if (!aIds.includes(accountId)) continue;
+      } else if (platCn && fmPub.platformText) {
+        const pTxt = cellText(cf[fmPub.platformText]);
+        if (pTxt && !platformMatches(pTxt, platCn)) continue;
+      }
+    } else {
+      if (accountId) {
+        const aIds = cellLinkIds(cf[fmPub.accountLink]);
+        if (aIds.length > 0 && !aIds.includes(accountId)) continue;
+      } else if (platCn && fmPub.platformText) {
+        const pTxt = cellText(cf[fmPub.platformText]);
+        if (pTxt && !platformMatches(pTxt, platCn)) continue;
+      }
+      if (!tNorm || tNorm.length < 2) continue;
+      const rowTitleNorm = normalizeTitleKey(cellText(cf[fmPub.title]) || cellText(cf[fmPub.workTitleText]));
+      if (!rowTitleNorm || rowTitleNorm !== tNorm) continue;
+    }
+    if (!best || shouldPreferPublishRecord(best, cr, fmPub, '')) {
+      best = cr;
+    }
+  }
+  return best;
+}
+
 // ==================== 核心业务 2：发布前一键同步排期时间 / 文案到飞书并备份云端快照 ====================
 async function syncPrePublishToFeishu(payload = {}) {
   const cfg = await loadFeishuConfig();
@@ -1494,273 +1579,295 @@ async function syncPrePublishToFeishu(payload = {}) {
   }
 
   const platCn = normalizePlatformCn(payload.platform || '');
-  const fmAcc = cfg.fieldMap.accounts;
-  const fmWork = cfg.fieldMap.works;
-  const fmPub = cfg.fieldMap.publishes;
+  const syncLockKey = [
+    'sync_pub',
+    cfg.baseToken,
+    String(payload.cRecordId || payload.cSerialNo || payload.bRecordId || extractCleanWorkSlug(payload.workSlug || payload.work || '') || normalizeTitleKey(payload.title || '')),
+    String(payload.accountRecordId || payload.account || platCn),
+    payload.force ? '1' : '0',
+    payload.createNewWork ? 'new' : 'exist',
+  ].join('|');
 
-  const [{ z3Rows, bRows, cRows }, pubFieldsMeta, workFieldsMeta] = await Promise.all([
-    fetchBaseTablesSnapshot(cfg, { forceRefresh: false }),
-    getTableFieldsMeta(cfg, cfg.tables.publishes),
-    cfg.schemaMode === 'multi_table' && cfg.tables.works ? getTableFieldsMeta(cfg, cfg.tables.works) : Promise.resolve([]),
-  ]);
+  return coalesceInflightWrite(syncLockKey, async () => {
+    const fmAcc = cfg.fieldMap.accounts;
+    const fmWork = cfg.fieldMap.works;
+    const fmPub = cfg.fieldMap.publishes;
 
-  const initCleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
-  let syncBrandHint = '';
-  if (!payload.accountRecordId && initCleanSlug && bRows.length > 0) {
-    const slugHit = bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === initCleanSlug);
-    if (slugHit) syncBrandHint = cellText(slugHit.fields[fmWork.brand]);
-  }
-  const effSyncAccHint =
-    !payload.account || payload.account === 'auto' ? syncBrandHint || payload.account : payload.account;
+    const [{ z3Rows, bRows, cRows }, pubFieldsMeta, workFieldsMeta] = await Promise.all([
+      fetchBaseTablesSnapshot(cfg, { forceRefresh: false }),
+      getTableFieldsMeta(cfg, cfg.tables.publishes),
+      cfg.schemaMode === 'multi_table' && cfg.tables.works ? getTableFieldsMeta(cfg, cfg.tables.works) : Promise.resolve([]),
+    ]);
 
-  const matchedAccRow = payload.accountRecordId
-    ? z3Rows.find((r) => r.record_id === payload.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint)
-    : matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint);
-
-  const accountId = matchedAccRow?.record_id || '';
-  const accountName = matchedAccRow
-    ? cellText(matchedAccRow.fields[fmAcc.name]) || cellText(matchedAccRow.fields[fmAcc.nickname])
-    : payload.account || platCn;
-  const accountBrand = matchedAccRow ? cellText(matchedAccRow.fields[fmAcc.brand]) : '';
-
-  const nowMs = Date.now();
-  const parsedPlanMs = parseDateTimeMs(payload.plannedAt);
-  const isScheduled = payload.mode === 'scheduled' || Boolean(parsedPlanMs && parsedPlanMs > nowMs + 5 * 60_000);
-  const targetMs = isScheduled && parsedPlanMs ? parsedPlanMs : nowMs;
-  const timeStr = formatMsLocalHM(targetMs);
-
-  const bById = new Map(bRows.map((r) => [r.record_id, r]));
-  let targetBId = payload.createNewWork ? '' : String(payload.bRecordId || '').trim();
-  let targetCId = payload.createNewWork ? '' : String(payload.cRecordId || '').trim();
-  const cSerialNo = payload.createNewWork ? '' : String(payload.cSerialNo || '').trim();
-  const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
-
-  // 0. 优先按飞书「🚀 去发布」带入的 cRecordId 或 发布编号 (cno=C00xxx) 100% 精确锁死该条 C 发布记录行！
-  if (!payload.createNewWork && !targetCId && cSerialNo && fmPub.serialNo) {
-    const hitByNo = cRows.find((cr) => cellText(cr.fields[fmPub.serialNo]) === cSerialNo);
-    if (hitByNo) {
-      targetCId = hitByNo.record_id;
+    const initCleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
+    let syncBrandHint = '';
+    if (!payload.accountRecordId && initCleanSlug && bRows.length > 0) {
+      const slugHit = bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === initCleanSlug);
+      if (slugHit) syncBrandHint = cellText(slugHit.fields[fmWork.brand]);
     }
-  }
-  if (!payload.createNewWork && targetCId && !targetBId) {
-    const hitC = cRows.find((cr) => cr.record_id === targetCId);
-    if (hitC) {
-      targetBId = cellLinkIds(hitC.fields[fmPub.workLink])[0] || '';
-    }
-  }
+    const effSyncAccHint =
+      !payload.account || payload.account === 'auto' ? syncBrandHint || payload.account : payload.account;
 
-  // 若未显式传 cRecordId/cSerialNo/bRecordId 且非强制新建，按纯 slug 或作品名称匹配已有 B 记录（绝不擅自新建脏 B 行！）
-  if (cfg.schemaMode === 'multi_table' && !targetBId && !payload.createNewWork && cleanSlug) {
-    const hitB = bRows.find((r) => {
-      const bBrand = cellText(r.fields[fmWork.brand]);
-      if (accountBrand && bBrand && bBrand !== accountBrand) return false;
-      return extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug;
-    });
-    if (hitB) targetBId = hitB.record_id;
-  }
-  if (cfg.schemaMode === 'multi_table' && !targetBId && !targetCId && !payload.createNewWork) {
-    const probeNorm = normalizeTitleKey(payload.workLabel || payload.title || '');
-    if (probeNorm.length >= 2) {
-      const hitBByTitle = bRows.find((r) => {
+    const matchedAccRow = payload.accountRecordId
+      ? z3Rows.find((r) => r.record_id === payload.accountRecordId) || matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint)
+      : matchAccountRecord(z3Rows, fmAcc, platCn, effSyncAccHint);
+
+    const accountId = matchedAccRow?.record_id || '';
+    const accountName = matchedAccRow
+      ? cellText(matchedAccRow.fields[fmAcc.name]) || cellText(matchedAccRow.fields[fmAcc.nickname])
+      : payload.account || platCn;
+    const accountBrand = matchedAccRow ? cellText(matchedAccRow.fields[fmAcc.brand]) : '';
+
+    const nowMs = Date.now();
+    const parsedPlanMs = parseDateTimeMs(payload.plannedAt);
+    const isScheduled = payload.mode === 'scheduled' || Boolean(parsedPlanMs && parsedPlanMs > nowMs + 5 * 60_000);
+    const targetMs = isScheduled && parsedPlanMs ? parsedPlanMs : nowMs;
+    const timeStr = formatMsLocalHM(targetMs);
+
+    const bById = new Map(bRows.map((r) => [r.record_id, r]));
+    let targetBId = payload.createNewWork ? '' : String(payload.bRecordId || '').trim();
+    let targetCId = payload.createNewWork ? '' : String(payload.cRecordId || '').trim();
+    const cSerialNo = payload.createNewWork ? '' : String(payload.cSerialNo || '').trim();
+    const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.work || '');
+
+    // 0. 优先按飞书「🚀 去发布」带入的 cRecordId 或 发布编号 (cno=C00xxx) 100% 精确锁死该条 C 发布记录行！
+    if (!payload.createNewWork && !targetCId && cSerialNo && fmPub.serialNo) {
+      const hitByNo = cRows.find((cr) => cellText(cr.fields[fmPub.serialNo]) === cSerialNo);
+      if (hitByNo) {
+        targetCId = hitByNo.record_id;
+      }
+    }
+    if (!payload.createNewWork && targetCId && !targetBId) {
+      const hitC = cRows.find((cr) => cr.record_id === targetCId);
+      if (hitC) {
+        targetBId = cellLinkIds(hitC.fields[fmPub.workLink])[0] || '';
+      }
+    }
+
+    // 若未显式传 cRecordId/cSerialNo/bRecordId 且非强制新建，按纯 slug 或作品名称匹配已有 B 记录（绝不擅自新建脏 B 行！）
+    if (cfg.schemaMode === 'multi_table' && !targetBId && !payload.createNewWork && cleanSlug) {
+      const hitB = bRows.find((r) => {
         const bBrand = cellText(r.fields[fmWork.brand]);
         if (accountBrand && bBrand && bBrand !== accountBrand) return false;
-        const bSt = cellText(r.fields[fmWork.status]);
-        if (!/等待发布|已完成|B12|B21/.test(bSt)) return false;
-        const lNorm = normalizeTitleKey(cellText(r.fields[fmWork.title]).replace(/^[0-9？?]+｜/, ''));
-        const tNorm = normalizeTitleKey(cellText(r.fields[fmWork.fallbackTitle]));
-        return (
-          (lNorm.length >= 2 && (probeNorm.includes(lNorm) || lNorm.includes(probeNorm))) ||
-          (tNorm.length >= 4 && (probeNorm.includes(tNorm.slice(0, 8)) || tNorm.includes(probeNorm.slice(0, 8))))
-        );
+        return extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug;
       });
-      if (hitBByTitle) targetBId = hitBByTitle.record_id;
+      if (hitB) targetBId = hitB.record_id;
     }
-  }
-
-  // 提前反查对应账号下的 C 行
-  if (!payload.createNewWork && !targetCId && targetBId) {
-    const existC = cRows.find((cr) => {
-      const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
-      if (!bIds.includes(targetBId)) return false;
-      if (accountId) {
-        const aIds = cellLinkIds(cr.fields[fmPub.accountLink]);
-        return aIds.includes(accountId);
+    if (cfg.schemaMode === 'multi_table' && !targetBId && !targetCId && !payload.createNewWork) {
+      const probeNorm = normalizeTitleKey(payload.workLabel || payload.title || '');
+      if (probeNorm.length >= 2) {
+        const hitBByTitle = bRows.find((r) => {
+          const bBrand = cellText(r.fields[fmWork.brand]);
+          if (accountBrand && bBrand && bBrand !== accountBrand) return false;
+          const bSt = cellText(r.fields[fmWork.status]);
+          if (!/等待发布|已完成|B12|B21/.test(bSt)) return false;
+          const lNorm = normalizeTitleKey(cellText(r.fields[fmWork.title]).replace(/^[0-9？?]+｜/, ''));
+          const tNorm = normalizeTitleKey(cellText(r.fields[fmWork.fallbackTitle]));
+          return (
+            (lNorm.length >= 2 && (probeNorm.includes(lNorm) || lNorm.includes(probeNorm))) ||
+            (tNorm.length >= 4 && (probeNorm.includes(tNorm.slice(0, 8)) || tNorm.includes(probeNorm.slice(0, 8))))
+          );
+        });
+        if (hitBByTitle) targetBId = hitBByTitle.record_id;
       }
-      return true;
+    }
+
+    // 提前反查对应账号下的唯一有效 C 行（跳过防重拦截/已取消行）
+    if (!payload.createNewWork && !targetCId && targetBId) {
+      const existC = findBestExistingPublishRecord(cRows, fmPub, {
+        targetBId,
+        accountId,
+        platCn,
+      });
+      if (existC) targetCId = existC.record_id;
+    }
+
+    // 严格防脏数据守卫：除非用户在下拉框显式选择了「➕ 作为新作品登记」，否则绝不擅自在内容运营表新建记录！
+    if (cfg.schemaMode === 'multi_table' && cfg.tables.works && !payload.createNewWork && !targetCId && !targetBId) {
+      throw new Error(
+        '未匹配到飞书已有的待发记录：请先在面板上方下拉框选中对应的待发作品（或从飞书点击「🚀 去发布」进入）后再点同步！'
+      );
+    }
+
+    // 1. 6h 排期防撞校验
+    const radar = evaluateScheduleConflicts({
+      cRows,
+      bById,
+      fmPub,
+      fmWork,
+      accountId,
+      platCn,
+      targetMs,
+      excludeBId: targetBId,
+      excludeCId: targetCId,
+      minGapHours: cfg.minGapHours,
     });
-    if (existC) targetCId = existC.record_id;
-  }
 
-  // 严格防脏数据守卫：除非用户在下拉框显式选择了「➕ 作为新作品登记」，否则绝不擅自在内容运营表新建记录！
-  if (cfg.schemaMode === 'multi_table' && cfg.tables.works && !payload.createNewWork && !targetCId && !targetBId) {
-    throw new Error(
-      '未匹配到飞书已有的待发记录：请先在面板上方下拉框选中对应的待发作品（或从飞书点击「🚀 去发布」进入）后再点同步！'
-    );
-  }
+    if (radar.hasConflict && !payload.force) {
+      return {
+        ok: true,
+        saved: false,
+        needsConfirm: true,
+        accountName,
+        ...radar,
+      };
+    }
 
-  // 1. 6h 排期防撞校验
-  const radar = evaluateScheduleConflicts({
-    cRows,
-    bById,
-    fmPub,
-    fmWork,
-    accountId,
-    platCn,
-    targetMs,
-    excludeBId: targetBId,
-    excludeCId: targetCId,
-    minGapHours: cfg.minGapHours,
-  });
+    // 2. 多表模式下：对已有 B 记录顺手备份云端快照（仅当显式勾选 createNewWork 时才新建 B 记录）
+    let workLabel = String(payload.workLabel || '').trim();
+    if (cfg.schemaMode === 'multi_table' && cfg.tables.works) {
+      if (targetBId && bById.has(targetBId)) {
+        const existB = bById.get(targetBId);
+        workLabel = cellText(existB.fields[fmWork.title]) || workLabel || cleanSlug;
+        const bUpdates = {};
+        if (payload.packSnapshotJson && fmWork.packSnapshot) {
+          const curSnap = cellText(existB.fields[fmWork.packSnapshot]);
+          if (curSnap !== payload.packSnapshotJson && payload.packSnapshotJson.length < 45_000) {
+            bUpdates[fmWork.packSnapshot] = payload.packSnapshotJson;
+          }
+        }
+        if (cleanSlug && !cellText(existB.fields[fmWork.slug])) {
+          bUpdates[fmWork.slug] = cleanSlug;
+        }
+        if (payload.title && fmWork.fallbackTitle && !cellText(existB.fields[fmWork.fallbackTitle])) {
+          bUpdates[fmWork.fallbackTitle] = payload.title;
+        }
+        if (payload.body && fmWork.fallbackBody && !cellText(existB.fields[fmWork.fallbackBody])) {
+          bUpdates[fmWork.fallbackBody] = payload.body.slice(0, 1800);
+        }
+        if (Object.keys(bUpdates).length > 0) {
+          await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, bUpdates).catch(() => {});
+        }
+      } else if (payload.createNewWork) {
+        workLabel =
+          workLabel ||
+          (cleanSlug ? cleanSlug.replace(/^\d{8}_/, '') : '') ||
+          (payload.title || '未命名作品').slice(0, 28);
+        const rawBCreate = {
+          [fmWork.title]: workLabel,
+          [fmWork.status]: cfg.statusValues.workReady,
+        };
+        if (accountBrand && fmWork.brand) rawBCreate[fmWork.brand] = accountBrand;
+        if (cleanSlug && fmWork.slug) rawBCreate[fmWork.slug] = cleanSlug;
+        if (payload.title && fmWork.fallbackTitle) rawBCreate[fmWork.fallbackTitle] = payload.title;
+        if (payload.body && fmWork.fallbackBody) rawBCreate[fmWork.fallbackBody] = payload.body.slice(0, 1800);
+        if (payload.packSnapshotJson && fmWork.packSnapshot && payload.packSnapshotJson.length < 45_000) {
+          rawBCreate[fmWork.packSnapshot] = payload.packSnapshotJson;
+        }
+        targetBId = await smartBatchCreateRecord(cfg, cfg.tables.works, workFieldsMeta, rawBCreate);
+      }
+    } else {
+      workLabel = workLabel || (payload.title || '当前作品').slice(0, 28);
+    }
 
-  if (radar.hasConflict && !payload.force) {
+    // 3. 回写原有 C 发布记录行：统一将本次发布时间（含定时发布时间或立即发布时间）回填至「真实发布日期」，完全不碰计划发布时间！
+    const desiredStatus = isScheduled ? cfg.statusValues.pubScheduled : cfg.statusValues.pubPublished;
+    const rawCFields = {
+      [fmPub.status]: desiredStatus,
+    };
+    if (targetBId && fmPub.workLink) rawCFields[fmPub.workLink] = [targetBId];
+    if (accountId && fmPub.accountLink) rawCFields[fmPub.accountLink] = [accountId];
+    if (fmPub.platformText) rawCFields[fmPub.platformText] = platCn;
+    if (fmPub.workTitleText && workLabel) rawCFields[fmPub.workTitleText] = workLabel;
+    if (fmPub.publishedAt) rawCFields[fmPub.publishedAt] = targetMs;
+    if (payload.title && fmPub.title) rawCFields[fmPub.title] = payload.title;
+    if (payload.body && fmPub.body) rawCFields[fmPub.body] = payload.body.slice(0, 2000);
+    if (Array.isArray(payload.tags) && payload.tags.length > 0 && fmPub.tags) {
+      rawCFields[fmPub.tags] = payload.tags;
+    }
+    if (payload.postUrl && fmPub.postUrl) rawCFields[fmPub.postUrl] = payload.postUrl;
+    if (payload.notes && fmPub.notes) rawCFields[fmPub.notes] = payload.notes;
+
+    // 防重终极防线：若尚未拿到 targetCId，新建前强制拉取一次最新 C 表，确保同一账号同一内容绝不重复建第二条记录！
+    let latestCRows = cRows;
+    if (!targetCId && cfg.tables.publishes) {
+      latestCRows = await listAllRecords(cfg, cfg.tables.publishes, 500);
+      const freshExistC = findBestExistingPublishRecord(latestCRows, fmPub, {
+        targetBId,
+        accountId,
+        platCn,
+        titleHint: payload.title || workLabel,
+      });
+      if (freshExistC) {
+        targetCId = freshExistC.record_id;
+      }
+    }
+
+    let cWriteRes = null;
+    if (targetCId) {
+      cWriteRes = await smartBatchUpdateRecord(cfg, cfg.tables.publishes, targetCId, pubFieldsMeta, rawCFields);
+    } else {
+      targetCId = await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, rawCFields);
+    }
+
+    const statusDelegatedToAutomation =
+      cfg.statusSyncMode === 'time_only' ||
+      Boolean(cWriteRes?.skippedSingleSelect) ||
+      dynamicSingleSelectTables.has(cfg.tables.publishes);
+
+    let bAutoClosed = false;
+    if (
+      !statusDelegatedToAutomation &&
+      cfg.schemaMode === 'multi_table' &&
+      cfg.tables.works &&
+      targetBId &&
+      bById.has(targetBId) &&
+      /已发布|C21/.test(desiredStatus)
+    ) {
+      const curB = bById.get(targetBId);
+      const curBSt = cellText(curB.fields[fmWork.status]);
+      if (/等待发布|B12/.test(curBSt)) {
+        const siblingStates = [];
+        let matchedExisting = false;
+        for (const cr of latestCRows) {
+          const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
+          if (!bIds.includes(targetBId)) continue;
+          if (cr.record_id === targetCId) {
+            siblingStates.push(desiredStatus);
+            matchedExisting = true;
+          } else {
+            siblingStates.push(cellText(cr.fields[fmPub.status]));
+          }
+        }
+        if (!matchedExisting) siblingStates.push(desiredStatus);
+        const allTerminal =
+          siblingStates.length > 0 &&
+          siblingStates.every((s) => /已发布|取消|暂不发布|C21|C23/.test(s)) &&
+          siblingStates.some((s) => /已发布|C21/.test(s));
+        if (allTerminal) {
+          await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, {
+            [fmWork.status]: cfg.statusValues.workCompleted || 'B21已完成',
+          })
+            .then((res) => {
+              bAutoClosed = !res?.skippedSingleSelect;
+            })
+            .catch(() => {});
+        }
+      }
+    }
+
+    invalidateFeishuMemCache();
+    const modeCn = isScheduled ? `定时 ${timeStr.slice(5)}` : `立即发布 (${timeStr.slice(11)})`;
+    const closeSuffix = statusDelegatedToAutomation
+      ? '（时间与文案已落表，状态交由飞书自动化流转）'
+      : bAutoClosed
+        ? '（全渠道收口 → B21已完成）'
+        : '';
     return {
       ok: true,
-      saved: false,
-      needsConfirm: true,
+      saved: true,
+      needsConfirm: false,
+      bRecordId: targetBId,
+      cRecordId: targetCId,
+      bAutoClosed,
+      statusDelegatedToAutomation,
+      workLabel,
       accountName,
-      ...radar,
+      recordedState: desiredStatus,
+      recordedTime: timeStr,
+      summary: `✅ 已同步飞书：${accountName}《${workLabel}》→ ${modeCn}${closeSuffix}`,
     };
-  }
-
-  // 2. 多表模式下：对已有 B 记录顺手备份云端快照（仅当显式勾选 createNewWork 时才新建 B 记录）
-  let workLabel = String(payload.workLabel || '').trim();
-  if (cfg.schemaMode === 'multi_table' && cfg.tables.works) {
-    if (targetBId && bById.has(targetBId)) {
-      const existB = bById.get(targetBId);
-      workLabel = cellText(existB.fields[fmWork.title]) || workLabel || cleanSlug;
-      const bUpdates = {};
-      if (payload.packSnapshotJson && fmWork.packSnapshot) {
-        const curSnap = cellText(existB.fields[fmWork.packSnapshot]);
-        if (curSnap !== payload.packSnapshotJson && payload.packSnapshotJson.length < 45_000) {
-          bUpdates[fmWork.packSnapshot] = payload.packSnapshotJson;
-        }
-      }
-      if (cleanSlug && !cellText(existB.fields[fmWork.slug])) {
-        bUpdates[fmWork.slug] = cleanSlug;
-      }
-      if (payload.title && fmWork.fallbackTitle && !cellText(existB.fields[fmWork.fallbackTitle])) {
-        bUpdates[fmWork.fallbackTitle] = payload.title;
-      }
-      if (payload.body && fmWork.fallbackBody && !cellText(existB.fields[fmWork.fallbackBody])) {
-        bUpdates[fmWork.fallbackBody] = payload.body.slice(0, 1800);
-      }
-      if (Object.keys(bUpdates).length > 0) {
-        await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, bUpdates).catch(() => {});
-      }
-    } else if (payload.createNewWork) {
-      workLabel =
-        workLabel ||
-        (cleanSlug ? cleanSlug.replace(/^\d{8}_/, '') : '') ||
-        (payload.title || '未命名作品').slice(0, 28);
-      const rawBCreate = {
-        [fmWork.title]: workLabel,
-        [fmWork.status]: cfg.statusValues.workReady,
-      };
-      if (accountBrand && fmWork.brand) rawBCreate[fmWork.brand] = accountBrand;
-      if (cleanSlug && fmWork.slug) rawBCreate[fmWork.slug] = cleanSlug;
-      if (payload.title && fmWork.fallbackTitle) rawBCreate[fmWork.fallbackTitle] = payload.title;
-      if (payload.body && fmWork.fallbackBody) rawBCreate[fmWork.fallbackBody] = payload.body.slice(0, 1800);
-      if (payload.packSnapshotJson && fmWork.packSnapshot && payload.packSnapshotJson.length < 45_000) {
-        rawBCreate[fmWork.packSnapshot] = payload.packSnapshotJson;
-      }
-      targetBId = await smartBatchCreateRecord(cfg, cfg.tables.works, workFieldsMeta, rawBCreate);
-    }
-  } else {
-    workLabel = workLabel || (payload.title || '当前作品').slice(0, 28);
-  }
-
-  // 3. 回写原有 C 发布记录行：统一将本次发布时间（含定时发布时间或立即发布时间）回填至「真实发布日期」，完全不碰计划发布时间！
-  const desiredStatus = isScheduled ? cfg.statusValues.pubScheduled : cfg.statusValues.pubPublished;
-  const rawCFields = {
-    [fmPub.status]: desiredStatus,
-  };
-  if (targetBId && fmPub.workLink) rawCFields[fmPub.workLink] = [targetBId];
-  if (accountId && fmPub.accountLink) rawCFields[fmPub.accountLink] = [accountId];
-  if (fmPub.platformText) rawCFields[fmPub.platformText] = platCn;
-  if (fmPub.workTitleText && workLabel) rawCFields[fmPub.workTitleText] = workLabel;
-  if (fmPub.publishedAt) rawCFields[fmPub.publishedAt] = targetMs;
-  if (payload.title && fmPub.title) rawCFields[fmPub.title] = payload.title;
-  if (payload.body && fmPub.body) rawCFields[fmPub.body] = payload.body.slice(0, 2000);
-  if (Array.isArray(payload.tags) && payload.tags.length > 0 && fmPub.tags) {
-    rawCFields[fmPub.tags] = payload.tags;
-  }
-  if (payload.postUrl && fmPub.postUrl) rawCFields[fmPub.postUrl] = payload.postUrl;
-  if (payload.notes && fmPub.notes) rawCFields[fmPub.notes] = payload.notes;
-
-  let cWriteRes = null;
-  if (targetCId) {
-    cWriteRes = await smartBatchUpdateRecord(cfg, cfg.tables.publishes, targetCId, pubFieldsMeta, rawCFields);
-  } else {
-    targetCId = await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, rawCFields);
-  }
-
-  const statusDelegatedToAutomation =
-    cfg.statusSyncMode === 'time_only' ||
-    Boolean(cWriteRes?.skippedSingleSelect) ||
-    dynamicSingleSelectTables.has(cfg.tables.publishes);
-
-  let bAutoClosed = false;
-  if (
-    !statusDelegatedToAutomation &&
-    cfg.schemaMode === 'multi_table' &&
-    cfg.tables.works &&
-    targetBId &&
-    bById.has(targetBId) &&
-    /已发布|C21/.test(desiredStatus)
-  ) {
-    const curB = bById.get(targetBId);
-    const curBSt = cellText(curB.fields[fmWork.status]);
-    if (/等待发布|B12/.test(curBSt)) {
-      const siblingStates = [];
-      let matchedExisting = false;
-      for (const cr of cRows) {
-        const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
-        if (!bIds.includes(targetBId)) continue;
-        if (cr.record_id === targetCId) {
-          siblingStates.push(desiredStatus);
-          matchedExisting = true;
-        } else {
-          siblingStates.push(cellText(cr.fields[fmPub.status]));
-        }
-      }
-      if (!matchedExisting) siblingStates.push(desiredStatus);
-      const allTerminal =
-        siblingStates.length > 0 &&
-        siblingStates.every((s) => /已发布|取消|暂不发布|C21|C23/.test(s)) &&
-        siblingStates.some((s) => /已发布|C21/.test(s));
-      if (allTerminal) {
-        await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, {
-          [fmWork.status]: cfg.statusValues.workCompleted || 'B21已完成',
-        })
-          .then((res) => {
-            bAutoClosed = !res?.skippedSingleSelect;
-          })
-          .catch(() => {});
-      }
-    }
-  }
-
-  invalidateFeishuMemCache();
-  const modeCn = isScheduled ? `定时 ${timeStr.slice(5)}` : `立即发布 (${timeStr.slice(11)})`;
-  const closeSuffix = statusDelegatedToAutomation
-    ? '（时间与文案已落表，状态交由飞书自动化流转）'
-    : bAutoClosed
-      ? '（全渠道收口 → B21已完成）'
-      : '';
-  return {
-    ok: true,
-    saved: true,
-    needsConfirm: false,
-    bRecordId: targetBId,
-    cRecordId: targetCId,
-    bAutoClosed,
-    statusDelegatedToAutomation,
-    workLabel,
-    accountName,
-    recordedState: desiredStatus,
-    recordedTime: timeStr,
-    summary: `✅ 已同步飞书：${accountName}《${workLabel}》→ ${modeCn}${closeSuffix}`,
-  };
+  });
 }
 
 // ==================== Cutcheck 在线审片队列读取 & 按需拉取发布任务与状态 ====================
@@ -1796,44 +1903,58 @@ function buildCTasksMapByBId(z3Rows, cRows, fmAcc, fmPub) {
     );
   }
 
-  const cTasksByBId = new Map();
+  // 按 (bRecordId, 唯一账号标识) 严格去重，遵循「一个账号一条内容」铁律（自动剔除防重拦截行，同号重复行仅保留最高优主记录）
+  const dedupByBId = new Map();
   for (const cr of cRows) {
     const cf = cr.fields || {};
     const bIds = cellLinkIds(cf[fmPub.workLink]);
     if (!bIds.length) continue;
+    const notes = fmPub.notes ? cellText(cf[fmPub.notes]) : '';
+    if (/防重自动拦截/.test(notes)) continue;
+
     const accIds = cellLinkIds(cf[fmPub.accountLink]);
     const accountName =
       (accIds[0] && accNameById.get(accIds[0])) ||
       cellText(cf[fmPub.accountText]) ||
       cellText(cf[fmPub.platformText]) ||
       '未指定账号';
+    const accKey = accIds[0] || accountName;
     const cSerialNo = fmPub.serialNo ? cellText(cf[fmPub.serialNo]) : '';
     const cStatus = cellText(cf[fmPub.status]) || 'C00未发布';
     const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
     const isPublished = /C21|已发布|已完成/.test(cStatus) || Boolean(pubMs);
     const isCancelled = /取消|废弃|暂不发布|C22|C23|C24/.test(cStatus);
+    const taskObj = {
+      cRecordId: cr.record_id,
+      cSerialNo,
+      accountName,
+      cStatus,
+      publishedAt: pubMs ? formatMsLocalHM(pubMs) : '',
+      isPublished,
+      isCancelled,
+    };
+
     for (const bid of bIds) {
-      if (!cTasksByBId.has(bid)) cTasksByBId.set(bid, []);
-      cTasksByBId.get(bid).push({
-        cRecordId: cr.record_id,
-        cSerialNo,
-        accountName,
-        cStatus,
-        publishedAt: pubMs ? formatMsLocalHM(pubMs) : '',
-        isPublished,
-        isCancelled,
-      });
+      if (!dedupByBId.has(bid)) dedupByBId.set(bid, new Map());
+      const accMap = dedupByBId.get(bid);
+      const prevEntry = accMap.get(accKey);
+      if (!prevEntry || shouldPreferPublishRecord(prevEntry.cr, cr, fmPub, '')) {
+        accMap.set(accKey, { cr, task: taskObj });
+      }
     }
   }
 
+  const cTasksByBId = new Map();
   // 待发布任务排在前面，已发布/已取消置灰任务排在后面，一目了然
-  for (const list of cTasksByBId.values()) {
+  for (const [bid, accMap] of dedupByBId.entries()) {
+    const list = Array.from(accMap.values()).map((e) => e.task);
     list.sort((a, b) => {
       const doneA = a.isPublished || a.isCancelled ? 1 : 0;
       const doneB = b.isPublished || b.isCancelled ? 1 : 0;
       if (doneA !== doneB) return doneA - doneB;
       return a.accountName.localeCompare(b.accountName, 'zh-CN');
     });
+    cTasksByBId.set(bid, list);
   }
   return cTasksByBId;
 }
@@ -1862,52 +1983,13 @@ async function queryFeishuReviewQueue(params = {}) {
   const fmWork = cfg.fieldMap.works;
   const fmPub = cfg.fieldMap.publishes;
 
-  // 默认审片列表仅读取 B 内容运营表（1次请求极速返回）；仅当用户点击「获取发布任务 / 刷新状态」时才拉取 C 发布记录表！
+  // 100% 纯只读查询（绝不在插件端代建 C 发布记录行，避免与飞书原生自动化并发撞车产生重复行！）
   let bRows = [];
   let cTasksByBId = null;
   if (includePublishTasks) {
-    let snap = await fetchBaseTablesSnapshot(cfg, { forceRefresh: Boolean(params.forceRefresh) });
+    const snap = await fetchBaseTablesSnapshot(cfg, { forceRefresh: Boolean(params.forceRefresh) });
     bRows = snap.bRows;
     cTasksByBId = buildCTasksMapByBId(snap.z3Rows, snap.cRows, fmAcc, fmPub);
-
-    // 若目标多维表尚未配置飞书自动化，用户主动点「获取发布任务」且当前已审片作品仍无任何 C 表记录时，兜底补齐 C00 待发记录
-    if (params.ensureIfEmpty && cfg.tables.publishes && cfg.tables.accounts) {
-      const hitBRow =
-        (explicitBId && bRows.find((r) => r.record_id === explicitBId)) ||
-        (cleanSlug && bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug)) ||
-        null;
-      if (hitBRow) {
-        const hitItem = formatWorkReviewItem(hitBRow, fmWork, cTasksByBId);
-        if (hitItem.isApproved && hitItem.cTasks.length === 0) {
-          try {
-            const pubFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.publishes);
-            const brandAccounts = snap.z3Rows.filter((ar) => {
-              const b = cellText(ar.fields[fmAcc.brand]);
-              const st = cellText(ar.fields[fmAcc.status]);
-              if (hitItem.brand && b && b !== hitItem.brand) return false;
-              return !st || /运营中|启用|正常|Z310/i.test(st);
-            });
-            let createdAny = false;
-            for (const acc of brandAccounts) {
-              await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, {
-                [fmPub.workLink]: [hitBRow.record_id],
-                [fmPub.accountLink]: [acc.record_id],
-                [fmPub.status]: cfg.statusValues?.pubPending || 'C00未发布',
-              });
-              createdAny = true;
-            }
-            if (createdAny) {
-              invalidateFeishuMemCache();
-              snap = await fetchBaseTablesSnapshot(cfg, { forceRefresh: true });
-              bRows = snap.bRows;
-              cTasksByBId = buildCTasksMapByBId(snap.z3Rows, snap.cRows, fmAcc, fmPub);
-            }
-          } catch {
-            // ignore fallback creation error
-          }
-        }
-      }
-    }
   } else {
     bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: Boolean(params.forceRefresh) });
   }
@@ -1970,88 +2052,136 @@ async function approveWorkReviewInFeishu(payload = {}) {
   const explicitBId = String(payload.bRecordId || '').trim();
   const cleanSlug = extractCleanWorkSlug(payload.workSlug || payload.videoPath || '');
   const projectHint = String(payload.project || '').trim();
+  const approveLockKey = `approve_review|${cfg.baseToken}|${explicitBId || cleanSlug || normalizeTitleKey(projectHint)}`;
 
-  const bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: false });
-  let targetBRow = null;
-  if (explicitBId) {
-    targetBRow = bRows.find((r) => r.record_id === explicitBId) || null;
-  }
-  if (!targetBRow && cleanSlug) {
-    targetBRow = bRows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug) || null;
-  }
-  if (!targetBRow && projectHint) {
-    const pNorm = normalizeTitleKey(projectHint.replace(/^\d{8}_/, ''));
-    if (pNorm.length >= 2) {
-      targetBRow =
-        bRows.find((r) => normalizeTitleKey(cellText(r.fields[fmWork.title])) === pNorm) || null;
-    }
-  }
-  if (!targetBRow) {
-    throw new Error('未在飞书 B 内容运营表中定位到当前作品记录，请先从待审下拉框选择对应作品');
-  }
-
-  const targetBId = targetBRow.record_id;
-  const workTitle = cellText(targetBRow.fields[fmWork.title]) || cleanSlug || targetBId;
-  const workSlug = extractCleanWorkSlug(cellText(targetBRow.fields[fmWork.slug])) || cleanSlug;
-
-  // 优先走缓存表头，仅在尚未发现「审片通过时间」列时才请求一次表结构接口
-  let workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: false });
-  let approvedCol = fmWork.approvedAt || '审片通过时间';
-  if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
-    workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
-  }
-  if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
-    const altCol = workFieldsMeta.find((f) => /审片.*时间|审核.*时间/.test(f.field_name));
-    if (altCol) {
-      approvedCol = altCol.field_name;
-    } else {
-      try {
-        await feishuApiRequest(cfg, 'POST', `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.works}/fields`, {
-          body: {
-            field_name: approvedCol,
-            type: 5,
-            property: { auto_fill: false, date_formatter: 'yyyy-MM-dd HH:mm' },
-          },
-        });
-        workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
-      } catch {
-        // 若当前 Token 无建列权限则跳过建列
+  return coalesceInflightWrite(approveLockKey, async () => {
+    if (explicitBId) {
+      const recentHit = recentApprovedWorksMap.get(`${cfg.baseToken}|${explicitBId}`);
+      if (recentHit && Date.now() - recentHit.ts < RECENT_APPROVE_TTL_MS) {
+        return { ...recentHit.res, alreadyApproved: true };
       }
     }
-  }
 
-  const nowMs = Date.now();
-  const desiredStatus = cfg.statusValues?.workReady || 'B12等待发布至平台';
-  const rawBUpdate = {
-    [approvedCol]: nowMs,
-    [fmWork.status]: desiredStatus,
-  };
-  await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, rawBUpdate);
-  invalidateFeishuMemCache();
+    const cacheAgeMs = Date.now() - Math.max(memWorksCache.ts || 0, memQueryCache.ts || 0);
+    let bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: cacheAgeMs > 2500 });
+    const locateTargetBRow = (rows) => {
+      let hit = null;
+      if (explicitBId) {
+        hit = rows.find((r) => r.record_id === explicitBId) || null;
+      }
+      if (!hit && cleanSlug) {
+        hit = rows.find((r) => extractCleanWorkSlug(cellText(r.fields[fmWork.slug])) === cleanSlug) || null;
+      }
+      if (!hit && projectHint) {
+        const pNorm = normalizeTitleKey(projectHint.replace(/^\d{8}_/, ''));
+        if (pNorm.length >= 2) {
+          hit = rows.find((r) => normalizeTitleKey(cellText(r.fields[fmWork.title])) === pNorm) || null;
+        }
+      }
+      return hit;
+    };
 
-  // 审片通过完成后立即返回（默认不自动拉取 C 发布记录表，避免飞书自动化尚未建完或额外消耗 QPS；由用户按需点击「获取发布任务」拉取）
-  const remainingPending = bRows
-    .filter((br) => br.record_id !== targetBId)
-    .map((br) => formatWorkReviewItem(br, fmWork, null))
-    .filter((it) => !it.isApproved && (/B11|待审核/.test(it.status) || (/B10|制作中/.test(it.status) && Boolean(it.slug))))
-    .sort((a, b) => {
-      if (a.priority !== b.priority) return b.priority - a.priority;
-      return (b.slug || b.title).localeCompare(a.slug || a.title, 'zh-CN', { numeric: true });
-    });
+    let targetBRow = locateTargetBRow(bRows);
+    if (!targetBRow && cacheAgeMs <= 2500) {
+      bRows = await fetchWorksOnlyRows(cfg, { forceRefresh: true });
+      targetBRow = locateTargetBRow(bRows);
+    }
+    if (!targetBRow) {
+      throw new Error('未在飞书 B 内容运营表中定位到当前作品记录，请先从待审下拉框选择对应作品');
+    }
 
-  return {
-    ok: true,
-    approved: true,
-    bRecordId: targetBId,
-    title: workTitle,
-    slug: workSlug,
-    newStatus: desiredStatus,
-    approvedAtStr: formatMsLocalHM(nowMs),
-    cTasks: [],
-    tasksLoaded: false,
-    pendingWorks: remainingPending,
-    summary: `✅ 《${workTitle}》已同步审片通过！如需分发可点「📥 获取发布任务」`,
-  };
+    const targetBId = targetBRow.record_id;
+    const recentByBId = recentApprovedWorksMap.get(`${cfg.baseToken}|${targetBId}`);
+    if (recentByBId && Date.now() - recentByBId.ts < RECENT_APPROVE_TTL_MS) {
+      return { ...recentByBId.res, alreadyApproved: true };
+    }
+
+    const workTitle = cellText(targetBRow.fields[fmWork.title]) || cleanSlug || targetBId;
+    const workSlug = extractCleanWorkSlug(cellText(targetBRow.fields[fmWork.slug])) || cleanSlug;
+    const curReviewState = formatWorkReviewItem(targetBRow, fmWork, null);
+
+    const buildRemainingPending = (rows) =>
+      rows
+        .filter((br) => br.record_id !== targetBId)
+        .map((br) => formatWorkReviewItem(br, fmWork, null))
+        .filter((it) => !it.isApproved && (/B11|待审核/.test(it.status) || (/B10|制作中/.test(it.status) && Boolean(it.slug))))
+        .sort((a, b) => {
+          if (a.priority !== b.priority) return b.priority - a.priority;
+          return (b.slug || b.title).localeCompare(a.slug || a.title, 'zh-CN', { numeric: true });
+        });
+
+    // 审片幂等防重闸门：若该作品已处于「B12等待发布 / B21已完成」或已填「审片通过时间」，直接零写入幂等返回，绝不二次触发自动化！
+    if (curReviewState.isApproved) {
+      const idempRes = {
+        ok: true,
+        approved: true,
+        alreadyApproved: true,
+        bRecordId: targetBId,
+        title: workTitle,
+        slug: workSlug,
+        newStatus: curReviewState.status || cfg.statusValues?.workReady || 'B12等待发布至平台',
+        approvedAtStr: curReviewState.approvedAt || formatMsLocalHM(Date.now()),
+        cTasks: [],
+        tasksLoaded: false,
+        pendingWorks: buildRemainingPending(bRows),
+        summary: `✅ 《${workTitle}》已完成审片通过（防重保护生效，未重复触发建单），可点「📥 获取发布任务」查看`,
+      };
+      recentApprovedWorksMap.set(`${cfg.baseToken}|${targetBId}`, { ts: Date.now(), res: idempRes });
+      return idempRes;
+    }
+
+    // 优先走缓存表头，仅在尚未发现「审片通过时间」列时才请求一次表结构接口
+    let workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: false });
+    let approvedCol = fmWork.approvedAt || '审片通过时间';
+    if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
+      workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
+    }
+    if (!workFieldsMeta.some((f) => f.field_name === approvedCol)) {
+      const altCol = workFieldsMeta.find((f) => /审片.*时间|审核.*时间/.test(f.field_name));
+      if (altCol) {
+        approvedCol = altCol.field_name;
+      } else {
+        try {
+          await feishuApiRequest(cfg, 'POST', `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.works}/fields`, {
+            body: {
+              field_name: approvedCol,
+              type: 5,
+              property: { auto_fill: false, date_formatter: 'yyyy-MM-dd HH:mm' },
+            },
+          });
+          workFieldsMeta = await getTableFieldsMeta(cfg, cfg.tables.works, { forceRefresh: true });
+        } catch {
+          // 若当前 Token 无建列权限则跳过建列
+        }
+      }
+    }
+
+    const nowMs = Date.now();
+    const desiredStatus = cfg.statusValues?.workReady || 'B12等待发布至平台';
+    const rawBUpdate = {
+      [approvedCol]: nowMs,
+      [fmWork.status]: desiredStatus,
+    };
+    await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, rawBUpdate);
+    invalidateFeishuMemCache();
+
+    const finalRes = {
+      ok: true,
+      approved: true,
+      alreadyApproved: false,
+      bRecordId: targetBId,
+      title: workTitle,
+      slug: workSlug,
+      newStatus: desiredStatus,
+      approvedAtStr: formatMsLocalHM(nowMs),
+      cTasks: [],
+      tasksLoaded: false,
+      pendingWorks: buildRemainingPending(bRows),
+      summary: `✅ 《${workTitle}》已同步审片通过！如需分发可点「📥 获取发布任务」`,
+    };
+    recentApprovedWorksMap.set(`${cfg.baseToken}|${targetBId}`, { ts: Date.now(), res: finalRes });
+    return finalRes;
+  });
 }
 
 self.PPFFeishuClient = {
@@ -2065,6 +2195,7 @@ self.PPFFeishuClient = {
   syncPrePublishToFeishu,
   queryFeishuReviewQueue,
   approveWorkReviewInFeishu,
+  buildCTasksMapByBId,
   extractCleanWorkSlug,
   buildSafeWriteFields,
   buildSafeV3WriteFields,

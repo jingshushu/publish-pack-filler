@@ -124,6 +124,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   win.window = win;
 
   let ccApprovedInMock = false;
+  let ccApproveCallCount = 0;
   let ccBiliPublishedInMock = false;
   let syncedTimeInFeishu = '';
   const timers = [];
@@ -178,7 +179,8 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: '2.5.1' }),
+        getManifest: () =>
+          JSON.parse(fs.readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8')),
         sendMessage: (msg, cb) => {
           if (msg.type === 'PPF_FEISHU_QUERY_REVIEW_QUEUE') {
             const wantTasks = Boolean(msg.params?.includePublishTasks);
@@ -256,6 +258,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
             return;
           }
           if (msg.type === 'PPF_FEISHU_APPROVE_REVIEW') {
+            ccApproveCallCount++;
             ccApprovedInMock = true;
             cb?.({
               ok: true,
@@ -386,6 +389,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
     markMockBiliPublished: () => {
       ccBiliPublishedInMock = true;
     },
+    getApproveCallCount: () => ccApproveCallCount,
     getShadowRoot: () => lastShadowRoot,
     flushTimers: async () => {
       while (timers.length > 0) {
@@ -492,7 +496,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.1');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.2');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
@@ -523,10 +527,11 @@ ccToggleLayout.onclick();
 assert.equal(ccEnv.docEl.style.paddingRight || '', '', '切换为自由悬浮窗后应释放网页右侧边距');
 assert.ok(ccShadow.children.map((c) => c.innerHTML).join('\n').includes('ppf-resize-sw'), '自由悬浮窗模式必须提供自由拖拽缩放柄');
 
-// 一键审片通过：默认不自动拉取发布任务，展示「📥 获取发布任务」与「🔄 刷新状态」入口
+// 一键审片通过（模拟手抖连续三连击按钮）：同步防重锁拦截连点，仅发 1 次审片消息，默认不自动拉取发布任务
 const ccApproveBtn = ccShadow.getElementById('ppf-cc-approve-btn');
 assert.ok(ccApproveBtn && typeof ccApproveBtn.onclick === 'function', '必须渲染一键审片通过按钮');
-await ccApproveBtn.onclick();
+await Promise.all([ccApproveBtn.onclick(), ccApproveBtn.onclick(), ccApproveBtn.onclick()]);
+assert.equal(ccEnv.getApproveCallCount(), 1, '连续三连击审片按钮必须严格去重，仅发送 1 次 PPF_FEISHU_APPROVE_REVIEW 请求');
 const ccHtmlAfterApprove = ccShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(ccHtmlAfterApprove.includes('B12等待发布至平台'), '点击审片通过后必须展示 B12 状态');
 assert.ok(!ccHtmlAfterApprove.includes('ppf-cc-tasks-wrap'), '审片完成后默认绝不自动拉取发布任务');
