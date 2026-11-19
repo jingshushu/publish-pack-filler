@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.0.1) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.0.2) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -5495,7 +5495,7 @@
             setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
           }
         }
-        if (changes.ppf_feishu_config_v2) {
+        if (changes.ppf_feishu_config_v1 || changes.ppf_feishu_config_v2) {
           refreshFeishuPublishContext(true);
         }
         if (changes[STORAGE_KEY_PACK]) {

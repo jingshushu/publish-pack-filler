@@ -63,6 +63,7 @@ const DEFAULT_FEISHU_CONFIG = {
   statusValues: {
     accountActive: 'Z310运营中',
     workReady: 'B12等待发布至平台',
+    workCompleted: 'B21已完成',
     pubPending: 'C00未发布',
     pubScheduled: 'C10等待定时发布',
     pubPublished: 'C21已发布',
@@ -258,13 +259,14 @@ async function feishuApiRequest(cfg, method, path, { params = null, body = null 
   const res = await fetch(url, init);
   const json = await res.json().catch(() => ({}));
   if (!res.ok || (typeof json.code === 'number' && json.code !== 0)) {
-    const code = json.code ?? res.status;
-    let hint = json.msg || `HTTP ${res.status}`;
+    const code = json.code ?? json.error?.code ?? res.status;
+    let hint = json.msg || json.message || json.error?.message || `HTTP ${res.status}`;
     if (code === 91403 || code === 1254302) {
       hint += '（请确认已在多维表格右上角「... -> 添加文档应用」将机器人加入并设为可编辑，且应用已开通 bitable:app 权限）';
     }
     const err = new Error(`飞书接口错误 (${code}): ${hint}`);
     err.feishuCode = code;
+    err.httpStatus = res.status;
     throw err;
   }
   return json.data || {};
@@ -564,12 +566,53 @@ function platformMatches(rowPlatText, targetPlatCn) {
   return Boolean(a && b && a === b);
 }
 
-// 根据飞书真实字段类型安全组装写入对象（自动处理单选选项模糊匹配、日期毫秒戳、URL对象、关联ID数组，忽略不存在的列）
-function buildSafeWriteFields(fieldsMeta, rawEntries) {
+function resolveSingleSelectOptionName(meta, rawVal) {
+  const desired = Array.isArray(rawVal) ? String(rawVal[0] || '').trim() : String(rawVal).trim();
+  if (!desired) return '';
+  const opts = meta?.property?.options || [];
+  if (opts.length > 0) {
+    const exact = opts.find((o) => o.name === desired);
+    const fuzzy =
+      exact ||
+      opts.find((o) => o.name.includes(desired) || desired.includes(o.name)) ||
+      (/定时/.test(desired) && opts.find((o) => /定时|排期|C10/.test(o.name))) ||
+      (/已发布|已完成/.test(desired) && opts.find((o) => /已发布|已完成|C21|B21/.test(o.name))) ||
+      (/未发布|待发布/.test(desired) && opts.find((o) => /未发布|待发布|C00|B12/.test(o.name)));
+    return fuzzy ? fuzzy.name : desired;
+  }
+  return desired;
+}
+
+function resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly = false) {
+  const arr = Array.isArray(rawVal)
+    ? rawVal
+    : String(rawVal)
+        .split(/[,，\s#]+/)
+        .filter(Boolean);
+  const cleaned = arr.map((x) => String(x).replace(/^#+/, '').trim()).filter(Boolean);
+  const opts = meta?.property?.options || [];
+  if (!opts.length) {
+    return strictKnownOptionsOnly ? [] : cleaned;
+  }
+  const byLower = new Map(opts.map((o) => [String(o.name || '').toLowerCase(), o.name]));
+  const result = [];
+  for (const item of cleaned) {
+    const known = byLower.get(item.toLowerCase());
+    if (known) {
+      if (!result.includes(known)) result.push(known);
+    } else if (!strictKnownOptionsOnly) {
+      if (!result.includes(item)) result.push(item);
+    }
+  }
+  return result;
+}
+
+// 组装飞书 Bitable v1 接口字段格式（适用于个人授权码 pt-... 模式及普通单选表）
+function buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly = false } = {}) {
   const byName = new Map();
   for (const f of fieldsMeta || []) {
-    // 跳过公式(20)、查找引用(19)、创建时间(1001)、自动编号(1005) 等只读字段
-    if ([19, 20, 1001, 1002, 1003, 1004, 1005].includes(f.type)) continue;
+    // 跳过公式(20)、查找引用(19)、按钮(3001)、创建时间(1001)、自动编号(1005) 等只读字段
+    if ([19, 20, 1001, 1002, 1003, 1004, 1005, 3001].includes(f.type)) continue;
     byName.set(f.field_name, f);
   }
 
@@ -586,6 +629,7 @@ function buildSafeWriteFields(fieldsMeta, rawEntries) {
 
     switch (meta.type) {
       case 1: // Text
+      case 13: // Phone
         out[colName] = String(rawVal);
         break;
       case 2: { // Number
@@ -593,34 +637,17 @@ function buildSafeWriteFields(fieldsMeta, rawEntries) {
         if (!Number.isNaN(n)) out[colName] = n;
         break;
       }
-      case 3: { // SingleSelect
-        const desired = Array.isArray(rawVal) ? String(rawVal[0] || '').trim() : String(rawVal).trim();
-        if (!desired) break;
-        const opts = meta.property?.options || [];
-        if (opts.length > 0) {
-          const exact = opts.find((o) => o.name === desired);
-          const fuzzy =
-            exact ||
-            opts.find((o) => o.name.includes(desired) || desired.includes(o.name)) ||
-            (/定时/.test(desired) && opts.find((o) => /定时|排期|C10/.test(o.name))) ||
-            (/已发布|已完成/.test(desired) && opts.find((o) => /已发布|已完成|C21|B21/.test(o.name))) ||
-            (/未发布|待发布/.test(desired) && opts.find((o) => /未发布|待发布|C00|B12/.test(o.name)));
-          out[colName] = fuzzy ? fuzzy.name : desired;
-        } else {
-          out[colName] = desired;
-        }
+      case 3: { // SingleSelect (v1 传纯字符串)
+        const optName = resolveSingleSelectOptionName(meta, rawVal);
+        if (optName) out[colName] = optName;
         break;
       }
       case 4: { // MultiSelect
-        const arr = Array.isArray(rawVal)
-          ? rawVal
-          : String(rawVal)
-              .split(/[,，\s#]+/)
-              .filter(Boolean);
-        out[colName] = arr.map((x) => String(x).replace(/^#+/, '').trim()).filter(Boolean);
+        const multi = resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly);
+        if (multi.length > 0) out[colName] = multi;
         break;
       }
-      case 5: { // DateTime
+      case 5: { // DateTime (v1 传毫秒时间戳)
         const ms = parseDateTimeMs(rawVal);
         if (ms !== null) out[colName] = ms;
         break;
@@ -634,7 +661,7 @@ function buildSafeWriteFields(fieldsMeta, rawEntries) {
         break;
       }
       case 18:
-      case 21: { // SingleLink / DuplexLink
+      case 21: { // SingleLink / DuplexLink (v1 传 ["recXXX"])
         const ids = Array.isArray(rawVal)
           ? rawVal.map((x) => (typeof x === 'object' ? x.id : String(x))).filter(Boolean)
           : [String(rawVal)].filter(Boolean);
@@ -646,6 +673,183 @@ function buildSafeWriteFields(fieldsMeta, rawEntries) {
     }
   }
   return out;
+}
+
+// 组装飞书 Base v3 接口字段格式（完美兼容飞书「引用选项 dynamic_options_source」全局状态流转列，彻底解决 v1 的 1254062 SingleSelectFieldConvFail！）
+function buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly = false } = {}) {
+  const byName = new Map();
+  for (const f of fieldsMeta || []) {
+    if ([19, 20, 1001, 1002, 1003, 1004, 1005, 3001].includes(f.type)) continue;
+    byName.set(f.field_name, f);
+  }
+
+  const out = {};
+  for (const [colName, rawVal] of Object.entries(rawEntries)) {
+    if (!colName || rawVal === undefined) continue;
+    const meta = byName.get(colName);
+    if (!meta) continue;
+
+    if (rawVal === null) {
+      out[colName] = null;
+      continue;
+    }
+
+    switch (meta.type) {
+      case 1: // Text
+      case 13: // Phone
+        out[colName] = String(rawVal);
+        break;
+      case 2: { // Number
+        const n = Number(rawVal);
+        if (!Number.isNaN(n)) out[colName] = n;
+        break;
+      }
+      case 3: { // SingleSelect (Base v3 传单元素字符串数组 ["C10等待定时发布"])
+        const optName = resolveSingleSelectOptionName(meta, rawVal);
+        if (optName) out[colName] = [optName];
+        break;
+      }
+      case 4: { // MultiSelect
+        const multi = resolveMultiSelectOptionNames(meta, rawVal, strictKnownOptionsOnly);
+        if (multi.length > 0) out[colName] = multi;
+        break;
+      }
+      case 5: { // DateTime (Base v3 传本地标准时间字符串 "YYYY-MM-DD HH:mm")
+        const ms = parseDateTimeMs(rawVal);
+        if (ms !== null) out[colName] = formatMsLocalHM(ms);
+        break;
+      }
+      case 7: // Checkbox
+        out[colName] = Boolean(rawVal);
+        break;
+      case 15: { // Url (Base v3 传纯链接字符串)
+        const u = typeof rawVal === 'object' ? rawVal.link || rawVal.url || '' : String(rawVal).trim();
+        if (u) out[colName] = u;
+        break;
+      }
+      case 18:
+      case 21: { // SingleLink / DuplexLink (Base v3 传 [{"id": "recXXX"}])
+        const ids = Array.isArray(rawVal)
+          ? rawVal.map((x) => (typeof x === 'object' ? x.id : String(x))).filter(Boolean)
+          : [String(rawVal)].filter(Boolean);
+        if (ids.length) out[colName] = ids.map((id) => ({ id }));
+        break;
+      }
+      default:
+        out[colName] = rawVal;
+    }
+  }
+  return out;
+}
+
+// 双协议自适应写入引擎：自建应用模式优先走 Base v3（原生支持动态引用选项状态列，零 1254062 报错），并在动态标签库遇到新词报 800010409 时自动过滤未知新词重试；个人授权码模式自动走 v1。
+async function smartBatchUpdateRecord(cfg, tableId, recordId, fieldsMeta, rawEntries) {
+  if (cfg.authType !== 'personal_token') {
+    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
+    if (Object.keys(v3Fields).length === 0) return;
+    try {
+      await feishuApiRequest(
+        cfg,
+        'POST',
+        `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+        { body: { update_records: { [recordId]: v3Fields } } }
+      );
+      return;
+    } catch (err) {
+      // 若多选字段引用了动态标签表且遇到未收录新词 (800010409 validation_error)，自动收敛为仅保留已收录标签重试
+      if (err?.feishuCode === 800010409 || /validation_error/i.test(err?.message || '')) {
+        const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+        if (Object.keys(v3Strict).length > 0) {
+          await feishuApiRequest(
+            cfg,
+            'POST',
+            `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+            { body: { update_records: { [recordId]: v3Strict } } }
+          );
+          return;
+        }
+      }
+      // 仅当网关不支持 base/v3 (404) 时降级尝试 v1
+      if (err?.httpStatus !== 404) {
+        throw err;
+      }
+    }
+  }
+
+  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
+  if (Object.keys(v1Fields).length === 0) return;
+  try {
+    await feishuApiRequest(
+      cfg,
+      'POST',
+      `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+      { body: { records: [{ record_id: recordId, fields: v1Fields }] } }
+    );
+  } catch (err) {
+    if (/MultiSelectFieldConvFail/i.test(err?.message || '')) {
+      const v1Strict = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+      await feishuApiRequest(
+        cfg,
+        'POST',
+        `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_update`,
+        { body: { records: [{ record_id: recordId, fields: v1Strict }] } }
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
+async function smartBatchCreateRecord(cfg, tableId, fieldsMeta, rawEntries) {
+  if (cfg.authType !== 'personal_token') {
+    const v3Fields = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
+    try {
+      const created = await feishuApiRequest(
+        cfg,
+        'POST',
+        `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+        { body: { create_records: [v3Fields] } }
+      );
+      return created.record_id_list?.[0] || created.records?.[0]?.record_id || '';
+    } catch (err) {
+      if (err?.feishuCode === 800010409 || /validation_error/i.test(err?.message || '')) {
+        const v3Strict = buildSafeV3WriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+        const created = await feishuApiRequest(
+          cfg,
+          'POST',
+          `/open-apis/base/v3/bases/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+          { body: { create_records: [v3Strict] } }
+        );
+        return created.record_id_list?.[0] || created.records?.[0]?.record_id || '';
+      }
+      if (err?.httpStatus !== 404) {
+        throw err;
+      }
+    }
+  }
+
+  const v1Fields = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: false });
+  try {
+    const created = await feishuApiRequest(
+      cfg,
+      'POST',
+      `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+      { body: { records: [{ fields: v1Fields }] } }
+    );
+    return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
+  } catch (err) {
+    if (/MultiSelectFieldConvFail/i.test(err?.message || '')) {
+      const v1Strict = buildSafeWriteFields(fieldsMeta, rawEntries, { strictKnownOptionsOnly: true });
+      const created = await feishuApiRequest(
+        cfg,
+        'POST',
+        `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${tableId}/records/batch_create`,
+        { body: { records: [{ fields: v1Strict }] } }
+      );
+      return created.records?.[0]?.record_id || created.record_id_list?.[0] || '';
+    }
+    throw err;
+  }
 }
 
 // ==================== 核心业务 1：匹配账号、拉取待发作品关联池（含云端兜底）与 6h 排期防撞雷达 ====================
@@ -846,12 +1050,13 @@ async function queryFeishuPublishContext(params = {}) {
       const linkedC = cByBIdForAcc.get(br.record_id);
       const cSt = linkedC ? cellText(linkedC.fields[fmPub.status]) : '';
       const isPendingOnThisPlat = !cSt || /未发布|待发布|定时|上传中|C00|C10/.test(cSt);
-      const isReadyB = /待审核|等待发布|制作中|已完成|B10|B11|B12|B21/.test(bSt) || !bSt;
+      // P1 审片闸门保护：默认仅纳入已审片放行的 B12等待发布至平台 / B21已完成 作品，拦截 B00/B10/B11 未审作品防误发
+      const isReadyB = /等待发布|已完成|B12|B21/.test(bSt);
       if (!isPendingOnThisPlat && br.record_id !== explicitBId && linkedC?.record_id !== explicitCId) {
         // 已在本平台发完的作品放低优先级，仅保留少量近期项以备重发核对
         continue;
       }
-      if (!isReadyB) continue;
+      if (!isReadyB && br.record_id !== explicitBId && linkedC?.record_id !== explicitCId) continue;
 
       const label = cellText(bf[fmWork.title]) || cellText(bf[fmWork.slug]) || br.record_id;
       const slug = extractCleanWorkSlug(cellText(bf[fmWork.slug]));
@@ -1042,13 +1247,12 @@ async function syncPrePublishToFeishu(payload = {}) {
     };
   }
 
-  // 2. 多表模式下：确保 B 内容表记录存在，并顺手把本机完整发布包快照备份上云（供 NAS 未同步的另一台电脑秒拉兜底！）
+  // 2. 多表模式下：确保 B 内容表记录存在，并顺手把本机完整发布包快照或通用兜底文案备份上云（供 NAS 未同步的另一台电脑秒拉兜底！）
   let workLabel = String(payload.workLabel || '').trim();
   if (cfg.schemaMode === 'multi_table' && cfg.tables.works) {
     if (targetBId && bById.has(targetBId)) {
       const existB = bById.get(targetBId);
       workLabel = cellText(existB.fields[fmWork.title]) || workLabel || cleanSlug;
-      // 若本机传入了完整发布包快照，且 B 表有快照列但尚为空（或内容更新），静默备份上云
       const bUpdates = {};
       if (payload.packSnapshotJson && fmWork.packSnapshot) {
         const curSnap = cellText(existB.fields[fmWork.packSnapshot]);
@@ -1059,14 +1263,14 @@ async function syncPrePublishToFeishu(payload = {}) {
       if (cleanSlug && !cellText(existB.fields[fmWork.slug])) {
         bUpdates[fmWork.slug] = cleanSlug;
       }
-      const safeBUpd = buildSafeWriteFields(workFieldsMeta, bUpdates);
-      if (Object.keys(safeBUpd).length > 0) {
-        await feishuApiRequest(
-          cfg,
-          'POST',
-          `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.works}/records/batch_update`,
-          { body: { records: [{ record_id: targetBId, fields: safeBUpd }] } }
-        ).catch(() => {});
+      if (payload.title && fmWork.fallbackTitle && !cellText(existB.fields[fmWork.fallbackTitle])) {
+        bUpdates[fmWork.fallbackTitle] = payload.title;
+      }
+      if (payload.body && fmWork.fallbackBody && !cellText(existB.fields[fmWork.fallbackBody])) {
+        bUpdates[fmWork.fallbackBody] = payload.body.slice(0, 1800);
+      }
+      if (Object.keys(bUpdates).length > 0) {
+        await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, bUpdates).catch(() => {});
       }
     } else {
       workLabel =
@@ -1084,20 +1288,13 @@ async function syncPrePublishToFeishu(payload = {}) {
       if (payload.packSnapshotJson && fmWork.packSnapshot && payload.packSnapshotJson.length < 45_000) {
         rawBCreate[fmWork.packSnapshot] = payload.packSnapshotJson;
       }
-      const safeBCreate = buildSafeWriteFields(workFieldsMeta, rawBCreate);
-      const createdB = await feishuApiRequest(
-        cfg,
-        'POST',
-        `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.works}/records/batch_create`,
-        { body: { records: [{ fields: safeBCreate }] } }
-      );
-      targetBId = createdB.records?.[0]?.record_id || '';
+      targetBId = await smartBatchCreateRecord(cfg, cfg.tables.works, workFieldsMeta, rawBCreate);
     }
   } else {
     workLabel = workLabel || (payload.title || '当前作品').slice(0, 28);
   }
 
-  // 3. 定位或新建 C 发布记录行，并写入状态 + 时间 + 实发标题/正文/话题标签
+  // 3. 定位或新建 C 发布记录行，并写入状态 + 时间 + 实发标题/正文/话题标签（优先走 Base v3 彻底规避 1254062）
   if (!targetCId && targetBId) {
     const existC = cRows.find((cr) => {
       const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
@@ -1134,38 +1331,67 @@ async function syncPrePublishToFeishu(payload = {}) {
   if (payload.postUrl && fmPub.postUrl) rawCFields[fmPub.postUrl] = payload.postUrl;
   if (payload.notes && fmPub.notes) rawCFields[fmPub.notes] = payload.notes;
 
-  const safeCFields = buildSafeWriteFields(pubFieldsMeta, rawCFields);
-
   if (targetCId) {
-    await feishuApiRequest(
-      cfg,
-      'POST',
-      `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.publishes}/records/batch_update`,
-      { body: { records: [{ record_id: targetCId, fields: safeCFields }] } }
-    );
+    await smartBatchUpdateRecord(cfg, cfg.tables.publishes, targetCId, pubFieldsMeta, rawCFields);
   } else {
-    const createdC = await feishuApiRequest(
-      cfg,
-      'POST',
-      `/open-apis/bitable/v1/apps/${cfg.baseToken}/tables/${cfg.tables.publishes}/records/batch_create`,
-      { body: { records: [{ fields: safeCFields }] } }
-    );
-    targetCId = createdC.records?.[0]?.record_id || '';
+    targetCId = await smartBatchCreateRecord(cfg, cfg.tables.publishes, pubFieldsMeta, rawCFields);
+  }
+
+  let bAutoClosed = false;
+  if (
+    cfg.schemaMode === 'multi_table' &&
+    cfg.tables.works &&
+    targetBId &&
+    bById.has(targetBId) &&
+    /已发布|C21/.test(desiredStatus)
+  ) {
+    const curB = bById.get(targetBId);
+    const curBSt = cellText(curB.fields[fmWork.status]);
+    if (/等待发布|B12/.test(curBSt)) {
+      const siblingStates = [];
+      let matchedExisting = false;
+      for (const cr of cRows) {
+        const bIds = cellLinkIds(cr.fields[fmPub.workLink]);
+        if (!bIds.includes(targetBId)) continue;
+        if (cr.record_id === targetCId) {
+          siblingStates.push(desiredStatus);
+          matchedExisting = true;
+        } else {
+          siblingStates.push(cellText(cr.fields[fmPub.status]));
+        }
+      }
+      if (!matchedExisting) siblingStates.push(desiredStatus);
+      const allTerminal =
+        siblingStates.length > 0 &&
+        siblingStates.every((s) => /已发布|取消|暂不发布|C21|C23/.test(s)) &&
+        siblingStates.some((s) => /已发布|C21/.test(s));
+      if (allTerminal) {
+        await smartBatchUpdateRecord(cfg, cfg.tables.works, targetBId, workFieldsMeta, {
+          [fmWork.status]: cfg.statusValues.workCompleted || 'B21已完成',
+        })
+          .then(() => {
+            bAutoClosed = true;
+          })
+          .catch(() => {});
+      }
+    }
   }
 
   invalidateFeishuMemCache();
   const modeCn = isScheduled ? `定时 ${timeStr.slice(5)}` : `立即发布 (${timeStr.slice(11)})`;
+  const closeSuffix = bAutoClosed ? '（全渠道收口 → B21已完成）' : '';
   return {
     ok: true,
     saved: true,
     needsConfirm: false,
     bRecordId: targetBId,
     cRecordId: targetCId,
+    bAutoClosed,
     workLabel,
     accountName,
     recordedState: desiredStatus,
     recordedTime: timeStr,
-    summary: `✅ 已同步飞书：${accountName}《${workLabel}》→ ${modeCn}`,
+    summary: `✅ 已同步飞书：${accountName}《${workLabel}》→ ${modeCn}${closeSuffix}`,
   };
 }
 
@@ -1180,5 +1406,8 @@ self.PPFFeishuClient = {
   syncPrePublishToFeishu,
   extractCleanWorkSlug,
   buildSafeWriteFields,
+  buildSafeV3WriteFields,
+  smartBatchUpdateRecord,
+  smartBatchCreateRecord,
   evaluateScheduleConflicts,
 };

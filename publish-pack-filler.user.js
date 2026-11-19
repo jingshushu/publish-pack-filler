@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.0.1
+// @version      2.0.2
 // @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（配置码5秒跨设备迁移）、云端兜底文案（兼容NAS未同步）、发前关联作品与黄转绿警示同步按钮
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -5526,7 +5526,7 @@
             setStatus(`📂 已自动归档 ${info.count} 份报表 → ${info.destDir}（极空间同步中）`);
           }
         }
-        if (changes.ppf_feishu_config_v2) {
+        if (changes.ppf_feishu_config_v1 || changes.ppf_feishu_config_v2) {
           refreshFeishuPublishContext(true);
         }
         if (changes[STORAGE_KEY_PACK]) {

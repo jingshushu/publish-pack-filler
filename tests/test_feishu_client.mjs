@@ -50,6 +50,7 @@ const {
   importFeishuConfigCode,
   extractCleanWorkSlug,
   buildSafeWriteFields,
+  buildSafeV3WriteFields,
   evaluateScheduleConflicts,
 } = sandbox.self.PPFFeishuClient;
 
@@ -130,6 +131,37 @@ assert.equal(typeof safePayload['计划发布时间'], 'number');
 assert.deepEqual(safePayload['内容运营表'], ['recWork123']);
 assert.equal(safePayload['只读公式列'], undefined);
 assert.equal(safePayload['不存在的列'], undefined);
+
+// ==================== Test 3b: Base v3 动态引用选项兼容格式核验 (根治 1254062 & 800010409) ====================
+const mockDynamicMeta = [
+  { field_name: '状态', type: 3, property: { options: [{ name: 'C00未发布' }, { name: 'C10等待定时发布' }, { name: 'C21已发布' }] } },
+  { field_name: '话题标签', type: 4, property: { options: [{ name: 'ESP32' }, { name: '3D打印' }] } },
+  { field_name: '计划发布时间', type: 5 },
+  { field_name: '真实发布日期', type: 5 },
+  { field_name: '内容运营表', type: 21 },
+];
+
+const safeV3Strict = JSON.parse(
+  JSON.stringify(
+    buildSafeV3WriteFields(
+      mockDynamicMeta,
+      {
+        状态: 'C10等待定时发布',
+        话题标签: ['esp32', '未收录的新词XYZ', '3D打印'],
+        计划发布时间: '2026-11-19 17:00',
+        真实发布日期: null,
+        内容运营表: ['recWork123'],
+      },
+      { strictKnownOptionsOnly: true }
+    )
+  )
+);
+
+assert.deepEqual(safeV3Strict['状态'], ['C10等待定时发布']);
+assert.deepEqual(safeV3Strict['话题标签'], ['ESP32', '3D打印']); // 自动大小写对齐且剔除动态库未收录新词
+assert.equal(safeV3Strict['计划发布时间'], '2026-11-19 17:00');
+assert.equal(safeV3Strict['真实发布日期'], null);
+assert.deepEqual(safeV3Strict['内容运营表'], [{ id: 'recWork123' }]);
 
 // ==================== Test 4: 同账号 6h 排期防撞雷达检测 ====================
 const baseMs = new Date('2026-11-19T18:00:00+08:00').getTime();
