@@ -89,7 +89,7 @@ function fillFormFromConfig(cfg) {
   document.getElementById('fm-pub-url').value = cfg.fieldMap?.publishes?.postUrl || '发布内容链接';
 
   document.getElementById('st-pub-pending').value = cfg.statusValues?.pubPending || 'C00未发布';
-  document.getElementById('st-pub-scheduled').value = cfg.statusValues?.pubScheduled || 'C10等待定时发布';
+  document.getElementById('st-pub-scheduled').value = cfg.statusValues?.pubScheduled || 'C21已发布';
   document.getElementById('st-pub-published').value = cfg.statusValues?.pubPublished || 'C21已发布';
 
   toggleAuthFields();

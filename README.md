@@ -1,4 +1,4 @@
-# 全平台半自动发布助手 (Publish Pack Filler · v2.0.3)
+# 全平台半自动发布助手 (Publish Pack Filler · v2.0.4)
 
 一套完全自包含、面向多设备与多团队复用的 **「飞书/Lark 多维表格直连 ↔ 云端兜底/本地作品寻址 ↔ 浏览器拟人预填与发前防撞同步」** 全平台内容分发工具链：
 1. **插件内置纯 JS 飞书/Lark 直连引擎（零单机环境依赖）**：无需安装外部 CLI 或配置本地环境变量，插件后台直接连接飞书/Lark 多维表格（同时支持 **自建应用 App ID + Secret** 与个人零门槛 **多维表授权码 `pt-...`**，兼容「多表矩阵架构」与「极简单表模式」）。支持一键导出 `PPF2:...` **跨设备配置码**，换任何新电脑 5 秒粘贴即可激活。
@@ -14,7 +14,7 @@
 ## 📦 一、安装浏览器插件与 5 秒跨设备激活
 
 ### 方式 1：Chrome / Edge 独立插件（推荐，内置飞书直连引擎）
-1. 下载本仓库 [`releases/publish-pack-filler-chrome-v2.0.3.zip`](./releases/publish-pack-filler-chrome-v2.0.3.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
+1. 下载本仓库 [`releases/publish-pack-filler-chrome-v2.0.4.zip`](./releases/publish-pack-filler-chrome-v2.0.4.zip) 并解压（或直接克隆本仓库选用 `extension/` 目录）。
 2. 打开 `chrome://extensions/`（Edge 打开 `edge://extensions/`），开启右上角 **「开发者模式」**。
 3. 点击左上角 **「加载已解压的扩展程序」**，选择解压后的文件夹（内含 `manifest.json`）。
 4. **连接飞书多维表**：点击浏览器右上角插件图标 → **「⚙️ 飞书直连与跨设备配置码设置」**：

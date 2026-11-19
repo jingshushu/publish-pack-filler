@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "全平台半自动发布助手",
   "short_name": "半自动发布助手",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "全平台半自动发布与飞书多维表直连助手：跨设备一键配置码激活、NAS未同步云端兜底、发布前统一警告变绿同步与四端数据导表归档",
   "permissions": [
     "storage",

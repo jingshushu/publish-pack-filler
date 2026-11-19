@@ -66,7 +66,7 @@ const DEFAULT_FEISHU_CONFIG = {
     workReady: 'B12等待发布至平台',
     workCompleted: 'B21已完成',
     pubPending: 'C00未发布',
-    pubScheduled: 'C10等待定时发布',
+    pubScheduled: 'C21已发布',
     pubPublished: 'C21已发布',
   },
 };
@@ -1038,13 +1038,10 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
 
     const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
     const planMs = parseDateTimeMs(cf[fmPub.plannedAt]);
-    const explicitPub = /已发布|已完成|C21/.test(st);
-    const explicitSched = /定时|等待|排期|C10/.test(st);
-    // 完美兼容「飞书原生自动化改状态」模式：即便状态列尚处 C00未发布/空（等待自动化异步流转），只要填入了计划发布时间或真实发布日期即刻纳入 6h 防撞雷达！
-    const isPub = explicitPub || (!explicitSched && Boolean(pubMs) && (!planMs || pubMs <= nowMs + 600_000));
-    const isSched = !isPub && (explicitSched || Boolean(planMs) || Boolean(pubMs));
-    const effMs = isPub ? pubMs || planMs : isSched ? planMs || pubMs : null;
+    // 统一以当前时间对比区分「已定时发布(未到点)」与「已真实发布(已到点)」，无需依赖 C10 中间状态
+    const effMs = planMs && planMs > nowMs ? planMs : pubMs || planMs;
     if (!effMs) continue;
+    const isFutureSlot = effMs > nowMs;
 
     const linkedB = bIds[0] && bById.get(bIds[0]);
     const itemTitle =
@@ -1062,10 +1059,10 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
       diffHours: Math.round((Math.abs(targetMs - effMs) / 3600000) * 10) / 10,
     };
 
-    if (isPub && (!lastPublished || effMs > lastPublished.timeMs)) {
+    if (!isFutureSlot && (!lastPublished || effMs > lastPublished.timeMs)) {
       lastPublished = recInfo;
     }
-    if (effMs > nowMs - 1800_000 && isSched) {
+    if (isFutureSlot) {
       futureScheduled.push(recInfo);
     }
     if (Math.abs(targetMs - effMs) < gapMs) {
@@ -1179,18 +1176,23 @@ async function queryFeishuPublishContext(params = {}) {
 
       const linkedC = cByBIdForAcc.get(br.record_id);
       const cSt = linkedC ? cellText(linkedC.fields[fmPub.status]) : '';
-      const isPendingOnThisPlat = !cSt || /未发布|待发布|定时|上传中|C00|C10/.test(cSt);
+      const plannedMs = linkedC ? parseDateTimeMs(linkedC.fields[fmPub.plannedAt]) : null;
+      const publishedMs = linkedC ? parseDateTimeMs(linkedC.fields[fmPub.publishedAt]) : null;
+      const isFutureScheduled = Boolean(
+        (plannedMs && plannedMs > Date.now()) || (publishedMs && publishedMs > Date.now())
+      );
+      const isPendingOnThisPlat =
+        !cSt || /未发布|待发布|定时|上传中|C00|C10/.test(cSt) || isFutureScheduled;
       // P1 审片闸门保护：默认仅纳入已审片放行的 B12等待发布至平台 / B21已完成 作品，拦截 B00/B10/B11 未审作品防误发
       const isReadyB = /等待发布|已完成|B12|B21/.test(bSt);
       if (!isPendingOnThisPlat && br.record_id !== explicitBId && linkedC?.record_id !== explicitCId) {
-        // 已在本平台发完的作品放低优先级，仅保留少量近期项以备重发核对
+        // 已在本平台发完且已过发布时点的作品放低优先级，仅在显式绑定时保留
         continue;
       }
       if (!isReadyB && br.record_id !== explicitBId && linkedC?.record_id !== explicitCId) continue;
 
       const label = cellText(bf[fmWork.title]) || cellText(bf[fmWork.slug]) || br.record_id;
       const slug = extractCleanWorkSlug(cellText(bf[fmWork.slug]));
-      const plannedMs = linkedC ? parseDateTimeMs(linkedC.fields[fmPub.plannedAt]) : null;
       const snapshotRaw = fmWork.packSnapshot ? cellText(bf[fmWork.packSnapshot]) : '';
 
       candidates.push({
@@ -1199,14 +1201,14 @@ async function queryFeishuPublishContext(params = {}) {
         label,
         slug,
         bStatus: bSt,
-        cStatus: cSt || '未建排期行',
+        cStatus: isFutureScheduled ? '⏳已定时发布' : cSt || '未建排期行',
         plannedAt: plannedMs ? formatMsLocalHM(plannedMs) : '',
         hasCloudPack: Boolean(snapshotRaw && snapshotRaw.startsWith('{')),
         packSnapshot: snapshotRaw,
         fallbackTitle: cellText(bf[fmWork.fallbackTitle]) || label,
         fallbackBody: cellText(bf[fmWork.fallbackBody]),
         defaultCollection,
-        priority: /C00|C10|未发布|定时/.test(cSt) ? 3 : /B12|等待发布/.test(bSt) ? 2 : /B11|待审核/.test(bSt) ? 1 : 0,
+        priority: /C00|未发布/.test(cSt) ? 3 : isFutureScheduled ? 2.5 : /B12|等待发布/.test(bSt) ? 2 : 1,
       });
     }
   } else {
