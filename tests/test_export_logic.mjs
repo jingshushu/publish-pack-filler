@@ -482,4 +482,27 @@ await dyEnv.waitSettled();
 assert.equal(dyOverviewBtn.nativeClickCount, 1, '抖音点「🎬 作品」严禁再次点击顶部《短视频全量指标》按钮（彻底根治重复下载）');
 assert.ok(dyModalWorksBtn && dyModalWorksBtn.nativeClickCount === 1, '抖音点「🎬 作品」必须精准点击展开后的作品明细表导出按钮');
 
-console.log('✅ Xiaohongshu 4-Tab Account Export & Douyin Non-Duplicate Account/Works Export Tests ALL PASSED!');
+// ==================== Test C: 抖音「作品管理」页 (creator-micro/content/manage) 激活导表面板并一键导出《作品列表导出》 ====================
+let dyManageExportBtn = null;
+const dyManageExportEnv = createExportTestDom(
+  'https://creator.douyin.com/creator-micro/content/manage',
+  ({ bodyEl, MockElement, simulatedDownloads }) => {
+    dyManageExportBtn = new MockElement('BUTTON');
+    dyManageExportBtn.className = 'semi-button';
+    dyManageExportBtn.textContent = '导出数据';
+    dyManageExportBtn._rect = { top: 148, left: 1020, right: 1112, bottom: 180, width: 92, height: 32 };
+    dyManageExportBtn.onclick = () => {
+      simulatedDownloads.push({ ts: Date.now(), filename: 'W47_20261120导出_抖音_靖蜀黍_作品列表导出.xlsx' });
+    };
+    bodyEl.appendChild(dyManageExportBtn);
+  }
+);
+
+await dyManageExportEnv.waitSettled();
+const dyManageShadow = dyManageExportEnv.getShadow();
+assert.ok(dyManageShadow, '跳转到 content/manage 后必须激活导表面板');
+await dyManageShadow.getElementById('ppf-btn-exp-works').onclick();
+await dyManageExportEnv.waitSettled();
+assert.equal(dyManageExportBtn.nativeClickCount, 1, '在 content/manage 页点击「🎬 作品」必须直接触发《作品列表导出》下载');
+
+console.log('✅ Xiaohongshu 4-Tab Account Export & Douyin Non-Duplicate Account/Works + Manage Page Export Tests ALL PASSED!');

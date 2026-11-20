@@ -489,11 +489,11 @@ await quickSyncBtn.onclick({ stopPropagation: () => {} });
 const colSyncedHtml = colShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(colSyncedHtml.includes('ppf-collapsed-synced-tab') && colSyncedHtml.includes('✅ 已同步'), '折叠态点击快捷同步后必须直接翻为绿色已同步浮标');
 
-// 4. 验证非发布页严格隐身：在创作者首页、作品/动态管理列表页、普通微博页必须完全隐藏且零页面边距污染
+// 4. 验证非发布/非导表页严格隐身：在创作者首页、视频号列表页、B站专栏管理页、普通微博页必须完全隐藏且零页面边距污染
 for (const nonPubUrl of [
   'https://creator.xiaohongshu.com/new/home',
   'https://channels.weixin.qq.com/platform/post/list',
-  'https://creator.douyin.com/creator-micro/content/manage',
+  'https://creator.douyin.com/creator-micro/home',
   'https://member.bilibili.com/platform/upload-manager/article',
   'https://weibo.com/',
 ]) {
@@ -503,6 +503,15 @@ for (const nonPubUrl of [
   assert.equal(idleHtml, '', `非发布页 (${nonPubUrl}) 严禁渲染发布助手面板`);
   assert.equal(idleEnv.docEl.style.paddingRight || '', '', `非发布页 (${nonPubUrl}) 严禁修改页面边距`);
 }
+
+// 4b. 验证抖音「作品管理」页 (creator-micro/content/manage)：跳转进入后必须激活紧凑型「数据导出」面板（绝不挂载发布填表面板、零边距污染）
+const dyManageEnv = createMockDomEnv('https://creator.douyin.com/creator-micro/content/manage', true);
+await dyManageEnv.flushTimers();
+const dyManageHtml = dyManageEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n');
+assert.ok(dyManageHtml.includes('抖音 · 作品管理') && dyManageHtml.includes('ppf-btn-exp-works'), '抖音作品管理页必须激活数据导出面板');
+assert.ok(!dyManageHtml.includes('C 发布包'), '抖音作品管理页严禁挂载发布填表大面板');
+assert.ok(!dyManageHtml.includes('ppf-archive-dl'), '已按极简原则移除冗余的手动归档按钮（下载完成自动归档）');
+assert.equal(dyManageEnv.docEl.style.paddingRight || '', '', '抖音作品管理页导表浮窗严禁修改页面边距');
 
 // 5. 验证数据中心页挂载：强制归属账号门禁 + 手动输入框兜底 + 下载前归档目录回显
 const dataEnv = createMockDomEnv('https://creator.douyin.com/creator-micro/data-center/operation', true);
@@ -561,7 +570,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.3');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.4');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',

@@ -1,4 +1,4 @@
-// Auto-generated from publish-pack-filler.user.js (v2.5.3) — DO NOT EDIT DIRECTLY
+// Auto-generated from publish-pack-filler.user.js (v2.5.4) — DO NOT EDIT DIRECTLY
 /**
  * 安全与反风控设计铁律（严格遵守）：
  * 1. 绝不使用 @grant none，绝不向页面 window 挂载变量，绝不 Hook fetch / XHR / EventTarget / toString。
@@ -22,7 +22,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.5.3';
+  const EXT_FALLBACK_VERSION = '2.5.4';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -3372,6 +3372,9 @@
       if (u.includes('creator.douyin.com/creator-micro/data-center/operation')) {
         return { isDataMode: true, pageKind: 'dy_operation', pageTitle: '抖音 · 数据中心' };
       }
+      if (u.includes('creator.douyin.com/creator-micro/content/manage')) {
+        return { isDataMode: true, pageKind: 'dy_manage', pageTitle: '抖音 · 作品管理', isDouyinManage: true };
+      }
       if (u.includes('creator.douyin.com/creator-micro/data-center') || u.includes('creator.douyin.com/creator-micro/data/stats')) {
         return { isDataMode: true, pageKind: 'dy_works', pageTitle: '抖音 · 作品数据' };
       }
@@ -3689,7 +3692,7 @@
 
     function findVisibleExportButtons(scopeRoot = null) {
       const exportKw =
-        /^(?:导出(?:数据|表格|明细|列表|报表|趋势|概览|Excel|CSV)?|下载(?:数据|明细|表格|报表|趋势|Excel|CSV)?|数据导出)$/i;
+        /^(?:导出(?:数据|表格|明细|列表|报表|趋势|概览|作品|作品数据|Excel|CSV)?|下载(?:数据|明细|表格|报表|趋势|作品|作品数据|Excel|CSV)?|数据导出)$/i;
       const semanticBtnSel =
         'button, a, [role="button"], .weui-desktop-btn, .d-button, .semi-button, .ant-btn, .el-button';
       const navNoiseSel =
@@ -4085,6 +4088,10 @@
         }
 
         if (platform === 'douyin') {
+          if (ctx.pageKind === 'dy_manage') {
+            setStatus('💡 当前在「作品管理」页（用于导🎬作品明细）；导账号指标请切回「数据中心」概览页点「📊 账号」');
+            return false;
+          }
           const openModal = findOpenModalOrDrawer();
           if (openModal && /作品名称/.test(openModal.textContent || '')) {
             setStatus('💡 当前正打开「全部作品」弹窗；请先关闭弹窗回到数据概览页再点「📊 账号」，或直接点「🎬 作品」导明细');
@@ -4242,9 +4249,71 @@
         }
 
         if (platform === 'douyin') {
+          // 场景 A：已在「抖音 · 作品管理」(creator-micro/content/manage) 页 —— 该页无账号概览表，直接导出官方 16 列《作品列表导出.xlsx》（无按钮时兜底提取可见卡片 CSV）
+          if (ctx.pageKind === 'dy_manage' || ctx.isDouyinManage) {
+            let manageBtns = findVisibleExportButtons();
+            if (manageBtns.length === 0) {
+              // 若当前处于纯缩略卡片视图，尝试切换右上角「列表」视图按钮以显露官方「导出数据」按钮
+              const listToggle = queryDeepAll('button, [role="tab"], [role="button"], span, div').find((el) => {
+                if (!el || !isVisible(el) || hostEl.contains?.(el)) return false;
+                if (el.closest?.('nav, aside, [class*="sider" i], [class*="menu" i]')) return false;
+                const r = el.getBoundingClientRect();
+                if (r.width < 24 || r.width > 120 || r.height < 18 || r.height > 46) return false;
+                const t = `${el.getAttribute?.('title') || ''} ${el.getAttribute?.('aria-label') || ''} ${(el.textContent || '').trim()}`
+                  .replace(/\s+/g, '')
+                  .trim();
+                return /^(?:列表|列表视图|列表模式|数据列表)$/.test(t);
+              });
+              if (listToggle && !isSubTabActive(listToggle)) {
+                await humanMouseClick(listToggle);
+                await humanGaussianSleep(650, 950);
+                manageBtns = findVisibleExportButtons();
+              }
+            }
+
+            if (manageBtns.length > 0) {
+              await pushExportHintToBackground({
+                btnEl: manageBtns[0].el,
+                accountOverride: effAcct,
+                sectionOverride: '作品列表导出',
+                dimension: 'works',
+                enqueue: true,
+              });
+              await triggerExportElementClick(manageBtns[0].el);
+              await humanSleep(650, 950);
+              const dlItems = await queryRecentBrowserDownloads(startTs);
+              if (Array.isArray(dlItems) && dlItems.length === 0) {
+                setStatus('⚠️ 未检测到《作品列表导出》下载，请确认列表已加载作品数据');
+                render();
+                return false;
+              }
+              await markExportCache('works', dlItems?.[0]?.filename || '', effAcct);
+              setStatus(`✅ 已导出「${effAcct}」抖音《作品列表导出》${destHintSuffix}`);
+              render();
+              return true;
+            }
+
+            await pushExportHintToBackground({
+              accountOverride: effAcct,
+              sectionOverride: '作品列表导出',
+              dimension: 'works',
+              enqueue: true,
+            });
+            const fb = exportDomFallbackCsv(ctx);
+            if (fb.ok) {
+              await markExportCache('works', fb.fileName, effAcct);
+              setStatus(`✅ 已提取导出「${effAcct}」抖音作品列表 (${fb.count} 条)${destHintSuffix}`);
+              render();
+              return true;
+            }
+            setStatus('⚠️ 当前作品管理页暂未找到「导出数据」按钮或可见作品行，请确认页面已加载完成');
+            return false;
+          }
+
+          // 场景 B：在「数据中心」(data-center/operation 或 data/stats) 页
           let workHit = findDouyinWorksExportButton();
 
-          // 若当前在「数据中心」概览页且尚未展开全部作品弹窗/列表，自动帮用户点击「查看所有作品 / 全部作品」展开后再导！
+          // 若当前在「数据中心」概览页且尚未展开全部作品，自动帮点「查看所有作品 >」（若抖音在新标签页打开了 content/manage，新页会自动挂载本插件供一键导出！）
           if (!workHit || workHit.source === '投稿列表') {
             const viewAllTrigger = queryDeepAll('a, button, [role="button"], span, div').find((el) => {
               if (!el || !isVisible(el) || hostEl.contains?.(el)) return false;
@@ -4254,20 +4323,32 @@
               return /^(?:查看(?:所有|全部)作品|全部作品)[>＞]?$/.test(t);
             });
             if (viewAllTrigger) {
-              setStatus('⏳ 正在自动展开「查看所有作品」16 列完整明细表...');
+              setStatus('⏳ 正在打开「查看所有作品」列表页...');
               await humanMouseClick(viewAllTrigger);
-              await humanGaussianSleep(1050, 1400);
-              const modalAfter = findDouyinWorksExportButton();
-              if (modalAfter) {
-                workHit = modalAfter;
+              await humanGaussianSleep(1050, 1350);
+              // 若为页内弹窗或同页路由直接跳转到了 content/manage，立即接着导！
+              if (getDataCenterContext().pageKind === 'dy_manage') {
+                const afterManageBtns = findVisibleExportButtons();
+                if (afterManageBtns.length > 0) {
+                  workHit = { btn: afterManageBtns[0], source: '作品管理页', sectionOverride: '作品列表导出' };
+                }
+              } else {
+                const modalAfter = findDouyinWorksExportButton();
+                if (modalAfter) {
+                  workHit = modalAfter;
+                } else {
+                  setStatus('↗️ 已跳转打开「抖音 · 作品管理」列表页，请在新打开的页面点「🎬 作品」即可导出！');
+                  render();
+                  return false;
+                }
               }
             }
           }
 
           if (!workHit) {
-            setStatus(
-              '💡 未定位到「作品列表」导出按钮（已防呆拦截顶部账号概览重复表）：请先点页面「查看所有作品 >」展开列表后再试！'
-            );
+            setStatus('↗️ 正在为你打开「抖音 · 作品管理」列表页，请在新页面点「🎬 作品」导出 16 列完整明细...');
+            window.open('https://creator.douyin.com/creator-micro/content/manage', '_blank', 'noopener');
+            render();
             return false;
           }
 
@@ -6310,12 +6391,8 @@
                   : ''
               }
 
-              <button class="ppf-btn ppf-btn-block" id="ppf-archive-dl" style="border-color:rgba(5,150,105,0.4); color:#059669; font-weight:600; padding:6px 10px;">
-                📂 归档 ~/Downloads 报表到 AIHub
-              </button>
-
               <div class="ppf-status" id="ppf-status-line" style="font-size:11.5px;">${
-                statusText.includes('就绪') ? '🛡️ 必选归属账号 · 导出前确认目录 · 绝不误建空目录' : statusText
+                statusText.includes('就绪') ? '🛡️ 下载完成 1.2s 自动归档至上方回显目录' : statusText
               }</div>
             </div>
           </div>
@@ -6433,8 +6510,6 @@
             1200
           );
         }
-        const archBtn = shadow.getElementById('ppf-archive-dl');
-        archBtn.onclick = guardAsyncButton(archBtn, 'exp_archive_dl', runArchiveDownloadsToAihub, 1200);
         const dataDrag = shadow.getElementById('ppf-data-drag');
         dataDrag.onmousedown = (e) => {
           if (e.target.closest('button, select, input')) return;
