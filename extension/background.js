@@ -1,11 +1,11 @@
-// Background Service Worker (Manifest V3 · v2.5.2)
+// Background Service Worker (Manifest V3 · v2.5.3)
 // 1. 内置纯 JS 飞书/Lark OpenAPI 直连引擎 (feishu_client.js)，零本地 Python/CLI 强依赖，跨设备 5 秒激活。
 // 2. 在扩展后台进程代理可选本地桥接请求 (127.0.0.1:8765)，与创作者中心网页网络栈彻底物理隔离。
 // 3. 内置四端创作者数据中心采集指令接收器与下载瞬间标准重命名。
 
 'use strict';
 
-importScripts('feishu_client.js?v=2.5.2');
+importScripts('feishu_client.js?v=2.5.3');
 
 const BRIDGE_BASE = 'http://127.0.0.1:8765';
 const DATA_CENTER_URLS = {
@@ -33,6 +33,23 @@ const PLAT_CN_MAP = {
   bilibili: 'B站',
 };
 
+const INVALID_ACCOUNT_TOKENS = new Set([
+  '',
+  'auto',
+  'default',
+  'unknown',
+  '创作者账号',
+  '未指定账号',
+  '未指定',
+  '未知账号',
+]);
+
+function isValidAccountToken(acct) {
+  const s = String(acct || '').trim();
+  if (!s) return false;
+  return !INVALID_ACCOUNT_TOKENS.has(s) && !INVALID_ACCOUNT_TOKENS.has(s.toLowerCase());
+}
+
 // 记录各平台最近识别到的创作者账号简称 & 点击导出按钮时的上下文队列（完全同步读取，确保 onDeterminingFilename 零延迟）
 const lastAccountByPlat = {
   xiaohongshu: '',
@@ -40,9 +57,10 @@ const lastAccountByPlat = {
   weixin: '',
   bilibili: '',
 };
-let lastExportHint = { platform: '', account: '', section: '', period: '', ts: 0 };
+let lastExportHint = { platform: '', account: '', section: '', period: '', dimension: '', ts: 0 };
 let exportHintQueue = [];
 let recentGenericDataCount = { ts: 0, count: 0 };
+let recentCreatorDownloads = [];
 const managedCreatorDownloadIds = new Set();
 let autoArchiveTimer = null;
 
@@ -51,7 +69,11 @@ chrome.storage.local.get('ppf_last_accounts_by_plat_v1', (res) => {
     const saved = res?.ppf_last_accounts_by_plat_v1;
     const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
     if (parsed && typeof parsed === 'object') {
-      Object.assign(lastAccountByPlat, parsed);
+      for (const [k, v] of Object.entries(parsed)) {
+        if (k in lastAccountByPlat && isValidAccountToken(v)) {
+          lastAccountByPlat[k] = v;
+        }
+      }
     }
   } catch {
     // ignore
@@ -97,12 +119,23 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
       const platKey = detectCreatorPlatformFromDownload(item);
       if (!platKey) return;
-      if (typeof item.id === 'number') {
-        managedCreatorDownloadIds.add(item.id);
-      }
 
       // 若已是标准命名格式则仅去重覆盖，不二次包裹
       if (/^W\d{2}_\d{8}导出_/.test(baseName)) {
+        const parts = baseName.split('_');
+        const parsedAcct = parts[3] || '';
+        if (typeof item.id === 'number' && isValidAccountToken(parsedAcct)) {
+          managedCreatorDownloadIds.add(item.id);
+        }
+        recentCreatorDownloads.push({
+          id: item.id,
+          ts: Date.now(),
+          platform: platKey,
+          account: parsedAcct,
+          filename: baseName,
+          reportName: baseName,
+        });
+        recentCreatorDownloads = recentCreatorDownloads.slice(-40);
         suggest({ filename: baseName, conflictAction: 'overwrite' });
         return;
       }
@@ -127,18 +160,25 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       }
 
       const hintSection = matchedHint?.section || '';
+      const hintDimension = matchedHint?.dimension || '';
       const hintPeriod = sanitizeFileToken(matchedHint?.period || '');
-      const acctShort =
-        sanitizeFileToken(matchedHint?.account || lastAccountByPlat[platKey] || '') || '创作者账号';
+      const rawCandidateAcct = sanitizeFileToken(matchedHint?.account || lastAccountByPlat[platKey] || '');
+      const hasValidAcct = isValidAccountToken(rawCandidateAcct);
+      const acctShort = hasValidAcct ? rawCandidateAcct : '未指定账号';
+
+      // 仅在明确指定了有效归属账号时才加入自动归档监听（未指定账号的一律留在 ~/Downloads，绝不乱移动！）
+      if (typeof item.id === 'number' && hasValidAcct) {
+        managedCreatorDownloadIds.add(item.id);
+      }
 
       let reportName = sanitizeFileToken(rawStem) || '数据导出';
 
       if (reportName.toLowerCase() === 'data') {
         // 抖音运营数据页下方两张表默认均叫 data.xlsx（上：投稿总结，下：投稿列表）
-        if (/投稿总结|周期汇总|投稿周期/.test(hintSection)) {
-          reportName = '投稿周期汇总';
-        } else if (/投稿列表|视频列表|作品表现/.test(hintSection)) {
+        if (hintDimension === 'works' || /投稿列表|视频列表|作品表现|作品列表/.test(hintSection)) {
           reportName = '投稿列表表现';
+        } else if (hintDimension === 'account' || /投稿总结|周期汇总|投稿周期/.test(hintSection)) {
+          reportName = '投稿周期汇总';
         } else {
           if (now - recentGenericDataCount.ts > 15_000) {
             recentGenericDataCount = { ts: now, count: 0 };
@@ -163,23 +203,34 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       const { weekStr, ymd } = getIsoWeekAndYmd(new Date());
       const platCn = PLAT_CN_MAP[platKey] || platKey;
       const finalFilename = `${weekStr}_${ymd}导出_${platCn}_${acctShort}_${reportName}${ext}`;
+      recentCreatorDownloads.push({
+        id: item.id,
+        ts: now,
+        platform: platKey,
+        account: hasValidAcct ? acctShort : '',
+        filename: finalFilename,
+        reportName,
+      });
+      recentCreatorDownloads = recentCreatorDownloads.slice(-40);
       suggest({ filename: finalFilename, conflictAction: 'overwrite' });
 
-      // 异步写入本地导出时间缓存（用于 12 小时内防重二次确认提示）
-      const dim =
-        matchedHint?.dimension ||
-        (/列表|明细|稿件对比|单篇/.test(reportName) ? 'works' : 'account');
-      const cacheKey = `${platKey}|${acctShort}|${dim}`;
-      chrome.storage.local.get('ppf_export_cache_v1', (res) => {
-        try {
-          const prev = res?.ppf_export_cache_v1;
-          const map = (typeof prev === 'string' ? JSON.parse(prev) : prev) || {};
-          map[cacheKey] = { ts: Date.now(), fileName: finalFilename, reportName };
-          chrome.storage.local.set({ ppf_export_cache_v1: map });
-        } catch {
-          // ignore
-        }
-      });
+      if (hasValidAcct) {
+        // 异步写入本地导出时间缓存（用于 12 小时内防重二次确认提示）
+        const dim =
+          hintDimension ||
+          (/列表|明细|稿件对比|单篇/.test(reportName) ? 'works' : 'account');
+        const cacheKey = `${platKey}|${acctShort}|${dim}`;
+        chrome.storage.local.get('ppf_export_cache_v1', (res) => {
+          try {
+            const prev = res?.ppf_export_cache_v1;
+            const map = (typeof prev === 'string' ? JSON.parse(prev) : prev) || {};
+            map[cacheKey] = { ts: Date.now(), fileName: finalFilename, reportName };
+            chrome.storage.local.set({ ppf_export_cache_v1: map });
+          } catch {
+            // ignore
+          }
+        });
+      }
     } catch {
       // 出错时放行浏览器原始文件名，绝不阻断下载
     }
@@ -395,14 +446,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'PPF_SET_EXPORT_HINT') {
     const plat = String(msg.platform || '');
-    const acct = sanitizeFileToken(msg.account || '');
+    const rawAcct = sanitizeFileToken(msg.account || '');
+    const acct = isValidAccountToken(rawAcct) ? rawAcct : '';
     if (plat && acct) {
       lastAccountByPlat[plat] = acct;
       chrome.storage.local.set({ ppf_last_accounts_by_plat_v1: lastAccountByPlat });
     }
     const entry = {
       platform: plat,
-      account: acct || (plat ? lastAccountByPlat[plat] : ''),
+      account: acct || (plat && isValidAccountToken(lastAccountByPlat[plat]) ? lastAccountByPlat[plat] : ''),
       section: String(msg.section || ''),
       period: String(msg.period || ''),
       dimension: String(msg.dimension || ''),
@@ -413,8 +465,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       exportHintQueue = exportHintQueue.filter((h) => Date.now() - h.ts < 30_000);
       exportHintQueue.push(entry);
     }
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, account: entry.account });
     return false;
+  }
+
+  if (msg.type === 'PPF_GET_RECENT_DOWNLOADS') {
+    const sinceTs = Number(msg.sinceTs || 0);
+    const plat = String(msg.platform || '');
+    const items = recentCreatorDownloads.filter(
+      (d) => d.ts >= sinceTs && (!plat || d.platform === plat)
+    );
+    sendResponse({ ok: true, count: items.length, items });
+    return false;
+  }
+
+  if (msg.type === 'PPF_BRIDGE_EXPORT_TARGETS') {
+    const acctParam = encodeURIComponent(String(msg.account || '').trim());
+    fetch(`${BRIDGE_BASE}/api/export-targets?account=${acctParam}`, { cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        sendResponse({ ok: true, data });
+      })
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
   }
 
   if (msg.type === 'PPF_BRIDGE_OPEN_FINDER') {

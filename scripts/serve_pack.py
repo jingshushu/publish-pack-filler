@@ -409,35 +409,128 @@ def reveal_in_file_manager(pack_dir: Path, project_dir: Path) -> str:
         return f"本地目录就绪：{target_dir.name}"
 
 
+INVALID_EXPORT_ACCOUNT_TOKENS = {
+    "",
+    "auto",
+    "default",
+    "unknown",
+    "创作者账号",
+    "未指定账号",
+    "未指定",
+    "未知账号",
+}
+
+
+def list_existing_export_targets(workspace_root: Path, cfg: dict) -> list[dict]:
+    """
+    只读枚举当前工作空间下已存在的账号归档目录（绝不创建任何新目录）：
+    扫描 `2 AH领域·Areas/<已有领域>/05_数据复盘/数据导出/`（或已配置的 downloadsArchiveDir 下的已有子目录）。
+    """
+    targets: list[dict] = []
+    custom_archive_base = cfg.get("downloadsArchiveDir")
+    if custom_archive_base:
+        base_p = Path(custom_archive_base).expanduser().resolve()
+        if base_p.is_dir():
+            for sub in sorted(base_p.iterdir()):
+                if sub.is_dir() and not sub.name.startswith("."):
+                    try:
+                        rel_str = str(sub.relative_to(workspace_root))
+                    except ValueError:
+                        rel_str = str(sub)
+                    targets.append(
+                        {
+                            "account": sub.name,
+                            "areaDir": sub.name,
+                            "destDir": str(sub),
+                            "relDir": rel_str,
+                        }
+                    )
+        return targets
+
+    areas = workspace_root / "2 AH领域·Areas"
+    if areas.is_dir():
+        for sub in sorted(areas.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("."):
+                continue
+            exp_dir = sub / "05_数据复盘" / "数据导出"
+            if exp_dir.is_dir():
+                short_name = re.sub(r"^\d{4}_", "", sub.name).strip() or sub.name
+                targets.append(
+                    {
+                        "account": short_name,
+                        "areaDir": sub.name,
+                        "destDir": str(exp_dir),
+                        "relDir": str(exp_dir.relative_to(workspace_root)),
+                    }
+                )
+    return targets
+
+
+def resolve_existing_export_dest(workspace_root: Path, cfg: dict, acct_token: str) -> dict | None:
+    """
+    将账号标识严格匹配到「磁盘上已存在」的归档目录；
+    若账号为空/占位词（如「创作者账号」）或匹配不到已存在的归档目录，一律返回 None（绝不退回根目录建文件夹，绝不调用 mkdir）。
+    """
+    raw = str(acct_token or "").strip()
+    if not raw or raw.lower() in INVALID_EXPORT_ACCOUNT_TOKENS or raw in INVALID_EXPORT_ACCOUNT_TOKENS:
+        return None
+
+    hints = dict(cfg.get("brandFolderHints") or {})
+    mapped = hints.get(raw, raw)
+    # 兼容矩阵号别名（如「视频号·数见万象」/「B站·万物有数可视化」/「万物皆有数」提取核心账号词）
+    probe = re.sub(r"^(?:小红书|抖音|视频号|微信视频号|B站)[·_\-\s]*", "", mapped).strip()
+    if "数见万象" in probe or "万物皆有数" in probe or "万物有数" in probe:
+        probe = "万物有数"
+    elif "靖蜀黍" in probe:
+        probe = "靖蜀黍"
+    elif "工程检测" in probe:
+        probe = "工程检测科普"
+
+    targets = list_existing_export_targets(workspace_root, cfg)
+    probe_low = probe.lower()
+    raw_low = raw.lower()
+
+    for t in targets:
+        acc_low = t["account"].lower()
+        area_low = t["areaDir"].lower()
+        if probe_low in (acc_low, area_low) or raw_low in (acc_low, area_low):
+            if Path(t["destDir"]).is_dir():
+                return t
+
+    if len(probe_low) >= 2:
+        for t in targets:
+            acc_low = t["account"].lower()
+            area_low = t["areaDir"].lower()
+            if probe_low in area_low or acc_low in probe_low:
+                if Path(t["destDir"]).is_dir():
+                    return t
+
+    return None
+
+
 def archive_creator_downloads(workspace_root: Path, cfg: dict, hours: float = 24.0, move: bool = True) -> dict:
     """
-    100% 纯标准库内置下载报表归档器（无外部 CLI 依赖）：
+    100% 纯标准库内置下载报表归档器（无外部 CLI 依赖，严守「不新建任何目录、不乱移未匹配文件」铁律）：
     扫描 ~/Downloads 下由插件重命名的 W<周>_<日期>导出_<平台>_<账号>_*.(xlsx|csv)，
-    自动匹配工作空间下的账号目录 `05_数据复盘/数据导出/`（或可配置的 downloadsArchiveDir）归档去重。
+    仅当精准命中工作空间下「已存在」的账号目录 `05_数据复盘/数据导出/` 时才移入归档；
+    若未识别账号（如「创作者账号」）或目标归档目录不存在，一律原样保留在 ~/Downloads，绝不新建任何文件夹！
     """
     dl_dir = Path.home() / "Downloads"
     if not dl_dir.is_dir():
-        return {"ok": True, "archived_count": 0, "files": [], "dest_dir": ""}
+        return {
+            "ok": True,
+            "archived_count": 0,
+            "files": [],
+            "dest_dir": "",
+            "unmatched_count": 0,
+            "unmatched_files": [],
+        }
 
     cutoff = time.time() - max(0.5, hours) * 3600.0
     pat = re.compile(r"^W\d{2}_\d{8}导出_([^_]+)_([^_]+)_(.+)\.(xlsx|csv)$", re.IGNORECASE)
-    custom_archive_base = cfg.get("downloadsArchiveDir")
-
-    def locate_dest_dir(acct_token: str) -> Path:
-        if custom_archive_base:
-            return Path(custom_archive_base).expanduser().resolve() / acct_token
-        areas = workspace_root / "2 AH领域·Areas"
-        if areas.is_dir():
-            for sub in sorted(areas.iterdir()):
-                if not sub.is_dir() or sub.name.startswith("."):
-                    continue
-                if acct_token.lower() in sub.name.lower() or (sub / "05_数据复盘").is_dir():
-                    if acct_token.lower() in sub.name.lower():
-                        return sub / "05_数据复盘" / "数据导出"
-            # 若未精确命中子文件夹名，检查是否有唯一活跃账号目录
-        return workspace_root / "数据导出" / acct_token
 
     archived_files: list[str] = []
+    unmatched_files: list[dict] = []
     last_dest = ""
 
     for f in sorted(dl_dir.iterdir()):
@@ -454,8 +547,29 @@ def archive_creator_downloads(workspace_root: Path, cfg: dict, hours: float = 24
             continue
 
         acct_token = m.group(2).strip()
-        dest_dir = locate_dest_dir(acct_token)
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        resolved = resolve_existing_export_dest(workspace_root, cfg, acct_token)
+        if not resolved:
+            # 铁律：匹配不到已存在的账号归档目录时，绝不创建目录、绝不移动文件，原样留在 ~/Downloads！
+            unmatched_files.append(
+                {
+                    "file": f.name,
+                    "account": acct_token,
+                    "reason": f"未匹配到已存在的「{acct_token}」归档目录，已原样保留在 ~/Downloads",
+                }
+            )
+            continue
+
+        dest_dir = Path(resolved["destDir"])
+        if not dest_dir.is_dir():
+            unmatched_files.append(
+                {
+                    "file": f.name,
+                    "account": acct_token,
+                    "reason": "目标归档目录不存在（禁止自动新建目录），已原样保留在 ~/Downloads",
+                }
+            )
+            continue
+
         dest_path = dest_dir / f.name
 
         # 若目标已存在且哈希完全一致，直接清理下载目录副本
@@ -472,13 +586,15 @@ def archive_creator_downloads(workspace_root: Path, cfg: dict, hours: float = 24
         else:
             shutil.copy2(str(f), str(dest_path))
         archived_files.append(dest_path.name)
-        last_dest = str(dest_dir)
+        last_dest = resolved["relDir"] or str(dest_dir)
 
     return {
         "ok": True,
         "archived_count": len(archived_files),
         "files": archived_files,
         "dest_dir": last_dest,
+        "unmatched_count": len(unmatched_files),
+        "unmatched_files": unmatched_files,
     }
 
 
@@ -1461,6 +1577,24 @@ def make_handler(state: BridgeState):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
+                return
+
+            if parsed.path == "/api/export-targets":
+                acct_q = (qs.get("account") or [""])[0].strip()
+                targets = list_existing_export_targets(state.workspace_root, state.raw_cfg)
+                matched = resolve_existing_export_dest(state.workspace_root, state.raw_cfg, acct_q) if acct_q else None
+                self._send_json(
+                    {
+                        "ok": True,
+                        "workspaceRoot": str(state.workspace_root),
+                        "targets": targets,
+                        "matched": bool(matched),
+                        "account": matched["account"] if matched else acct_q,
+                        "areaDir": matched["areaDir"] if matched else "",
+                        "destDir": matched["destDir"] if matched else "",
+                        "relDir": matched["relDir"] if matched else "",
+                    }
+                )
                 return
 
             if parsed.path == "/api/collect":

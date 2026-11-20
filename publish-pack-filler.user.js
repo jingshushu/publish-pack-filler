@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.5.2
+// @version      2.5.3
 // @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（防429平滑限流）、Cutcheck右侧统一审片工作台、发前红转绿警示同步与A/B/C极简工作台
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
@@ -54,7 +54,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.5.2';
+  const EXT_FALLBACK_VERSION = '2.5.3';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -2372,33 +2372,70 @@
   }
 
   // ==================== 扩展后台通信 & 可选本地只读桥接 ====================
+  function normalizeExtRuntimeError(err) {
+    const msg = String(err?.message || err || '');
+    if (/Extension context invalidated/i.test(msg)) {
+      return '插件刚完成更新，请按 ⌘R 刷新一次当前网页后再操作';
+    }
+    return msg;
+  }
+
+  function isChromeExtContextInvalidated() {
+    if (!IS_CHROME_EXT || !chrome.runtime) return false;
+    try {
+      return 'id' in chrome.runtime && !chrome.runtime.id;
+    } catch {
+      return true;
+    }
+  }
+
   function sendExtMessage(msg) {
     return new Promise((resolve, reject) => {
       if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) {
         reject(new Error('当前为独立脚本环境，建议安装 Chrome 扩展版以启用内置飞书直连'));
         return;
       }
-      chrome.runtime.sendMessage(msg, (resp) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+      try {
+        if (isChromeExtContextInvalidated()) {
+          reject(new Error('插件刚完成更新，请按 ⌘R 刷新一次当前网页后再操作'));
           return;
         }
-        if (resp && resp.ok === false) {
-          reject(new Error(resp.error || '飞书请求失败'));
-          return;
-        }
-        resolve(resp || {});
-      });
+        chrome.runtime.sendMessage(msg, (resp) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(normalizeExtRuntimeError(chrome.runtime.lastError.message)));
+            return;
+          }
+          if (resp && resp.ok === false) {
+            reject(new Error(normalizeExtRuntimeError(resp.error || '请求失败')));
+            return;
+          }
+          resolve(resp || {});
+        });
+      } catch (err) {
+        reject(new Error(normalizeExtRuntimeError(err)));
+      }
     });
   }
 
   function gmRequestJson(url) {
     if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
       return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ type: 'PPF_BRIDGE_JSON', url }, (resp) => {
-          if (resp && resp.ok) resolve(resp.data);
-          else reject(new Error(resp?.error || '未启动'));
-        });
+        try {
+          if (isChromeExtContextInvalidated()) {
+            reject(new Error('插件刚完成更新，请按 ⌘R 刷新一次当前网页后再操作'));
+            return;
+          }
+          chrome.runtime.sendMessage({ type: 'PPF_BRIDGE_JSON', url }, (resp) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(normalizeExtRuntimeError(chrome.runtime.lastError.message)));
+              return;
+            }
+            if (resp && resp.ok) resolve(resp.data);
+            else reject(new Error(normalizeExtRuntimeError(resp?.error || '未启动')));
+          });
+        } catch (err) {
+          reject(new Error(normalizeExtRuntimeError(err)));
+        }
       });
     }
     return new Promise((resolve, reject) => {
@@ -2430,10 +2467,22 @@
   function gmPostJson(url, body = {}) {
     if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
       return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ type: 'PPF_BRIDGE_POST', url, body }, (resp) => {
-          if (resp && resp.ok) resolve(resp.data);
-          else reject(new Error(resp?.error || '桥接请求失败'));
-        });
+        try {
+          if (isChromeExtContextInvalidated()) {
+            reject(new Error('插件刚完成更新，请按 ⌘R 刷新一次当前网页后再操作'));
+            return;
+          }
+          chrome.runtime.sendMessage({ type: 'PPF_BRIDGE_POST', url, body }, (resp) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(normalizeExtRuntimeError(chrome.runtime.lastError.message)));
+              return;
+            }
+            if (resp && resp.ok) resolve(resp.data);
+            else reject(new Error(normalizeExtRuntimeError(resp?.error || '桥接请求失败')));
+          });
+        } catch (err) {
+          reject(new Error(normalizeExtRuntimeError(err)));
+        }
       });
     }
     return new Promise((resolve, reject) => {
@@ -2550,6 +2599,7 @@
       selectedCoverByPlat: {},
       selectedTitleIdx: -1,
       exportAccountOverride: 'auto',
+      exportCustomAccount: '',
     };
     try {
       const raw = await xStorageGet(STORAGE_KEY_SETTINGS, '');
@@ -2924,6 +2974,18 @@
 
     let exportCacheMap = {};
     let pendingExportConfirm = null; // { dimension: 'account'|'works', lastTs, agoStr, lastFile }
+    let exportTargetState = {
+      loaded: false,
+      loading: false,
+      bridgeOnline: null, // null=未测 | true=已连8765 | false=未开8765
+      matched: false,
+      account: '',
+      areaDir: '',
+      destDir: '',
+      relDir: '',
+      targets: [],
+    };
+    let exportTargetReqSeq = 0;
     let feishuState = {
       configured: true, // 初次查询前默认乐观展示加载态，避免闪烁
       loading: false,
@@ -3260,6 +3322,20 @@
       }
     }
 
+    function sanitizeExportAccountName(val) {
+      const s = String(val || '')
+        .replace(/[\\/:*?"<>|\r\n\t]+/g, '')
+        .replace(/\s+/g, '')
+        .trim();
+      if (
+        !s ||
+        /^(?:auto|default|unknown|__custom__|创作者账号|未指定账号|未指定|未知账号)$/i.test(s)
+      ) {
+        return '';
+      }
+      return s;
+    }
+
     async function loadExportCache() {
       try {
         const raw = await xStorageGet(STORAGE_KEY_EXPORT_CACHE, {});
@@ -3270,23 +3346,25 @@
       return exportCacheMap;
     }
 
-    async function markExportCache(dimension, fileName = '') {
-      const acct = detectLoggedInAccountShort() || '创作者账号';
+    async function markExportCache(dimension, fileName = '', explicitAcct = '') {
+      const acct = sanitizeExportAccountName(explicitAcct || resolveEffectiveExportAccount());
+      if (!acct) return;
       const key = `${platform}|${acct}|${dimension}`;
       exportCacheMap[key] = {
         ts: Date.now(),
         fileName,
       };
-      await xStorageSet(STORAGE_KEY_EXPORT_CACHE, exportCacheMap);
+      try {
+        await xStorageSet(STORAGE_KEY_EXPORT_CACHE, exportCacheMap);
+      } catch {
+        // ignore if context invalidated
+      }
     }
 
     function getExportCacheEntry(dimension) {
-      const acct = detectLoggedInAccountShort() || '创作者账号';
-      return (
-        exportCacheMap[`${platform}|${acct}|${dimension}`] ||
-        exportCacheMap[`${platform}|创作者账号|${dimension}`] ||
-        null
-      );
+      const acct = resolveEffectiveExportAccount();
+      if (!acct) return null;
+      return exportCacheMap[`${platform}|${acct}|${dimension}`] || null;
     }
 
     function formatRelativeTime(ts) {
@@ -3341,12 +3419,12 @@
       return { isDataMode: false, pageKind: '', pageTitle: '' };
     }
 
-    function detectLoggedInAccountShort() {
-      if (settings.exportAccountOverride && settings.exportAccountOverride !== 'auto') {
-        return settings.exportAccountOverride;
-      }
+    // 仅从当前网页 DOM 自动嗅探已登录创作者昵称（绝不返回模糊兜底词「创作者账号」）
+    function detectPageAccountAuto() {
       const selectors = [
         '.finder-nickname',
+        '.semi-navigation-header',
+        '.semi-navigation-footer',
         '[class*="nickname" i]',
         '[class*="user-name" i]',
         '[class*="username" i]',
@@ -3354,31 +3432,118 @@
         '[class*="author-name" i]',
         '[class*="creator-name" i]',
         '[class*="user-info" i]',
+        '[class*="avatar" i]',
         'header',
         'aside',
       ];
       let combined = '';
       for (const sel of selectors) {
         const els = queryDeepAll(sel);
-        for (const el of els.slice(0, 12)) {
+        for (const el of els.slice(0, 16)) {
           if (!el || hostEl.contains?.(el)) continue;
           const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-          if (t && t.length <= 260) combined += ' ' + t;
+          if (t && t.length <= 280) combined += ' ' + t;
         }
       }
       if (/万物有数|万物皆有数|数见万象/.test(combined)) return '万物有数';
       if (/靖蜀黍|flyloy|flylog/i.test(combined)) return '靖蜀黍';
       if (/工程检测/.test(combined)) return '工程检测科普';
 
-      const nickEls = queryDeepAll('.finder-nickname, [class*="nickname" i], [class*="user-name" i], [class*="account-name" i]');
+      // 动态匹配本地 AIHub 已存在的账号目录名
+      if (Array.isArray(exportTargetState.targets)) {
+        for (const t of exportTargetState.targets) {
+          const acc = sanitizeExportAccountName(t?.account);
+          if (acc && acc.length >= 2 && combined.includes(acc)) {
+            return acc;
+          }
+        }
+      }
+
+      const noiseRe =
+        /创作|中心|服务|平台|首页|登录|退出|消息|数据|管理|高清|发布|投稿|作品|帮助|反馈|全部|查看|概览|账号|抖音|小红书|视频号|哔哩|粉丝|互动|设置|通知|客服|规则|学院/;
+      const nickEls = queryDeepAll(
+        '.finder-nickname, [class*="nickname" i], [class*="user-name" i], [class*="account-name" i], [class*="creator-name" i], [class*="author-name" i]'
+      );
       for (const el of nickEls) {
         if (!isVisible(el) || hostEl.contains?.(el)) continue;
-        const clean = (el.textContent || '').replace(/\s+/g, '').replace(/[\\/:*?"<>|]+/g, '').trim();
-        if (clean.length >= 2 && clean.length <= 14 && !/创作|中心|服务|首页|登录|退出|消息|数据/.test(clean)) {
+        const clean = sanitizeExportAccountName(el.textContent || '');
+        if (clean.length >= 2 && clean.length <= 14 && !noiseRe.test(clean) && !/^\d+$/.test(clean)) {
           return clean;
         }
       }
       return '';
+    }
+
+    function resolveEffectiveExportAccount() {
+      const ov = settings.exportAccountOverride || 'auto';
+      if (ov === '__custom__') {
+        return sanitizeExportAccountName(settings.exportCustomAccount);
+      }
+      if (ov && ov !== 'auto') {
+        return sanitizeExportAccountName(ov);
+      }
+      return detectPageAccountAuto() || sanitizeExportAccountName(settings.exportCustomAccount);
+    }
+
+    function detectLoggedInAccountShort() {
+      return resolveEffectiveExportAccount();
+    }
+
+    async function refreshExportTargetPreview() {
+      if (!getDataCenterContext().isDataMode) return;
+      const effAcct = resolveEffectiveExportAccount();
+      const seq = ++exportTargetReqSeq;
+      exportTargetState.loading = true;
+      try {
+        let data = null;
+        if (IS_CHROME_EXT && chrome.runtime?.sendMessage) {
+          const resp = await sendExtMessage({ type: 'PPF_BRIDGE_EXPORT_TARGETS', account: effAcct });
+          data = resp?.data || null;
+        } else {
+          data = await gmRequestJson(
+            `${settings.bridgeUrl}/api/export-targets?account=${encodeURIComponent(effAcct)}`
+          );
+        }
+        if (seq !== exportTargetReqSeq) return;
+        // 兼容未升级 /api/export-targets 的旧版 serve_pack.py（返回 { service: "PublishPack..." }）
+        if (data && Array.isArray(data.targets)) {
+          exportTargetState = {
+            loaded: true,
+            loading: false,
+            bridgeOnline: true,
+            matched: Boolean(data.matched && data.destDir),
+            account: data.account || effAcct,
+            areaDir: data.areaDir || '',
+            destDir: data.destDir || '',
+            relDir: data.relDir || '',
+            targets: data.targets || [],
+          };
+        } else {
+          exportTargetState = {
+            ...exportTargetState,
+            loaded: true,
+            loading: false,
+            bridgeOnline: Boolean(data?.service),
+            matched: false,
+            account: effAcct,
+            destDir: '',
+            relDir: '',
+          };
+        }
+      } catch {
+        if (seq !== exportTargetReqSeq) return;
+        exportTargetState = {
+          ...exportTargetState,
+          loaded: true,
+          loading: false,
+          bridgeOnline: false,
+          matched: false,
+          account: effAcct,
+          destDir: '',
+          relDir: '',
+        };
+      }
+      render();
     }
 
     function detectActivePeriodLabel(nearEl = null) {
@@ -3428,58 +3593,296 @@
       return '';
     }
 
-    function pushExportHintToBackground({ btnEl = null, sectionOverride = '', dimension = '', enqueue = false } = {}) {
-      if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) return '';
-      const acct = detectLoggedInAccountShort();
+    async function pushExportHintToBackground({
+      btnEl = null,
+      accountOverride = '',
+      sectionOverride = '',
+      dimension = '',
+      enqueue = false,
+    } = {}) {
+      const acct = sanitizeExportAccountName(accountOverride || resolveEffectiveExportAccount());
+      if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) return acct;
       const section = sectionOverride || (btnEl ? inferNearbySectionTitle(btnEl) : '');
       const period = detectActivePeriodLabel(btnEl);
-      try {
-        chrome.runtime.sendMessage({
-          type: 'PPF_SET_EXPORT_HINT',
-          platform,
-          account: acct,
-          section,
-          period,
-          dimension,
-          enqueue,
-        });
-      } catch {
-        // ignore
-      }
+      await new Promise((resolve) => {
+        try {
+          if (isChromeExtContextInvalidated()) {
+            resolve();
+            return;
+          }
+          chrome.runtime.sendMessage(
+            {
+              type: 'PPF_SET_EXPORT_HINT',
+              platform,
+              account: acct,
+              section,
+              period,
+              dimension,
+              enqueue,
+            },
+            () => {
+              void chrome.runtime.lastError;
+              resolve();
+            }
+          );
+        } catch {
+          resolve();
+        }
+      });
       return acct;
     }
 
-    function findVisibleExportButtons() {
-      const exportKw = /^(?:导出数据|导出表格|导出明细|导出列表|导出报表|导出Excel|下载数据|下载明细|下载表格|下载报表|下载Excel|数据导出|导出|下载)$/i;
-      const nodes = queryDeepAll('button, a, [role="button"], .weui-desktop-btn, [class*="export" i], [class*="download" i], span, div');
+    async function queryRecentBrowserDownloads(sinceTs) {
+      if (!IS_CHROME_EXT || !chrome.runtime?.sendMessage) return null;
+      try {
+        const resp = await sendExtMessage({
+          type: 'PPF_GET_RECENT_DOWNLOADS',
+          sinceTs,
+          platform,
+        });
+        return Array.isArray(resp?.items) ? resp.items : [];
+      } catch {
+        return null;
+      }
+    }
+
+    // 专用于触发「导出数据 / 下载报表」按钮：派发完整悬停按压序列并调用原生 .click()，100% 兼容 <a download>、SheetJS Blob 与 Vue/React 委托事件
+    async function triggerExportElementClick(targetEl) {
+      if (!targetEl || !isVisible(targetEl)) return false;
+      try {
+        const r0 = targetEl.getBoundingClientRect();
+        if (r0.top < 0 || r0.bottom > window.innerHeight) {
+          targetEl.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+          await humanSleep(60, 110);
+        }
+      } catch {
+        // ignore
+      }
+
+      const doc = targetEl.ownerDocument || document;
+      const win = doc.defaultView || window;
+      const rect = targetEl.getBoundingClientRect();
+      const clientX = Math.round((rect.left + rect.width / 2 + randFloat(-rect.width * 0.12, rect.width * 0.12)) * 10) / 10;
+      const clientY = Math.round((rect.top + rect.height / 2 + randFloat(-rect.height * 0.12, rect.height * 0.12)) * 10) / 10;
+      const baseCoords = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: win,
+        clientX,
+        clientY,
+      };
+
+      if (typeof win.PointerEvent === 'function') {
+        targetEl.dispatchEvent(new win.PointerEvent('pointerover', { ...baseCoords, pointerType: 'mouse' }));
+        targetEl.dispatchEvent(new win.PointerEvent('pointerdown', { ...baseCoords, button: 0, buttons: 1, pointerType: 'mouse', isPrimary: true }));
+      }
+      targetEl.dispatchEvent(new win.MouseEvent('mouseover', baseCoords));
+      targetEl.dispatchEvent(new win.MouseEvent('mousedown', { ...baseCoords, button: 0, buttons: 1, detail: 1 }));
+      await humanSleep(35, 75);
+      if (typeof win.PointerEvent === 'function') {
+        targetEl.dispatchEvent(new win.PointerEvent('pointerup', { ...baseCoords, button: 0, buttons: 0, pointerType: 'mouse', isPrimary: true }));
+      }
+      targetEl.dispatchEvent(new win.MouseEvent('mouseup', { ...baseCoords, button: 0, buttons: 0, detail: 1 }));
+
+      if (typeof targetEl.click === 'function') {
+        targetEl.click();
+      } else {
+        targetEl.dispatchEvent(new win.MouseEvent('click', { ...baseCoords, button: 0, buttons: 0, detail: 1 }));
+      }
+      return true;
+    }
+
+    function findOpenModalOrDrawer() {
+      const modalSelectors = [
+        '.semi-modal-content',
+        '.semi-sidesheet-inner',
+        '.semi-portal [role="dialog"]',
+        '.d-modal-content',
+        '.d-drawer-content',
+        '.ant-modal-content',
+        '.ant-drawer-content',
+        '.el-dialog',
+        '.el-drawer',
+        '[role="dialog"]',
+      ];
+      const candidates = [];
+      for (const sel of modalSelectors) {
+        for (const el of queryDeepAll(sel)) {
+          if (!el || hostEl.contains?.(el) || !isVisible(el)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width >= 380 && r.height >= 220) {
+            candidates.push(el);
+          }
+        }
+      }
+      return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+    }
+
+    function findVisibleExportButtons(scopeRoot = null) {
+      const exportKw =
+        /^(?:导出(?:数据|表格|明细|列表|报表|趋势|概览|Excel|CSV)?|下载(?:数据|明细|表格|报表|趋势|Excel|CSV)?|数据导出)$/i;
+      const semanticBtnSel =
+        'button, a, [role="button"], .weui-desktop-btn, .d-button, .semi-button, .ant-btn, .el-button';
+      const navNoiseSel =
+        'nav, aside, [class*="sidebar" i], [class*="side-bar" i], [class*="sider" i], [class*="menu-item" i], [class*="nav-item" i]';
+
+      const nodes = queryDeepAll(
+        `${semanticBtnSel}, [class*="export" i], [class*="download" i], [title*="导出"], [aria-label*="导出"], span, div`,
+        scopeRoot
+      );
       const found = [];
       const seen = new Set();
 
       for (const el of nodes) {
         if (!el || el === hostEl || hostEl.contains?.(el)) continue;
         if (!isVisible(el)) continue;
+        if (el.closest?.(navNoiseSel)) continue;
+
         const rect = el.getBoundingClientRect();
-        if (rect.width < 24 || rect.width > 280 || rect.height < 16 || rect.height > 68) continue;
+        if (rect.width < 20 || rect.width > 280 || rect.height < 14 || rect.height > 68) continue;
 
         const rawTxt = (el.textContent || '').replace(/\s+/g, '').trim();
-        if (!exportKw.test(rawTxt)) continue;
+        const attrTxt = `${el.getAttribute?.('title') || ''} ${el.getAttribute?.('aria-label') || ''}`
+          .replace(/\s+/g, '')
+          .trim();
+        const txtMatched = exportKw.test(rawTxt);
+        const attrMatched = !rawTxt && /(?:导出数据|导出报表|导出列表|下载数据)/.test(attrTxt);
+        if (!txtMatched && !attrMatched) continue;
 
-        const clickable =
-          el.closest?.('button, a, [role="button"], .weui-desktop-btn, .d-button, .semi-button, .ant-btn, .el-button') || el;
+        const ancestorSemantic = el.closest?.(semanticBtnSel);
+        let clickable = ancestorSemantic || el;
+
+        // 核心防坑：若当前节点只是外层排版 div（如小红书账号概览右侧槽位 div，内部包着真正的按钮或文字胶囊），严禁停在外层空白容器！
+        if (!ancestorSemantic && !el.matches?.(semanticBtnSel)) {
+          const innerSemantic = el.querySelector?.(semanticBtnSel);
+          if (innerSemantic && isVisible(innerSemantic)) {
+            clickable = innerSemantic;
+          } else {
+            const children = Array.from(el.querySelectorAll?.('*') || []).filter((c) => {
+              if (!isVisible(c)) return false;
+              const ct = (c.textContent || '').replace(/\s+/g, '').trim();
+              return exportKw.test(ct);
+            });
+            if (children.length > 0) {
+              // 取最内层的可见匹配节点（点击后事件自下而上冒泡，100% 穿过所有内层/外层 Vue @click 监听器！）
+              const deepest = children[children.length - 1];
+              const pointerWrap = deepest.closest?.('[class*="export" i], [class*="download" i], [class*="btn" i]');
+              clickable =
+                pointerWrap && el.contains(pointerWrap) && pointerWrap.getBoundingClientRect().width <= 160
+                  ? pointerWrap
+                  : deepest;
+            }
+          }
+        }
+
         if (!isVisible(clickable) || seen.has(clickable)) continue;
+        // 避免同时把父节点与子节点重复收入列表
+        let dupWithExisting = false;
+        for (const prev of seen) {
+          if (prev.contains?.(clickable) || clickable.contains?.(prev)) {
+            dupWithExisting = true;
+            break;
+          }
+        }
+        if (dupWithExisting) continue;
+
         const cRect = clickable.getBoundingClientRect();
-        if (cRect.width > 300 || cRect.height > 76) continue;
+        if (cRect.width > 280 || cRect.height > 76) continue;
 
         seen.add(clickable);
         found.push({
           el: clickable,
-          label: rawTxt,
+          label: rawTxt || attrTxt || '导出数据',
           section: inferNearbySectionTitle(clickable),
           top: cRect.top,
+          left: cRect.left,
         });
       }
-      found.sort((a, b) => a.top - b.top);
+      found.sort((a, b) => a.top - b.top || b.left - a.left);
       return found;
+    }
+
+    function isSubTabActive(tabEl) {
+      if (!tabEl) return false;
+      let cur = tabEl;
+      for (let d = 0; d < 4 && cur && cur !== document.body; d++) {
+        if (isElementExplicitlyActive(cur)) return true;
+        const cls = String(cur.className || '');
+        if (/\b(?:active|is-active|selected|checked|current)\b|active|checked|selected/i.test(cls)) {
+          return true;
+        }
+        if (cur.getAttribute?.('aria-selected') === 'true') return true;
+        cur = cur.parentElement;
+      }
+      return false;
+    }
+
+    function findXhsAccountSubTab(kw) {
+      const navNoiseSel =
+        'nav, aside, [class*="sidebar" i], [class*="side-bar" i], [class*="sider" i], [class*="menu-item" i]';
+      const matches = queryDeepAll('[role="tab"], .d-tab, [class*="tab" i], li, button, span, div').filter((el) => {
+        if (!el || !isVisible(el) || hostEl.contains?.(el) || el.closest?.(navNoiseSel)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width < 28 || r.width > 180 || r.height < 18 || r.height > 58) return false;
+        const t = (el.textContent || '').replace(/\s+/g, '').trim();
+        return t === `${kw}数据` || t === kw;
+      });
+      if (!matches.length) return null;
+      // 优先选择最内层精确节点或明确带 tab 角色的节点，杜绝误点外层宽容器
+      const roleTab = matches.find((m) => m.getAttribute?.('role') === 'tab' || /\btab\b/i.test(String(m.className || '')));
+      if (roleTab) return roleTab;
+      const leaf = matches.filter((m) => !matches.some((other) => other !== m && m.contains?.(other)));
+      return leaf[0] || matches[0];
+    }
+
+    // 精准定位抖音「作品列表导出」专属按钮（严格限定在「查看所有作品」弹窗或含「作品名称」表头的表格模块内，绝不误触顶部账号概览按钮！）
+    function findDouyinWorksExportButton() {
+      // 1. 优先检查是否已打开「查看所有作品 / 全部作品」Modal 或抽屉
+      const openModal = findOpenModalOrDrawer();
+      if (openModal) {
+        const modalBtns = findVisibleExportButtons(openModal);
+        if (modalBtns.length > 0) {
+          return { btn: modalBtns[0], source: '弹窗全量作品表', sectionOverride: '作品列表导出' };
+        }
+      }
+
+      // 2. 检查当前页面是否存在含「作品名称」表头的 16 列完整作品明细表（如「作品数据」独立子页）
+      const tables = queryDeepAll('table, .semi-table, [class*="table-wrap" i], [class*="table-container" i]').filter(
+        (t) => isVisible(t) && !hostEl.contains?.(t)
+      );
+      for (const tbl of tables) {
+        const hdrNodes = tbl.querySelectorAll('th, thead, [class*="thead" i], [class*="table-header" i]');
+        const hdrText = Array.from(hdrNodes)
+          .map((n) => n.textContent || '')
+          .join(' ');
+        if (/作品名称/.test(hdrText) && /播放/.test(hdrText)) {
+          const tblRect = tbl.getBoundingClientRect();
+          let box = tbl.parentElement;
+          for (let d = 0; d < 5 && box && box !== document.body; d++) {
+            const scopedBtns = findVisibleExportButtons(box).filter(
+              (b) => !/短视频全量|粉丝数据|数据总览|投稿总结/.test(b.section) && b.top <= tblRect.top + 80 && tblRect.top - b.top <= 220
+            );
+            if (scopedBtns.length > 0) {
+              return { btn: scopedBtns[scopedBtns.length - 1], source: '作品数据明细表', sectionOverride: '作品列表导出' };
+            }
+            box = box.parentElement;
+          }
+        }
+      }
+
+      // 3. 退一步检查是否明确存在「投稿列表」（视频名称 + 5s完播率）专属导出按钮（绝不碰「数据总览 / 核心数据 / 投稿总结」）
+      const allBtns = findVisibleExportButtons();
+      const postListBtn = allBtns.find(
+        (b) =>
+          /投稿列表|作品列表|作品明细|视频列表/.test(b.section) &&
+          !/数据总览|核心数据|数据表现|作品数据概览|粉丝数据|投稿总结/.test(b.section)
+      );
+      if (postListBtn) {
+        return { btn: postListBtn, source: '投稿列表', sectionOverride: '投稿列表表现' };
+      }
+
+      return null;
     }
 
     // 针对 B站 member.bilibili.com/platform/data-up/video「近期稿件对比」右上角无文字纯图标导出按钮 [📤]
@@ -3612,8 +4015,25 @@
       return { ok: false, count: 0, fileName: '' };
     }
 
-    // 核心安全导表执行器：严格区分 dimension = 'account'（账号）与 'works'（作品），内置 12h 防重二次确认
+    // 核心安全导表执行器：强制校验归属账号、严格区分 dimension = 'account'（账号）与 'works'（作品），内置 12h 防重二次确认与真实下载校验
     async function runDimensionExport(dimension, { force = false } = {}) {
+      if (isChromeExtContextInvalidated()) {
+        setStatus('🔄 插件刚完成更新，请先按 ⌘R 刷新一次当前网页后再点导出！');
+        render();
+        return false;
+      }
+
+      // 硬门禁：未识别且未指定归属账号时严禁触发下载（彻底消灭「创作者账号」无主文件与乱建目录！）
+      const effAcct = resolveEffectiveExportAccount();
+      if (!effAcct) {
+        setStatus('🚨 未识别到归属账号！请先在上方选择账号或手动输入账号名后再点导出');
+        render();
+        const customInp = shadow.getElementById('ppf-export-custom-inp');
+        const acctSel = shadow.getElementById('ppf-export-acct');
+        (customInp || acctSel)?.focus?.();
+        return false;
+      }
+
       await loadExportCache();
       const prevEntry = getExportCacheEntry(dimension);
       if (!force && prevEntry?.ts && Date.now() - Number(prevEntry.ts) < EXPORT_DEDUP_WINDOW_MS) {
@@ -3629,8 +4049,12 @@
       }
       pendingExportConfirm = null;
 
+      const startTs = Date.now();
       const ctx = getDataCenterContext();
-      const btns = findVisibleExportButtons();
+      const destHintSuffix =
+        exportTargetState.bridgeOnline && exportTargetState.matched && exportTargetState.relDir
+          ? ` → 自动归档至 ${exportTargetState.relDir}/`
+          : ' → 保留在 ~/Downloads';
 
       // ==================== 1. 导出「账号」数据 ====================
       if (dimension === 'account') {
@@ -3640,83 +4064,177 @@
             return false;
           }
           const subNames = ['观看', '互动', '涨粉', '发布'];
-          const tabCands = queryDeepAll('[role="tab"], .d-tab, li, span, div').filter((el) => {
-            if (!isVisible(el) || hostEl.contains?.(el)) return false;
-            const r = el.getBoundingClientRect();
-            return r.width >= 32 && r.width <= 180 && r.height >= 20 && r.height <= 56;
-          });
-          let count = 0;
+          let clickedCount = 0;
           for (let i = 0; i < subNames.length; i++) {
             const kw = subNames[i];
-            const hitTab = tabCands.find((el) => {
-              const t = (el.textContent || '').replace(/\s+/g, '').trim();
-              return t === `${kw}数据` || t === kw;
-            });
-            if (hitTab) {
-              setStatus(`⏳ 小红书账号存档 (${i + 1}/4)：切换「${kw}数据」（拟人随机延时中）...`);
+            const hitTab = findXhsAccountSubTab(kw);
+            if (hitTab && !isSubTabActive(hitTab)) {
+              setStatus(`⏳ 小红书账号导出 (${i + 1}/4)：切换「${kw}数据」...`);
               await humanMouseClick(hitTab);
-              await humanGaussianSleep(1650, 2950);
+              // 控制总耗时在 4s 浏览器瞬态用户手势窗口内，确保 Blob / 下载弹窗不被浏览器拦截
+              await humanGaussianSleep(820, 1080);
             }
             const curBtns = findVisibleExportButtons();
             if (curBtns.length > 0) {
-              pushExportHintToBackground({ btnEl: curBtns[0].el, sectionOverride: `${kw}数据`, dimension: 'account', enqueue: true });
-              await humanMouseClick(curBtns[0].el);
-              count++;
+              await pushExportHintToBackground({
+                btnEl: curBtns[0].el,
+                accountOverride: effAcct,
+                sectionOverride: `${kw}数据`,
+                dimension: 'account',
+                enqueue: true,
+              });
+              await triggerExportElementClick(curBtns[0].el);
+              clickedCount++;
               if (i + 1 < subNames.length) {
-                await humanGaussianSleep(2100, 4100);
+                await humanGaussianSleep(260, 420);
               }
             }
           }
-          if (count > 0) {
-            await markExportCache('account');
-            setStatus(`✅ 已按随机拟人间隔导出小红书账号 ${count} 张表并自动重命名！`);
-            render();
-            return true;
+          if (clickedCount === 0) {
+            setStatus('⚠️ 未在当前「账号概览」页找到导出按钮，请确认页面已加载完成');
+            return false;
           }
-          setStatus('⚠️ 未在当前页找到小红书导出按钮');
-          return false;
+          await humanSleep(750, 1050);
+          const dlItems = await queryRecentBrowserDownloads(startTs);
+          if (Array.isArray(dlItems) && dlItems.length === 0) {
+            setStatus(
+              '⚠️ 已点击导出但浏览器未开始下载：请检查地址栏右侧是否拦截了「多文件下载」，点允许后再试！'
+            );
+            render();
+            return false;
+          }
+          const actualCnt = Array.isArray(dlItems) ? dlItems.length : clickedCount;
+          await markExportCache('account', dlItems?.[0]?.filename || '', effAcct);
+          if (Array.isArray(dlItems) && dlItems.length < clickedCount) {
+            setStatus(
+              `⚠️ 已触发 ${clickedCount} 个分栏，浏览器实际下载 ${dlItems.length} 张表（请在地址栏右侧允许「自动下载多个文件」后重导补齐）`
+            );
+          } else {
+            setStatus(`✅ 已导出「${effAcct}」小红书账号 ${actualCnt} 张趋势表${destHintSuffix}`);
+          }
+          render();
+          return true;
         }
 
         if (platform === 'douyin') {
-          // 精准只点「作品数据 / 粉丝数据」区域导出按钮，拉黑底下「投稿总结 / 投稿列表」那两张残缺 data.xlsx！
-          const validBtn =
-            btns.find((b) => /作品数据|粉丝数据|数据总览/.test(b.section) && !/投稿总结|投稿列表/.test(b.section)) ||
-            btns.find((b) => !/投稿总结|投稿列表/.test(b.section));
-          if (!validBtn) {
-            setStatus('💡 请在左侧进入「数据中心」概览页，再点「📊 账号」导出短视频全量指标');
+          const openModal = findOpenModalOrDrawer();
+          if (openModal && /作品名称/.test(openModal.textContent || '')) {
+            setStatus('💡 当前正打开「全部作品」弹窗；请先关闭弹窗回到数据概览页再点「📊 账号」，或直接点「🎬 作品」导明细');
             return false;
           }
-          pushExportHintToBackground({ btnEl: validBtn.el, dimension: 'account', enqueue: true });
-          await humanMouseClick(validBtn.el);
-          await markExportCache('account');
-          setStatus('✅ 已导出抖音账号周期指标并自动重命名！');
+          const btns = findVisibleExportButtons();
+          // 严格只点顶部「数据总览 / 数据表现 / 作品数据 / 粉丝数据」概览导出按钮，拉黑底下「投稿总结 / 投稿列表 / 作品列表」！
+          const findOverviewBtn = () => {
+            const cur = findVisibleExportButtons();
+            return (
+              cur.find(
+                (b) =>
+                  /作品数据|短视频|粉丝数据|数据总览|核心数据|数据表现/.test(b.section) &&
+                  !/投稿总结|投稿列表|作品列表|全部作品/.test(b.section)
+              ) ||
+              cur.find((b) => !/投稿总结|投稿列表|作品列表|全部作品/.test(b.section) && b.top < 520) ||
+              null
+            );
+          };
+
+          const firstBtn = findOverviewBtn();
+          if (!firstBtn) {
+            setStatus('💡 请在左侧进入「数据中心」概览页，再点「📊 账号」导出短视频与粉丝全量指标');
+            return false;
+          }
+
+          await pushExportHintToBackground({
+            btnEl: firstBtn.el,
+            accountOverride: effAcct,
+            dimension: 'account',
+            enqueue: true,
+          });
+          await triggerExportElementClick(firstBtn.el);
+          let exportedCount = 1;
+
+          // 检查同一顶部概览卡片内是否存在未激活的「粉丝数据」子 Tab，若有则一并切换导出《粉丝全量指标》（仅在确认切换成功后点击，绝不重复点同一张表！）
+          const fanTabs = queryDeepAll('[role="tab"], .semi-tabs-tab, li, span, div').filter((el) => {
+            if (!el || !isVisible(el) || hostEl.contains?.(el)) return false;
+            if (el.closest?.('nav, aside, [class*="sider" i], [class*="menu" i]')) return false;
+            const r = el.getBoundingClientRect();
+            if (r.width < 36 || r.width > 160 || r.height < 18 || r.height > 54) return false;
+            if (Math.abs(r.top - firstBtn.top) > 140) return false;
+            const t = (el.textContent || '').replace(/\s+/g, '').trim();
+            return t === '粉丝数据';
+          });
+          const fanTabLeaf = fanTabs.filter((m) => !fanTabs.some((o) => o !== m && m.contains?.(o)))[0] || fanTabs[0];
+          if (fanTabLeaf && !isSubTabActive(fanTabLeaf)) {
+            setStatus('⏳ 已导出短视频全量指标，正在切换「粉丝数据」导出粉丝全量指标...');
+            await humanSleep(320, 520);
+            await humanMouseClick(fanTabLeaf);
+            await humanGaussianSleep(880, 1180);
+            if (isSubTabActive(fanTabLeaf)) {
+              const fanBtn = findOverviewBtn();
+              if (fanBtn) {
+                await pushExportHintToBackground({
+                  btnEl: fanBtn.el,
+                  accountOverride: effAcct,
+                  sectionOverride: '粉丝数据',
+                  dimension: 'account',
+                  enqueue: true,
+                });
+                await triggerExportElementClick(fanBtn.el);
+                exportedCount++;
+              }
+            }
+          }
+
+          await humanSleep(650, 950);
+          const dlItems = await queryRecentBrowserDownloads(startTs);
+          if (Array.isArray(dlItems) && dlItems.length === 0) {
+            setStatus('⚠️ 未检测到抖音报表下载，请检查浏览器是否拦截了下载弹窗');
+            render();
+            return false;
+          }
+          await markExportCache('account', dlItems?.[0]?.filename || '', effAcct);
+          setStatus(
+            `✅ 已导出「${effAcct}」抖音账号指标（共 ${Array.isArray(dlItems) ? dlItems.length : exportedCount} 张表）${destHintSuffix}`
+          );
           render();
           return true;
         }
 
         if (platform === 'bilibili') {
+          const btns = findVisibleExportButtons();
           const trendBtn = btns.find((b) => !/收益|充电|稿件对比/.test(b.section));
           if (!trendBtn) {
             setStatus('💡 未找到 B站账号趋势导出按钮（请确认位于「数据中心」顶部趋势区）');
             return false;
           }
-          pushExportHintToBackground({ btnEl: trendBtn.el, sectionOverride: '播放互动趋势', dimension: 'account', enqueue: true });
-          await humanMouseClick(trendBtn.el);
-          await markExportCache('account');
-          setStatus('✅ 已导出 B站账号趋势表并自动重命名！');
+          await pushExportHintToBackground({
+            btnEl: trendBtn.el,
+            accountOverride: effAcct,
+            sectionOverride: '播放互动趋势',
+            dimension: 'account',
+            enqueue: true,
+          });
+          await triggerExportElementClick(trendBtn.el);
+          await markExportCache('account', '', effAcct);
+          setStatus(`✅ 已导出「${effAcct}」B站账号趋势表${destHintSuffix}`);
           render();
           return true;
         }
 
         if (platform === 'weixin') {
+          const btns = findVisibleExportButtons();
           if (btns.length === 0) {
             setStatus('💡 请在左侧点「关注者数据」或「动态数据-动态分析」再导出账号表');
             return false;
           }
-          pushExportHintToBackground({ btnEl: btns[0].el, dimension: 'account', enqueue: true });
-          await humanMouseClick(btns[0].el);
-          await markExportCache('account');
-          setStatus('✅ 已导出视频号账号表并自动重命名！');
+          await pushExportHintToBackground({
+            btnEl: btns[0].el,
+            accountOverride: effAcct,
+            dimension: 'account',
+            enqueue: true,
+          });
+          await triggerExportElementClick(btns[0].el);
+          await markExportCache('account', '', effAcct);
+          setStatus(`✅ 已导出「${effAcct}」视频号账号表${destHintSuffix}`);
           render();
           return true;
         }
@@ -3729,50 +4247,79 @@
             setStatus('💡 当前不在「笔记数据」页；请在左侧点「内容分析 / 笔记数据」再导作品明细表');
             return false;
           }
+          const btns = findVisibleExportButtons();
           if (btns.length === 0) {
             setStatus('⚠️ 未找到小红书「导出数据」按钮');
             return false;
           }
-          pushExportHintToBackground({ btnEl: btns[0].el, sectionOverride: '笔记列表明细表', dimension: 'works', enqueue: true });
-          await humanMouseClick(btns[0].el);
-          await markExportCache('works');
-          setStatus('✅ 已导出小红书《笔记列表明细表》并自动重命名！');
+          await pushExportHintToBackground({
+            btnEl: btns[0].el,
+            accountOverride: effAcct,
+            sectionOverride: '笔记列表明细表',
+            dimension: 'works',
+            enqueue: true,
+          });
+          await triggerExportElementClick(btns[0].el);
+          await humanSleep(650, 950);
+          const dlItems = await queryRecentBrowserDownloads(startTs);
+          if (Array.isArray(dlItems) && dlItems.length === 0) {
+            setStatus('⚠️ 未检测到《笔记列表明细表》下载，请检查浏览器下载提示');
+            render();
+            return false;
+          }
+          await markExportCache('works', dlItems?.[0]?.filename || '', effAcct);
+          setStatus(`✅ 已导出「${effAcct}」小红书《笔记列表明细表》${destHintSuffix}`);
           render();
           return true;
         }
 
         if (platform === 'douyin') {
-          if (ctx.isDouyinManage && btns.length === 0) {
-            pushExportHintToBackground({ sectionOverride: '作品列表导出', dimension: 'works', enqueue: true });
-            const fb = exportDomFallbackCsv(ctx);
-            if (fb.ok) {
-              await markExportCache('works', fb.fileName);
-              setStatus(`✅ 已导出抖音作品管理列表 (${fb.count} 条) 并自动重命名！`);
-              render();
-              return true;
+          let workHit = findDouyinWorksExportButton();
+
+          // 若当前在「数据中心」概览页且尚未展开全部作品弹窗/列表，自动帮用户点击「查看所有作品 / 全部作品」展开后再导！
+          if (!workHit || workHit.source === '投稿列表') {
+            const viewAllTrigger = queryDeepAll('a, button, [role="button"], span, div').find((el) => {
+              if (!el || !isVisible(el) || hostEl.contains?.(el)) return false;
+              const r = el.getBoundingClientRect();
+              if (r.width < 48 || r.width > 220 || r.height < 16 || r.height > 52) return false;
+              const t = (el.textContent || '').replace(/\s+/g, '').trim();
+              return /^(?:查看(?:所有|全部)作品|全部作品)[>＞]?$/.test(t);
+            });
+            if (viewAllTrigger) {
+              setStatus('⏳ 正在自动展开「查看所有作品」16 列完整明细表...');
+              await humanMouseClick(viewAllTrigger);
+              await humanGaussianSleep(1050, 1400);
+              const modalAfter = findDouyinWorksExportButton();
+              if (modalAfter) {
+                workHit = modalAfter;
+              }
             }
           }
-          // 检查是否还停留在「数据总览 / 运营数据」首页（右上角有「查看所有作品」且表头无完播率/5s完播率）
-          const hasViewAllWorksLink = queryDeepAll('a, span, div').some(
-            (el) => isVisible(el) && /^查看所有作品/.test((el.textContent || '').replace(/\s+/g, '').trim())
-          );
-          const thText = queryDeepAll('th, [class*="thead" i]').map((e) => e.textContent || '').join(' ');
-          const isFull16ColTable = /审核状态|封面点击率|粉丝增量|收藏量/.test(thText);
 
-          if (ctx.pageKind === 'dy_operation' && hasViewAllWorksLink && !isFull16ColTable) {
-            setStatus('💡 请先手点页面右上角「查看所有作品 >」展开全量作品列表，再点「🎬 作品」导 16 列完整明细（已自动避开底部残缺表）');
+          if (!workHit) {
+            setStatus(
+              '💡 未定位到「作品列表」导出按钮（已防呆拦截顶部账号概览重复表）：请先点页面「查看所有作品 >」展开列表后再试！'
+            );
             return false;
           }
 
-          const workBtn = btns.find((b) => !/投稿总结/.test(b.section)) || btns[0];
-          if (!workBtn) {
-            setStatus('💡 请先点入「查看所有作品 >」或「作品数据」列表页，再点「🎬 作品」导出');
+          await pushExportHintToBackground({
+            btnEl: workHit.btn.el,
+            accountOverride: effAcct,
+            sectionOverride: workHit.sectionOverride || '作品列表导出',
+            dimension: 'works',
+            enqueue: true,
+          });
+          await triggerExportElementClick(workHit.btn.el);
+          await humanSleep(650, 950);
+          const dlItems = await queryRecentBrowserDownloads(startTs);
+          if (Array.isArray(dlItems) && dlItems.length === 0) {
+            setStatus('⚠️ 未检测到抖音作品明细下载，请确认表格已加载数据');
+            render();
             return false;
           }
-          pushExportHintToBackground({ btnEl: workBtn.el, sectionOverride: '作品列表导出', dimension: 'works', enqueue: true });
-          await humanMouseClick(workBtn.el);
-          await markExportCache('works');
-          setStatus('✅ 已导出抖音《作品列表导出》并自动重命名！');
+          await markExportCache('works', dlItems?.[0]?.filename || '', effAcct);
+          setStatus(`✅ 已导出「${effAcct}」抖音《${workHit.sectionOverride}》${destHintSuffix}`);
           render();
           return true;
         }
@@ -3785,10 +4332,16 @@
               biliIconBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
               await humanGaussianSleep(550, 880);
             }
-            pushExportHintToBackground({ btnEl: biliIconBtn, sectionOverride: '近期稿件对比', dimension: 'works', enqueue: true });
-            await humanMouseClick(biliIconBtn);
-            await markExportCache('works');
-            setStatus('✅ 已点击 B站「近期稿件对比」右上导出图标并自动重命名！');
+            await pushExportHintToBackground({
+              btnEl: biliIconBtn,
+              accountOverride: effAcct,
+              sectionOverride: '近期稿件对比',
+              dimension: 'works',
+              enqueue: true,
+            });
+            await triggerExportElementClick(biliIconBtn);
+            await markExportCache('works', '', effAcct);
+            setStatus(`✅ 已导出「${effAcct}」B站《近期稿件对比》${destHintSuffix}`);
             render();
             return true;
           }
@@ -3811,14 +4364,21 @@
             setStatus('💡 当前停在按天趋势视图；请先手点页面上方「单篇动态」Tab，再点「🎬 作品」导出！');
             return false;
           }
+          const btns = findVisibleExportButtons();
           if (btns.length === 0) {
             setStatus('⚠️ 未找到视频号单篇动态「导出数据」按钮');
             return false;
           }
-          pushExportHintToBackground({ btnEl: btns[0].el, sectionOverride: '动态数据明细', dimension: 'works', enqueue: true });
-          await humanMouseClick(btns[0].el);
-          await markExportCache('works');
-          setStatus('✅ 已导出视频号《动态数据明细》并自动重命名！');
+          await pushExportHintToBackground({
+            btnEl: btns[0].el,
+            accountOverride: effAcct,
+            sectionOverride: '动态数据明细',
+            dimension: 'works',
+            enqueue: true,
+          });
+          await triggerExportElementClick(btns[0].el);
+          await markExportCache('works', '', effAcct);
+          setStatus(`✅ 已导出「${effAcct}」视频号《动态数据明细》${destHintSuffix}`);
           render();
           return true;
         }
@@ -3828,32 +4388,36 @@
     }
 
     async function runArchiveDownloadsToAihub() {
-      setStatus('⏳ 正在将 ~/Downloads 新导出的报表去重归档至 AIHub 对应账号目录...');
-      const brandMap = {
-        万物有数: '万物皆有数',
-        靖蜀黍: '靖蜀黍·个人IP',
-        工程检测科普: '工程检测科普',
-      };
-      const acct = detectLoggedInAccountShort();
-      const brandArg =
-        settings.exportAccountOverride !== 'auto' && brandMap[settings.exportAccountOverride]
-          ? brandMap[settings.exportAccountOverride]
-          : brandMap[acct] || 'auto';
+      setStatus('⏳ 正在匹配已存在的账号归档目录（未匹配文件将安全保留在 ~/Downloads，绝不新建目录）...');
       try {
         const res = await gmPostJson(`${settings.bridgeUrl}/api/archive-downloads`, {
-          brand: brandArg,
           hours: 24,
           move: true,
         });
         if (res && res.ok) {
-          if (res.archived_count > 0) {
-            setStatus(`🎉 已统一移入归档 ${res.archived_count} 份报表至 ${res.dest_dir}！`);
+          const unmatchedCnt = Number(res.unmatched_count || 0);
+          if (res.archived_count > 0 && unmatchedCnt > 0) {
+            setStatus(
+              `✅ 已移入 ${res.archived_count} 份至 ${res.dest_dir}；另有 ${unmatchedCnt} 份未匹配账号目录，已安全保留在 ~/Downloads`
+            );
+          } else if (res.archived_count > 0) {
+            setStatus(`🎉 已归档 ${res.archived_count} 份报表至 ${res.dest_dir}/`);
+          } else if (unmatchedCnt > 0) {
+            const sample = res.unmatched_files?.[0]?.account || '未识别';
+            setStatus(
+              `⚠️ 检测到 ${unmatchedCnt} 份报表（账号「${sample}」）无对应本地目录，未创建任何文件夹，仍保留在 ~/Downloads`
+            );
           } else {
-            setStatus('✅ 所有新导出的报表均已归档在对应账号 /05_数据复盘/数据导出/ 中');
+            setStatus('✅ ~/Downloads 暂无待归档新报表（已归档文件均在对应账号 05_数据复盘/数据导出/ 中）');
           }
         }
       } catch (err) {
-        setStatus(`💡 本地桥接未开 (${err?.message || '8765'})：文件留在 ~/Downloads 即可，跟 AI 说「清洗数据入飞书」会自动归档！`);
+        const msg = normalizeExtRuntimeError(err);
+        if (/刷新一次当前网页/.test(msg)) {
+          setStatus(`🔄 ${msg}`);
+        } else {
+          setStatus(`💡 本地桥接未开 (${msg || '8765'})：文件安全保留在 ~/Downloads，不会自动创建任何目录`);
+        }
       }
     }
 
@@ -5625,21 +6189,83 @@
         return;
       }
 
-      // ==================== 独立面板一：纯「数据安全导出面板」（完全隐藏底部填表组件） ====================
+      // ==================== 独立面板一：纯「数据安全导出面板」（强制归属账号 + 导出前目录回显 + 零误创目录） ====================
       if (dataCtx.isDataMode) {
-        const autoAcct = detectLoggedInAccountShort();
+        const prevActiveId = shadow.activeElement?.id || '';
+        const prevSelStart = shadow.activeElement?.selectionStart ?? null;
+        const autoAcct = detectPageAccountAuto();
         const curOverride = settings.exportAccountOverride || 'auto';
+        const effAcct = resolveEffectiveExportAccount();
+        const showCustomInput = curOverride === '__custom__' || (curOverride === 'auto' && !autoAcct);
+
+        const knownAccounts = ['万物有数', '靖蜀黍', '工程检测科普'];
+        if (Array.isArray(exportTargetState.targets)) {
+          for (const t of exportTargetState.targets) {
+            const acc = sanitizeExportAccountName(t?.account);
+            if (acc && !knownAccounts.includes(acc)) {
+              knownAccounts.push(acc);
+            }
+          }
+        }
+
         const acctCache = getExportCacheEntry('account');
         const worksCache = getExportCacheEntry('works');
         const acctSub = acctCache?.ts ? `上次：${formatRelativeTime(acctCache.ts)}` : '上次：未导出';
         const worksSub = worksCache?.ts ? `上次：${formatRelativeTime(worksCache.ts)}` : '上次：未导出';
         const dimLabel = pendingExportConfirm?.dimension === 'account' ? '账号' : '作品';
+        const isLightData = settings.theme === 'light';
+
+        let dirEchoHtml = '';
+        if (!effAcct) {
+          dirEchoHtml = `
+            <div id="ppf-export-dir-echo" style="background:${
+              isLightData ? '#fef2f2' : 'rgba(239,68,68,0.18)'
+            }; border:1.5px solid #ef4444; color:${
+            isLightData ? '#991b1b' : '#fecaca'
+          }; border-radius:8px; padding:6px 8px; font-size:11px; font-weight:700; line-height:1.4;">
+              🚨 未识别到当前账号：请先在上方选择或输入账号名后再点导出（禁止无账号盲下）
+            </div>`;
+        } else if (exportTargetState.bridgeOnline === true && exportTargetState.matched && exportTargetState.destDir) {
+          dirEchoHtml = `
+            <div id="ppf-export-dir-echo" title="${escapeHtml(
+              `完整归档路径：${exportTargetState.destDir}`
+            )}" style="background:${
+            isLightData ? '#ecfdf5' : 'rgba(16,185,129,0.16)'
+          }; border:1px solid rgba(16,185,129,0.45); color:${
+            isLightData ? '#065f46' : '#6ee7b7'
+          }; border-radius:8px; padding:6px 8px; font-size:11px; line-height:1.4; display:flex; align-items:center; justify-content:space-between; gap:6px;">
+              <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                📍 <strong>导出归档至：</strong>${escapeHtml(exportTargetState.relDir || exportTargetState.destDir)}/
+              </span>
+              <button class="ppf-btn" id="ppf-open-export-dir" style="padding:1px 6px; font-size:10.5px; flex-shrink:0;" title="在 Finder 中打开该归档目录">打开</button>
+            </div>`;
+        } else if (exportTargetState.bridgeOnline === true && !exportTargetState.matched) {
+          dirEchoHtml = `
+            <div id="ppf-export-dir-echo" style="background:${
+              isLightData ? '#fffbeb' : 'rgba(245,158,11,0.16)'
+            }; border:1px solid rgba(245,158,11,0.5); color:${
+            isLightData ? '#92400e' : '#fde68a'
+          }; border-radius:8px; padding:6px 8px; font-size:11px; line-height:1.4;">
+              ⚠️ 本机未找到「<strong>${escapeHtml(
+                effAcct
+              )}</strong>」已有归档目录：下载重命名后将保留在 <code>~/Downloads</code>（绝不新建目录或乱移文件）
+            </div>`;
+        } else {
+          dirEchoHtml = `
+            <div id="ppf-export-dir-echo" style="background:${
+              isLightData ? '#f8fafc' : 'rgba(148,163,184,0.12)'
+            }; border:1px solid rgba(148,163,184,0.35); border-radius:8px; padding:6px 8px; font-size:11px; line-height:1.4; opacity:0.9;">
+              📥 下载重命名为 <code>..._${escapeHtml(effAcct)}_...</code>（本机桥接开启且目录存在时自动归档，否则留存 <code>~/Downloads</code>）
+            </div>`;
+        }
 
         const dataShell = document.createElement('div');
         dataShell.className = 'ppf-shell';
         dataShell.innerHTML = `
           <div class="ppf-ear" id="ppf-ear-collapse" title="贴边收起面板 (Alt+S)">❯</div>
-          <div class="ppf-wrap" style="border-radius:14px; border:1.5px solid rgba(5,150,105,0.32);">
+          <div class="ppf-wrap" style="border-radius:14px; border:1.5px solid ${
+            !effAcct ? 'rgba(239,68,68,0.55)' : 'rgba(5,150,105,0.32)'
+          };">
             <div class="ppf-head" id="ppf-data-drag" style="cursor:move;">
               <div class="ppf-head-title">
                 <span class="ppf-badge" style="background:#059669;">📊 数据导出</span>
@@ -5654,27 +6280,51 @@
               </div>
             </div>
 
-            <div class="ppf-body" style="gap:9px; padding:11px 12px;">
+            <div class="ppf-body" style="gap:8px; padding:11px 12px;">
               <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-                <span style="font-size:11.5px; opacity:0.8; font-weight:600;">归属账号重命名：</span>
-                <select id="ppf-export-acct" class="ppf-select" style="width:auto; flex:1; font-weight:600; padding:4px 7px;">
-                  <option value="auto" ${curOverride === 'auto' ? 'selected' : ''}>自动识别${
-          autoAcct && curOverride === 'auto' ? ` (${autoAcct})` : ''
+                <span style="font-size:11.5px; opacity:0.85; font-weight:700; flex-shrink:0;">归属账号<span style="color:#ef4444;">*</span>：</span>
+                <select id="ppf-export-acct" class="ppf-select" style="width:auto; flex:1; font-weight:600; padding:4px 7px; ${
+                  !effAcct ? 'border-color:#ef4444;' : ''
+                }">
+                  <option value="auto" ${curOverride === 'auto' ? 'selected' : ''}>${
+          autoAcct ? `自动识别 (${escapeHtml(autoAcct)})` : '⚠️ 未自动识别（请选或手填）'
         }</option>
-                  <option value="万物有数" ${curOverride === '万物有数' ? 'selected' : ''}>万物有数</option>
-                  <option value="靖蜀黍" ${curOverride === '靖蜀黍' ? 'selected' : ''}>靖蜀黍</option>
-                  <option value="工程检测科普" ${curOverride === '工程检测科普' ? 'selected' : ''}>工程检测科普</option>
+                  ${knownAccounts
+                    .map(
+                      (acc) =>
+                        `<option value="${escapeHtml(acc)}" ${curOverride === acc ? 'selected' : ''}>${escapeHtml(
+                          acc
+                        )}</option>`
+                    )
+                    .join('')}
+                  <option value="__custom__" ${curOverride === '__custom__' ? 'selected' : ''}>✏️ 手动输入账号名...</option>
                 </select>
               </div>
 
+              ${
+                showCustomInput
+                  ? `<input id="ppf-export-custom-inp" class="ppf-input" style="padding:5px 8px; font-size:12px; font-weight:600; ${
+                      !effAcct ? 'border-color:#ef4444;' : 'border-color:#059669;'
+                    }" placeholder="必填：输入归属账号简称（如 靖蜀黍 / 万物有数）" value="${escapeHtml(
+                      settings.exportCustomAccount || ''
+                    )}" />`
+                  : ''
+              }
+
+              ${dirEchoHtml}
+
               <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                <button class="ppf-btn" id="ppf-btn-exp-account" style="background:#059669; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
+                <button class="ppf-btn" id="ppf-btn-exp-account" style="background:${
+                  effAcct ? '#059669' : '#94a3b8'
+                }; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
                   <span style="font-size:14px; font-weight:700;">📊 账号</span>
-                  <span style="font-size:10.5px; opacity:0.9; font-weight:400;">${acctSub}</span>
+                  <span style="font-size:10.5px; opacity:0.92; font-weight:400;">${acctSub}</span>
                 </button>
-                <button class="ppf-btn" id="ppf-btn-exp-works" style="background:#0284c7; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
+                <button class="ppf-btn" id="ppf-btn-exp-works" style="background:${
+                  effAcct ? '#0284c7' : '#94a3b8'
+                }; color:#fff; border:none; padding:10px 8px; border-radius:10px; display:flex; flex-direction:column; align-items:center; gap:3px;">
                   <span style="font-size:14px; font-weight:700;">🎬 作品</span>
-                  <span style="font-size:10.5px; opacity:0.9; font-weight:400;">${worksSub}</span>
+                  <span style="font-size:10.5px; opacity:0.92; font-weight:400;">${worksSub}</span>
                 </button>
               </div>
 
@@ -5697,12 +6347,30 @@
               </button>
 
               <div class="ppf-status" id="ppf-status-line" style="font-size:11.5px;">${
-                statusText.includes('就绪') ? '🛡️ 安全单点导出 · 下载落盘自动重命名' : statusText
+                statusText.includes('就绪') ? '🛡️ 必选归属账号 · 导出前确认目录 · 绝不误建空目录' : statusText
               }</div>
             </div>
           </div>
         `;
         rootWrap.appendChild(dataShell);
+
+        if (prevActiveId === 'ppf-export-custom-inp') {
+          const restoredInp = shadow.getElementById('ppf-export-custom-inp');
+          if (restoredInp) {
+            restoredInp.focus();
+            if (typeof prevSelStart === 'number') {
+              try {
+                restoredInp.setSelectionRange(prevSelStart, prevSelStart);
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+
+        if (!exportTargetState.loaded && !exportTargetState.loading) {
+          refreshExportTargetPreview();
+        }
 
         const toggleCollapseData = () => {
           settings.collapsed = true;
@@ -5724,25 +6392,58 @@
           pendingExportConfirm = null;
           pushExportHintToBackground({ enqueue: false });
           render();
+          refreshExportTargetPreview();
         };
+        const customAcctInp = shadow.getElementById('ppf-export-custom-inp');
+        if (customAcctInp) {
+          let customDebounce = null;
+          customAcctInp.oninput = (e) => {
+            settings.exportCustomAccount = e.target.value;
+            saveSettings(settings);
+            pendingExportConfirm = null;
+            pushExportHintToBackground({ enqueue: false });
+            if (customDebounce) clearTimeout(customDebounce);
+            customDebounce = setTimeout(() => {
+              refreshExportTargetPreview();
+            }, 280);
+          };
+          customAcctInp.onchange = () => {
+            render();
+            refreshExportTargetPreview();
+          };
+        }
+        const openExpDirBtn = shadow.getElementById('ppf-open-export-dir');
+        if (openExpDirBtn && exportTargetState.destDir) {
+          openExpDirBtn.onclick = async () => {
+            openExpDirBtn.disabled = true;
+            try {
+              if (IS_CHROME_EXT) {
+                await sendExtMessage({ type: 'PPF_BRIDGE_OPEN_FINDER', dir: exportTargetState.destDir });
+              } else {
+                await gmRequestJson(`${settings.bridgeUrl}/api/open-finder?dir=${encodeURIComponent(exportTargetState.destDir)}`);
+              }
+              setStatus(`📂 已在 Finder 打开归档目录：${exportTargetState.relDir || exportTargetState.destDir}`);
+            } catch (err) {
+              setStatus(`❌ 打开目录失败：${normalizeExtRuntimeError(err)}`);
+            } finally {
+              openExpDirBtn.disabled = false;
+            }
+          };
+        }
         const btnAcc = shadow.getElementById('ppf-btn-exp-account');
-        btnAcc.onclick = async () => {
-          btnAcc.disabled = true;
-          try {
-            await runDimensionExport('account', { force: false });
-          } finally {
-            btnAcc.disabled = false;
-          }
-        };
+        btnAcc.onclick = guardAsyncButton(
+          btnAcc,
+          'exp_account',
+          () => runDimensionExport('account', { force: false }),
+          1200
+        );
         const btnWrk = shadow.getElementById('ppf-btn-exp-works');
-        btnWrk.onclick = async () => {
-          btnWrk.disabled = true;
-          try {
-            await runDimensionExport('works', { force: false });
-          } finally {
-            btnWrk.disabled = false;
-          }
-        };
+        btnWrk.onclick = guardAsyncButton(
+          btnWrk,
+          'exp_works',
+          () => runDimensionExport('works', { force: false }),
+          1200
+        );
         const confCancel = shadow.getElementById('ppf-exp-conf-cancel');
         if (confCancel) {
           confCancel.onclick = () => {
@@ -5752,25 +6453,23 @@
         }
         const confOk = shadow.getElementById('ppf-exp-conf-ok');
         if (confOk) {
-          confOk.onclick = async () => {
-            const targetDim = pendingExportConfirm?.dimension || 'works';
-            pendingExportConfirm = null;
-            render();
-            await runDimensionExport(targetDim, { force: true });
-          };
+          confOk.onclick = guardAsyncButton(
+            confOk,
+            'exp_force_ok',
+            async () => {
+              const targetDim = pendingExportConfirm?.dimension || 'works';
+              pendingExportConfirm = null;
+              render();
+              await runDimensionExport(targetDim, { force: true });
+            },
+            1200
+          );
         }
         const archBtn = shadow.getElementById('ppf-archive-dl');
-        archBtn.onclick = async () => {
-          archBtn.disabled = true;
-          try {
-            await runArchiveDownloadsToAihub();
-          } finally {
-            archBtn.disabled = false;
-          }
-        };
+        archBtn.onclick = guardAsyncButton(archBtn, 'exp_archive_dl', runArchiveDownloadsToAihub, 1200);
         const dataDrag = shadow.getElementById('ppf-data-drag');
         dataDrag.onmousedown = (e) => {
-          if (e.target.closest('button, select')) return;
+          if (e.target.closest('button, select, input')) return;
           const startY = e.clientY;
           const initTop = settings.floatTop || 64;
           const onMove = (me) => {
@@ -6807,6 +7506,9 @@
     render();
     setTimeout(() => {
       pushExportHintToBackground({ enqueue: false });
+      if (getDataCenterContext().isDataMode) {
+        refreshExportTargetPreview();
+      }
       if (isPublishPageContext()) {
         const initSched = detectPagePublishModeAndTime();
         prePubState.lastTimeSig = `${initSched.mode}|${initSched.plannedAt}`;

@@ -351,6 +351,41 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
             });
             return;
           }
+          if (msg.type === 'PPF_BRIDGE_EXPORT_TARGETS') {
+            const acct = String(msg.account || '').trim();
+            const mockTargets = [
+              {
+                account: '万物有数',
+                areaDir: '2026_万物有数',
+                destDir: '/mock/AIHub/2 AH领域·Areas/2026_万物有数/05_数据复盘/数据导出',
+                relDir: '2 AH领域·Areas/2026_万物有数/05_数据复盘/数据导出',
+              },
+              {
+                account: '靖蜀黍',
+                areaDir: '2026_靖蜀黍',
+                destDir: '/mock/AIHub/2 AH领域·Areas/2026_靖蜀黍/05_数据复盘/数据导出',
+                relDir: '2 AH领域·Areas/2026_靖蜀黍/05_数据复盘/数据导出',
+              },
+            ];
+            const hit = mockTargets.find((t) => acct && (t.account === acct || t.areaDir.includes(acct)));
+            cb?.({
+              ok: true,
+              data: {
+                ok: true,
+                targets: mockTargets,
+                matched: Boolean(hit),
+                account: hit ? hit.account : acct,
+                areaDir: hit ? hit.areaDir : '',
+                destDir: hit ? hit.destDir : '',
+                relDir: hit ? hit.relDir : '',
+              },
+            });
+            return;
+          }
+          if (msg.type === 'PPF_SET_EXPORT_HINT') {
+            cb?.({ ok: true, account: msg.account || '' });
+            return;
+          }
           cb?.({ ok: true, data: {} });
         },
       },
@@ -469,12 +504,42 @@ for (const nonPubUrl of [
   assert.equal(idleEnv.docEl.style.paddingRight || '', '', `非发布页 (${nonPubUrl}) 严禁修改页面边距`);
 }
 
-// 5. 验证数据中心页挂载：必须成功渲染紧凑型导表面板
-const dataEnv = createMockDomEnv('https://member.bilibili.com/platform/data-up/video', true);
+// 5. 验证数据中心页挂载：强制归属账号门禁 + 手动输入框兜底 + 下载前归档目录回显
+const dataEnv = createMockDomEnv('https://creator.douyin.com/creator-micro/data-center/operation', true);
 await dataEnv.flushTimers();
-const dataHtml = dataEnv.getShadowRoot().children.map((c) => c.innerHTML).join('\n');
+const dataShadow = dataEnv.getShadowRoot();
+const dataHtml = dataShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(dataHtml.includes('ppf-btn-exp-account'), '数据中心页必须渲染账号导出按钮');
 assert.ok(dataHtml.includes('ppf-btn-exp-works'), '数据中心页必须渲染作品导出按钮');
+assert.ok(dataHtml.includes('ppf-export-custom-inp'), '未自动识别到账号时必须直接展开手动输入框');
+assert.ok(dataHtml.includes('未识别到当前账号'), '未指定账号时必须在目录回显栏高亮警示禁止无账号盲下');
+
+// 未选账号直接点「📊 账号」：必须被硬门禁拦截
+await dataShadow.getElementById('ppf-btn-exp-account').onclick();
+const blockedHtml = dataShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(blockedHtml.includes('未识别到归属账号'), '未指定账号时点击导出必须被硬门禁拦截');
+
+// 在输入框填入「靖蜀黍」后：导出前目录回显栏必须实时回显真实归档路径！
+const customInp = dataShadow.getElementById('ppf-export-custom-inp');
+customInp.value = '靖蜀黍';
+customInp.oninput({ target: customInp });
+await dataEnv.flushTimers();
+const echoHtmlMatched = dataShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(
+  echoHtmlMatched.includes('2 AH领域·Areas/2026_靖蜀黍/05_数据复盘/数据导出/'),
+  '输入已存在账号后必须在导出前实时回显目标归档目录路径'
+);
+
+// 输入本机不存在目录的野生账号名：回显「保留在 ~/Downloads（绝不新建目录或乱移文件）」
+const customInp2 = dataShadow.getElementById('ppf-export-custom-inp');
+customInp2.value = '测试新号X';
+customInp2.oninput({ target: customInp2 });
+await dataEnv.flushTimers();
+const echoHtmlUnmatched = dataShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(
+  echoHtmlUnmatched.includes('绝不新建目录或乱移文件'),
+  '未匹配本地目录的账号必须明确回显保留在 ~/Downloads 且绝不新建目录'
+);
 
 // 6. 验证飞书通用「用户反馈收集表」契约：点击 💬 按钮必须准确拼接全部 8 个 prefill_ 与 hide_=1 参数且剥离隐私查询串
 const fbEnv = createMockDomEnv('https://creator.xiaohongshu.com/publish/publish?secret_token=abc123', true);
@@ -496,7 +561,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.2');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.3');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',
