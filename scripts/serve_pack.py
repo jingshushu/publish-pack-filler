@@ -223,15 +223,42 @@ def is_valid_publish_pack_json(path: Path) -> bool:
         return False
 
 
+def score_pack_file_candidate(path: Path) -> tuple:
+    """
+    发布包文件自然版本号优先级排序（避免字典序把 v2 排在 v03 / v10 前面）：
+    1. 显式版本号越大越优先（v10 > v04 > v03 == v3 > v2 > v01）；
+    2. 含「终版/标准/正式」关键词优先于草稿；
+    3. 同等版本号取最新修改时间（mtime）。
+    """
+    stem = path.stem.lower()
+    m = re.search(r"(?:^|[_\-\s.])v(\d{1,4})(?:\.(\d{1,4}))?(?=$|[_\-\s.\u4e00-\u9fa5])", stem)
+    ver_major = int(m.group(1)) if m else 0
+    ver_minor = int(m.group(2)) if (m and m.group(2) is not None) else 0
+    has_ver = 1 if m else 0
+    is_draft = 1 if any(k in stem for k in ("draft", "草稿", "备份", "bak", "old")) else 0
+    is_final = 1 if any(k in stem for k in ("终版", "标准", "正式", "final")) else 0
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (1 - is_draft, has_ver, ver_major, ver_minor, is_final, mtime, path.name)
+
+
 def find_explicit_pack_file(base_dir: Path) -> Path | None:
     if not base_dir or not base_dir.is_dir():
         return None
-    json_cands = sorted(base_dir.glob("*.pack.json")) + sorted(base_dir.glob("publish*.json"))
-    valid_json_packs = [p for p in json_cands if is_valid_publish_pack_json(p)]
+    json_cands = list(base_dir.glob("*.pack.json")) + list(base_dir.glob("publish*.json"))
+    valid_json_packs = sorted(
+        {p.resolve(): p for p in json_cands if is_valid_publish_pack_json(p)}.values(),
+        key=score_pack_file_candidate,
+    )
     if valid_json_packs:
         return valid_json_packs[-1]
-    for pattern in ("发布包*.md", "*发布文案*.md", "发布.md"):
-        md_packs = [p for p in sorted(base_dir.glob(pattern)) if not p.name.endswith(".preview.md")]
+    for pattern in ("发布包*.md", "*发布包*.md", "*发布文案*.md", "发布.md"):
+        md_packs = sorted(
+            [p for p in base_dir.glob(pattern) if p.is_file() and not p.name.endswith(".preview.md")],
+            key=score_pack_file_candidate,
+        )
         if md_packs:
             return md_packs[-1]
     return None
@@ -246,11 +273,14 @@ def find_latest_pack_file(pack_dir: Path, project_dir: Path | None = None) -> Pa
     if not pack_dir or not pack_dir.is_dir():
         return None
     ignore_names = {"readme.md", "agents.md", "claude.md", "changelog.md", "日志.md", "任务.md", "修改意见记录.md"}
-    md_files = [
-        p
-        for p in sorted(pack_dir.glob("*.md"))
-        if p.name.lower() not in ignore_names and not p.name.endswith(".preview.md")
-    ]
+    md_files = sorted(
+        [
+            p
+            for p in pack_dir.glob("*.md")
+            if p.is_file() and p.name.lower() not in ignore_names and not p.name.endswith(".preview.md")
+        ],
+        key=score_pack_file_candidate,
+    )
     return md_files[-1] if md_files else None
 
 

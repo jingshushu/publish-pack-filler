@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全平台半自动发布助手
 // @namespace    https://local.aihub.publish-pack-filler
-// @version      2.5.4
-// @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（防429平滑限流）、Cutcheck右侧统一审片工作台、发前红转绿警示同步与A/B/C极简工作台
+// @version      2.5.5
+// @description  全平台半自动发布与四端数据安全采集助手：内置飞书/Lark纯JS直连（防429平滑限流）、Cutcheck右侧统一审片工作台、三态吸顶排期防撞同步与发后时间确认补同步
 // @author       Jing & Antigravity
 // @match        https://creator.xiaohongshu.com/*
 // @match        https://creator.douyin.com/*
@@ -54,7 +54,7 @@
   const STORAGE_KEY_PENDING_CUTCHECK = 'ppf_pending_cutcheck_v1';
   const STORAGE_KEY_CUTCHECK_BOUND = 'ppf_cutcheck_bound_v1';
   const FEISHU_FEEDBACK_FORM_URL = 'https://my.feishu.cn/share/base/shrcnRMlf6gosr0Werh6Oazu3Q9';
-  const EXT_FALLBACK_VERSION = '2.5.4';
+  const EXT_FALLBACK_VERSION = '2.5.5';
   const EXPORT_DEDUP_WINDOW_MS = 12 * 3600 * 1000; // 12 小时防重窗口
   const CROSS_COVER_PREFIX = 'ppf_xcover_v1::';
   const BRIDGE_DEFAULT_URL = 'http://127.0.0.1:8765';
@@ -416,6 +416,39 @@
     return `${FEISHU_FEEDBACK_FORM_URL}?${qs.toString()}`;
   }
 
+  const FALLBACK_PACK_PROBE_NAMES = [
+    'publish.pack.json',
+    '发布包_v10.md',
+    '发布包_v09.md',
+    '发布包_v08.md',
+    '发布包_v07.md',
+    '发布包_v06.md',
+    '发布包_v05.md',
+    '发布包_v04.md',
+    '发布包_v03.md',
+    '发布包_v02.md',
+    '发布包_v01.md',
+    '发布包_v5.md',
+    '发布包_v4.md',
+    '发布包_v3.md',
+    '发布包_v2.md',
+    '发布包_v1.md',
+    '发布包.md',
+    '成片/publish.pack.json',
+    '成片/发布包_v05.md',
+    '成片/发布包_v04.md',
+    '成片/发布包_v03.md',
+    '成片/发布包_v02.md',
+    '成片/发布包_v01.md',
+    '成片/发布包.md',
+  ];
+
+  function extractPackVersionScore(fileName = '') {
+    const m = String(fileName || '').match(/(?:^|[_\-\s.])v(\d{1,4})(?:\.(\d{1,4}))?(?=$|[_\-\s.\u4e00-\u9fa5])/i);
+    if (!m) return 0;
+    return Number(m[1]) * 1000 + Number(m[2] || 0);
+  }
+
   // 严格判定文件是否为合法的 PublishPack 发布包（自动排除 publish_receipt.json / words.json / sources.json 等回执与元数据文件）
   function isValidPublishPackContent(fileName = '', rawText = '') {
     const txt = String(rawText || '').trim();
@@ -684,19 +717,21 @@
     const dyCover = extractCoverAfter(dySec, /\*\*指定封面\*\*/);
     const dyPinned = extractCodeBlockAfter(dySec, /\*\*置顶评论\*\*/) || globalPinnedFallback;
 
-    // 02 视频号（若文稿未单列视频号章节，自动回退复用抖音/小红书正文与短标题）
+    // 02 视频号（兼容 v01..vNN 各种短标题/描述正文标签写法；若文稿未单列视频号章节，自动回退复用抖音/小红书正文与短标题）
     const wxSec = sections.wx || '';
     const wxShortRaw =
-      extractCodeBlockAfter(wxSec, /\*\*短标题[^*\n]*\*\*/) ||
-      extractInlineAfter(wxSec, /\*\*短标题[^*\n]*\*\*/) ||
-      extractBulletValue(wxSec, /^(?:短标题|标题)$/) ||
+      extractCodeBlockAfter(wxSec, /\*\*[^*\n]*(?:短标题|主推标题|标题)[^*\n]*\*\*/) ||
+      extractInlineAfter(wxSec, /\*\*[^*\n]*(?:短标题|主推标题|标题)[^*\n]*\*\*/) ||
+      extractBulletValue(wxSec, /^(?:主推短标题|短标题|主推标题|主推|标题)$/) ||
       (!wxSec.trim() ? xhsTitle || dyFallbackTitle : '');
-    const wxAltTitles = extractNumberedList(wxSec, /备选短标题/);
+    const wxAltTitles = extractNumberedList(wxSec, /备选(?:短)?标题/);
     const wxDescRaw =
-      extractCodeBlockAfter(wxSec, /\*\*描述正文\*\*/) ||
-      extractBulletValue(wxSec, /^正文/) ||
+      extractCodeBlockAfter(wxSec, /\*\*(?:描述正文|视频描述|作品描述|正文|描述)[^*\n]*\*\*/) ||
+      extractSubheadingText(wxSec, /^(?:描述正文|视频描述|正文|描述)/) ||
+      extractBulletValue(wxSec, /^(?:描述正文|视频描述|正文|描述)$/) ||
       (!wxSec.trim() ? dyDescRaw || xhsBodyRaw : '');
     const wxSplit = splitBodyAndHashtags(wxDescRaw);
+    const wxCoverExplicit = extractCoverAfter(wxSec, /\*\*指定封面\*\*/);
     const wxCollection = extractInlineAfter(wxSec, /\*\*合集\*\*/);
     const wxLocation = extractInlineAfter(wxSec, /\*\*位置\*\*/);
     const wxPinned = extractCodeBlockAfter(wxSec, /\*\*[^*\n]*置顶(?:首评|评论)[^*\n]*\*\*/) || globalPinnedFallback;
@@ -734,6 +769,8 @@
 
     return {
       meta: {
+        format: 'markdown',
+        contentType: 'video',
         packTitle,
         mdFileName: options.mdFileName || '发布包_v01.md',
         baseDir: options.baseDir || '',
@@ -755,12 +792,12 @@
         weixin: {
           collection: wxCollection,
           location: wxLocation,
-          coverRel: xhsCover,
+          coverRel: wxCoverExplicit || xhsCover,
           coverSubRel: biliCover4x3,
           shortTitleRaw: wxShortRaw,
           shortTitleClean: sanitizeWeixinShortTitle(wxShortRaw),
           altTitles: wxAltTitles.map(sanitizeWeixinShortTitle),
-          body: wxSplit.bodyOnly,
+          body: wxSplit.bodyOnly || wxDescRaw,
           tags: wxSplit.tags,
           pinnedComment: wxPinned,
         },
@@ -2892,7 +2929,11 @@
         .ppf-icon-btn:hover { background: ${btnHover}; color: ${fg}; border-color: ${border}; }
         .ppf-copy-icon { background: transparent; border: none; color: ${subFg}; opacity: 0.55; cursor: pointer; font-size: 12.5px; padding: 3px 5px; border-radius: 5px; line-height: 1; transition: opacity 0.14s, background 0.14s; }
         .ppf-copy-icon:hover { opacity: 1; background: ${btnHover}; color: ${fg}; }
+        .ppf-body-wrap { position: relative; flex: 1 1 0%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
         .ppf-body { padding: 9px 11px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; flex: 1 1 0%; min-height: 0; }
+        .ppf-sticky-sync-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 35; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 10px; font-size: 11.5px; font-weight: 700; backdrop-filter: blur(14px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12); opacity: 0; pointer-events: none; transform: translateY(-8px); transition: opacity 0.16s ease, transform 0.16s ease; }
+        .ppf-sticky-sync-bar.is-visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
+        .ppf-state-pill { font-size: 10.5px; font-weight: 800; padding: 1px 6px; border-radius: 999px; flex-shrink: 0; line-height: 1.4; }
         .ppf-compact-card { background: ${secBg}; border: 1px solid ${border}; border-radius: 9px; padding: 6px 9px; display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
         .ppf-compact-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
         .ppf-compact-path { font-size: 12px; font-weight: 600; color: ${fg}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
@@ -3018,7 +3059,31 @@
       lastTimeSig: '',
       lastAlert: '',
       lastAlertIsError: false,
+      lastCapturedSchedule: '',
+      lastCapturedScheduleAt: 0,
+      lastCapturedTitle: '',
+      lastCapturedBody: '',
+      nativeSubmitClickedAt: 0,
+      nativeSubmitImmediateTime: '',
+      postSubmitForceImmediate: false,
+      pubScrollTop: 0,
     };
+
+    function formatLocalYMDHM(ms = Date.now()) {
+      const d = new Date(ms);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function resetTransientPrePubCapture() {
+      prePubState.lastCapturedSchedule = '';
+      prePubState.lastCapturedScheduleAt = 0;
+      prePubState.lastCapturedTitle = '';
+      prePubState.lastCapturedBody = '';
+      prePubState.nativeSubmitClickedAt = 0;
+      prePubState.nativeSubmitImmediateTime = '';
+      prePubState.postSubmitForceImmediate = false;
+    }
     let ccState = {
       configured: true,
       loading: false,
@@ -3488,8 +3553,34 @@
       return detectPageAccountAuto() || sanitizeExportAccountName(settings.exportCustomAccount);
     }
 
+    // 发布页专用：严格读取当前网页真实登录昵称（绝不混入数据导出面板的手动账号下拉记忆，并保留「数见万象 / 万物有数可视化」原名以便精准命中 Z3 账号表！）
     function detectLoggedInAccountShort() {
-      return resolveEffectiveExportAccount();
+      const nickEls = queryDeepAll(
+        '.finder-nickname, [class*="nickname" i], [class*="user-name" i], [class*="account-name" i], [class*="creator-name" i], [class*="author-name" i]'
+      );
+      const noiseRe =
+        /创作|中心|服务|平台|首页|登录|退出|消息|数据|管理|高清|发布|投稿|作品|帮助|反馈|全部|查看|概览|账号|抖音|小红书|视频号|哔哩|粉丝|互动|设置|通知|客服|规则|学院/;
+      for (const el of nickEls) {
+        if (!isVisible(el) || hostEl.contains?.(el)) continue;
+        const clean = sanitizeExportAccountName(el.textContent || '');
+        if (clean.length >= 2 && clean.length <= 16 && !noiseRe.test(clean) && !/^\d+$/.test(clean)) {
+          return clean;
+        }
+      }
+      const headerEls = queryDeepAll('header, aside, .semi-navigation-header, .semi-navigation-footer, [class*="user-info" i]');
+      let combined = '';
+      for (const el of headerEls.slice(0, 10)) {
+        if (!el || hostEl.contains?.(el)) continue;
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length <= 240) combined += ' ' + t;
+      }
+      if (/数见万象/.test(combined)) return '数见万象';
+      if (/万物有数可视化/.test(combined)) return '万物有数可视化';
+      if (/万物有数|万物皆有数/.test(combined)) return '万物有数';
+      if (/靖蜀黍\.flyloy/i.test(combined)) return '靖蜀黍.FLYLOY';
+      if (/靖蜀黍/.test(combined)) return '靖蜀黍';
+      if (/工程检测/.test(combined)) return '工程检测科普';
+      return '';
     }
 
     async function refreshExportTargetPreview() {
@@ -4502,11 +4593,8 @@
       }
     }
 
-    // ==================== 发布页：定时探测 + 飞书发前作品关联 + 云端兜底文案 + 黄转绿警示同步 ====================
-    function detectPagePublishModeAndTime() {
-      if (prePubState.manualTimeOverride) {
-        return { mode: 'scheduled', plannedAt: prePubState.manualTimeOverride, source: '手动指定' };
-      }
+    // ==================== 发布页：定时探测 + 发后保留最后选定时间确认补同步 + 飞书发前作品关联 + 云端兜底文案 ====================
+    function scanRawDomScheduledTime() {
       // 只读扫描页面上可见的定时时间控件（兼容视频号 Wujie ShadowDOM 分体式日期+时间下拉框、B站/小红书/抖音 DatePicker）
       const inputs = queryDeepAll('input');
       const nowYear = new Date().getFullYear();
@@ -4602,7 +4690,84 @@
         }
       }
 
-      return { mode: 'immediate', plannedAt: '', source: '立即发布' };
+      return null;
+    }
+
+    // 识别「已点击网页原生发布按钮、页面跳至『稿件投递成功 / 发布成功』结果页」状态（此时原表单定时框已卸载）
+    function detectPostPublishSubmittedState() {
+      const { titleInput, bodyEditor, shortTitleInput } = locatePlatformFields(platform);
+      const hasActiveFormField = Boolean(
+        (titleInput && isVisible(titleInput)) ||
+          (bodyEditor && isVisible(bodyEditor)) ||
+          (shortTitleInput && isVisible(shortTitleInput))
+      );
+      if (hasActiveFormField) {
+        return false;
+      }
+      const successNodes = queryDeepAll('h1, h2, h3, h4, p, span, div, a, button');
+      const successRe = /(?:稿件投递成功|投递成功|发布成功|发表成功|提交成功|作品已发布|笔记已发布|视频已发布|再投一个|查看稿件)/;
+      for (const el of successNodes) {
+        if (!el || hostEl.contains?.(el) || el.children?.length > 4) continue;
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length <= 60 && successRe.test(t) && isVisible(el)) {
+          return true;
+        }
+      }
+      if (prePubState.nativeSubmitClickedAt && Date.now() - prePubState.nativeSubmitClickedAt < 15 * 60 * 1000) {
+        return true;
+      }
+      return false;
+    }
+
+    function detectPagePublishModeAndTime() {
+      const rawDomSched = scanRawDomScheduledTime();
+      if (rawDomSched?.plannedAt) {
+        prePubState.lastCapturedSchedule = rawDomSched.plannedAt;
+        prePubState.lastCapturedScheduleAt = Date.now();
+        prePubState.postSubmitForceImmediate = false;
+      }
+
+      const isPostSubmitted = detectPostPublishSubmittedState();
+
+      if (prePubState.manualTimeOverride) {
+        return {
+          mode: 'scheduled',
+          plannedAt: prePubState.manualTimeOverride,
+          source: '手动指定',
+          isPostSubmitted,
+          isRetainedSchedule: false,
+        };
+      }
+
+      if (rawDomSched) {
+        return {
+          ...rawDomSched,
+          isPostSubmitted: false,
+          isRetainedSchedule: false,
+        };
+      }
+
+      // 关键修复（FB-20261121-0003）：若用户先点了网页「发布/立即投稿」跳到《稿件投递成功》才发现没点同步，自动保留发前最后一次选定的定时时间供一键确认补同步！
+      if (isPostSubmitted) {
+        if (!prePubState.postSubmitForceImmediate && prePubState.lastCapturedSchedule) {
+          return {
+            mode: 'scheduled',
+            plannedAt: prePubState.lastCapturedSchedule,
+            source: '发前最后选定时间',
+            isPostSubmitted: true,
+            isRetainedSchedule: true,
+          };
+        }
+        return {
+          mode: 'immediate',
+          plannedAt: prePubState.nativeSubmitImmediateTime || '',
+          source: '发后立即发布补记',
+          isPostSubmitted: true,
+          isRetainedSchedule: false,
+        };
+      }
+
+      return { mode: 'immediate', plannedAt: '', source: '立即发布', isPostSubmitted: false, isRetainedSchedule: false };
     }
 
     function readCurrentFormTitleAndBody() {
@@ -4616,8 +4781,11 @@
       } else if (titleInput?.value) {
         pageRawTitle = titleInput.value.trim();
       }
+      if (pageRawTitle) {
+        prePubState.lastCapturedTitle = pageRawTitle;
+      }
 
-      let actualTitle = pageRawTitle;
+      let actualTitle = pageRawTitle || prePubState.lastCapturedTitle || '';
       if (!actualTitle && !isPreset) {
         actualTitle =
           platform === 'weixin'
@@ -4629,7 +4797,10 @@
       if (bodyEditor) {
         pageRawBody = (bodyEditor.value ?? bodyEditor.innerText ?? bodyEditor.textContent ?? '').trim();
       }
-      let actualBody = pageRawBody;
+      if (pageRawBody) {
+        prePubState.lastCapturedBody = pageRawBody;
+      }
+      let actualBody = pageRawBody || prePubState.lastCapturedBody || '';
       if (!actualBody && !isPreset) {
         actualBody = pData.body || '';
       }
@@ -4803,8 +4974,9 @@
       }
 
       feishuState.loading = true;
-      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
       const isPreset = Boolean(currentPack.meta?.isPresetDefault);
+      // 飞书点击「🚀 去发布」显式带入的 targetAccount 优先级高于页面嗅探，杜绝视频号 Wujie 延迟/切号串台！
+      const acct = (!isPreset && currentPack.meta?.targetAccount) || detectLoggedInAccountShort() || 'auto';
       const workSlug = isPreset
         ? ''
         : currentPack.meta?.workSlug || extractWorkSlugFront(currentPack.meta?.baseDir || currentPack.meta?.packTitle || '');
@@ -4895,10 +5067,10 @@
       prePubState.syncing = true;
       render();
 
-      const acct = detectLoggedInAccountShort() || currentPack.meta?.targetAccount || 'auto';
+      const isPreset = Boolean(currentPack.meta?.isPresetDefault);
+      const acct = (!isPreset && currentPack.meta?.targetAccount) || detectLoggedInAccountShort() || 'auto';
       const schedInfo = detectPagePublishModeAndTime();
       const { actualTitle, actualBody, actualTags } = readCurrentFormTitleAndBody();
-      const isPreset = Boolean(currentPack.meta?.isPresetDefault);
       const effCand = getEffectiveFeishuCandidate();
       const isCreateNew = prePubState.selectedWorkKey === 'new';
 
@@ -5039,6 +5211,13 @@
           } else if (subPath.includes('B站') && subData.body) {
             parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
             parsed.platforms.bilibili.body = subData.body;
+          } else if (subPath.includes('视频号') && subData.body) {
+            if (subData.title) {
+              parsed.platforms.weixin.shortTitleRaw = subData.title;
+              parsed.platforms.weixin.shortTitleClean = sanitizeWeixinShortTitle(subData.title);
+            }
+            parsed.platforms.weixin.body = subData.body;
+            parsed.platforms.weixin.tags = subData.tags;
           }
         }
       }
@@ -5056,8 +5235,10 @@
       }
 
       currentPack = parsed;
+      prePubState.selectedAccountId = '';
       prePubState.selectedWorkKey = 'auto';
       prePubState.syncedSig = '';
+      resetTransientPrePubCapture();
       settings.selectedTitleIdx = -1;
       settings.selectedCoverByPlat = {};
       saveSettings(settings);
@@ -5130,9 +5311,11 @@
       }
 
       if (packCandidates.length > 0) {
-        // 优先级：*.pack.json (标准协议) > publish*.json > 发布包*.md (兼容旧版) > 其它 .md
+        // 优先级：*.pack.json (标准协议) > publish*.json > 发布包*.md (按自然版本号 v10 > v03 > v2 > v01) > 其它 .md
         packCandidates.sort((a, b) => {
           if (a.priority !== b.priority) return b.priority - a.priority;
+          const verDiff = extractPackVersionScore(b.name) - extractPackVersionScore(a.name);
+          if (verDiff !== 0) return verDiff;
           return b.name.localeCompare(a.name, 'zh-CN', { numeric: true });
         });
         availableMdFiles = packCandidates;
@@ -5224,8 +5407,10 @@
             images: [],
             platforms: {},
           };
+          prePubState.selectedAccountId = '';
           prePubState.selectedWorkKey = 'auto';
           prePubState.syncedSig = '';
+          resetTransientPrePubCapture();
           if (data.packVersion) {
             settings.lastBridgeVersion = data.packVersion;
             saveSettings(settings);
@@ -5252,17 +5437,16 @@
         }
         let fileName = data.packFile || data.mdFile || '';
         let rawContent = data.content || data.markdown || '';
-        // 兼容未重启的旧版 serve_pack.py 误将 publish_receipt.json 当成发布包返回：前端自动从 /api/file 补拉真实发布包文档！
+        // 兼容未重启的旧版 serve_pack.py 误将 publish_receipt.json / sources_*.json 当成发布包返回：前端自动按高版本优先补拉真实发布包文档！
         if (!isValidPublishPackContent(fileName, rawContent)) {
           fileName = '';
           rawContent = '';
-          const fallbackPackNames = ['publish.pack.json', '发布包_v03.md', '发布包_v02.md', '发布包_v01.md', '发布包.md'];
-          for (const candName of fallbackPackNames) {
+          for (const candName of FALLBACK_PACK_PROBE_NAMES) {
             try {
               const fbBlob = await gmRequestBlob(`${settings.bridgeUrl}/api/file?path=${encodeURIComponent(candName)}`);
               const fbText = await fbBlob.text();
               if (isValidPublishPackContent(candName, fbText)) {
-                fileName = candName;
+                fileName = candName.split('/').pop() || candName;
                 rawContent = fbText;
                 break;
               }
@@ -5579,6 +5763,10 @@
     }
 
     function render() {
+      const prevPubBody = shadow.getElementById('ppf-pub-body');
+      if (prevPubBody && typeof prevPubBody.scrollTop === 'number') {
+        prePubState.pubScrollTop = prevPubBody.scrollTop;
+      }
       if (activeThumbUrl) {
         URL.revokeObjectURL(activeThumbUrl);
         activeThumbUrl = '';
@@ -5670,30 +5858,47 @@
         const modeTag = schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
 
         if (!isSyncedGreen) {
+          const isConflictCol = Boolean(feishuState.configured && feishuState.hasConflict);
+          const colGrad = !feishuState.configured || isConflictCol
+            ? 'linear-gradient(135deg, #ef4444, #dc2626)'
+            : 'linear-gradient(135deg, #f59e0b, #d97706)';
+          const colShadow = !feishuState.configured || isConflictCol
+            ? 'rgba(220,38,38,0.42)'
+            : 'rgba(217,119,6,0.38)';
           const redCard = document.createElement('div');
           redCard.id = 'ppf-collapsed-unsynced-card';
           redCard.style.cssText =
-            'pointer-events:auto; display:flex; flex-direction:column; gap:5px; padding:8px 10px; background:linear-gradient(135deg, #ef4444, #dc2626); color:#fff; border:2px solid rgba(255,255,255,0.88); border-right:none; border-radius:12px 0 0 12px; box-shadow:0 6px 20px rgba(220,38,38,0.42); max-width:210px;';
+            `pointer-events:auto; display:flex; flex-direction:column; gap:5px; padding:8px 10px; background:${colGrad}; color:#fff; border:2px solid rgba(255,255,255,0.88); border-right:none; border-radius:12px 0 0 12px; box-shadow:0 6px 20px ${colShadow}; max-width:216px;`;
           const subHint = !feishuState.configured
             ? '未连接飞书配置'
+            : isConflictCol
+            ? '⛔ 排期时间冲突 · 禁止同步'
             : prePubState.lastAlert
-            ? '⚠️ 存在报错/冲突，点此查看'
-            : `${effCand ? effCand.label.slice(0, 10) + ' · ' : ''}${modeTag}`;
+            ? '⚠️ 存在提示，点此查看'
+            : `🟢 排期安全 · ${effCand ? effCand.label.slice(0, 8) + ' ' : ''}${modeTag}`;
           redCard.innerHTML = `
             <div id="ppf-collapsed-expand-btn" style="display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer; font-size:12px; font-weight:800; white-space:nowrap;" title="点击展开完整发布助手面板 (Alt+S)">
-              <span>🚨 未同步发布时间</span>
+              <span>${isConflictCol ? '⛔ 时间冲突禁同步' : '⏳ 未同步发布时间'}</span>
               <span style="font-size:11px; opacity:0.92; background:rgba(0,0,0,0.18); padding:1px 5px; border-radius:4px;">展开 ❮</span>
             </div>
-            <div style="font-size:10.5px; opacity:0.94; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(
+            <div style="font-size:10.5px; opacity:0.95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(
               subHint
             )}</div>
-            <button id="ppf-collapsed-quick-sync" style="background:#ffffff; color:#dc2626; border:none; border-radius:6px; padding:4px 8px; font-size:11.5px; font-weight:800; cursor:pointer; width:100%; box-shadow:0 2px 6px rgba(0,0,0,0.14);">
+            <button id="ppf-collapsed-quick-sync" style="background:${
+              isConflictCol ? 'rgba(255,255,255,0.22)' : '#ffffff'
+            }; color:${
+              isConflictCol ? '#ffffff' : '#b45309'
+            }; border:none; border-radius:6px; padding:4px 8px; font-size:11.5px; font-weight:800; cursor:${
+              isConflictCol ? 'pointer' : 'pointer'
+            }; width:100%; box-shadow:0 2px 6px rgba(0,0,0,0.14);">
               ${
                 !feishuState.configured
                   ? '⚙️ 展开连接飞书'
+                  : isConflictCol
+                  ? '⛔ 查看冲突详情'
                   : prePubState.syncing
                   ? '⏳ 正在同步...'
-                  : '⚡ 点此直接同步变绿'
+                  : '⚡ 可以同步 · 点此写入飞书'
               }
             </button>
           `;
@@ -5713,7 +5918,7 @@
               quickSyncBtn,
               'sync_pub_quick',
               async () => {
-                if (!feishuState.configured) {
+                if (!feishuState.configured || isConflictCol) {
                   expandFn();
                   return;
                 }
@@ -6654,59 +6859,115 @@
             </div>
           </div>
 
-          <div class="ppf-body">
-            ${(() => {
-              // ==================== 顶部最醒目状态与错误信息栏（未同步高危红 / 已同步安全绿） ====================
-              if (!feishuState.configured) {
-                const unconfAlert = prePubState.lastAlert || (feishuState.error ? `❌ ${feishuState.error}` : '');
-                return `<div class="ppf-sec" id="ppf-top-status-card" style="border:2px solid #dc2626; background:${
-                  isLight ? '#fef2f2' : 'rgba(220,38,38,0.18)'
-                }; gap:6px; padding:8px 10px;">
-                  <div class="ppf-sec-hd" style="color:${isLight ? '#b91c1c' : '#fca5a5'}; font-size:12px; font-weight:800;">
-                    <span>🚨 未连接飞书 · 尚未同步真实发布时间</span>
-                    <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="打开飞书多维表连接设置">⚙️</button>
-                  </div>
-                  <div id="ppf-top-alert-msg" style="display:${unconfAlert ? 'block' : 'none'}; background:${
-                  isLight ? 'rgba(220,38,38,0.10)' : 'rgba(239,68,68,0.22)'
-                }; color:${
-                  isLight ? '#991b1b' : '#fecaca'
-                }; border-left:3px solid #dc2626; padding:5px 8px; border-radius:5px; font-size:11.5px; font-weight:700; line-height:1.4; word-break:break-word;">${escapeHtml(
-                  unconfAlert
-                )}</div>
-                  <div style="display:flex; gap:6px;">
-                    <button class="ppf-btn" id="ppf-toggle-quick-code" style="flex:1; font-weight:600;">📥 粘贴配置码秒连</button>
-                    <button class="ppf-btn" id="ppf-open-feishu-opts-btn" style="background:#dc2626; color:#fff; border:none; font-weight:700; padding:4px 10px;">⚙️ 设置</button>
-                  </div>
-                  ${
-                    prePubState.showQuickSetup
-                      ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
-                          <input class="ppf-input" id="ppf-quick-code-inp" placeholder="在此粘贴 PPF2:... 跨设备配置码" />
-                          <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-quick-code-apply">⚡ 立即验证并连接飞书</button>
-                        </div>`
-                      : ''
-                  }
-                </div>`;
-              }
+          ${(() => {
+            // ==================== 顶部吸顶悬浮迷你状态条 + 完整三态同步模块（禁止同步冲突红 / 排期安全绿字待同步琥珀 / 同步完成翡翠绿） ====================
+            const schedInfoTop = feishuState.configured
+              ? detectPagePublishModeAndTime()
+              : { mode: 'immediate', plannedAt: '', isPostSubmitted: false, isRetainedSchedule: false };
+            const curSigTop = feishuState.configured ? getCurrentSyncSignature() : '';
+            const effCandTop = feishuState.configured ? getEffectiveFeishuCandidate() : null;
+            const isSyncedGreen = Boolean(
+              feishuState.configured && prePubState.syncedSig && prePubState.syncedSig === curSigTop && !prePubState.lastAlertIsError
+            );
+            const isConflictRed = Boolean(feishuState.configured && !isSyncedGreen && feishuState.hasConflict);
+            const syncVisualState = !feishuState.configured
+              ? 'unconfigured'
+              : isSyncedGreen
+              ? 'synced'
+              : isConflictRed
+              ? 'conflict'
+              : 'ready';
+            const feishuRealTime = isSyncedGreen
+              ? effCandTop?.feishuPublishedAt || prePubState.syncedFeishuTime || ''
+              : '';
+            const modeTag =
+              schedInfoTop.mode === 'scheduled' ? `定时 ${schedInfoTop.plannedAt.slice(5)}` : '立即发布';
 
-              const schedInfo = detectPagePublishModeAndTime();
-              const curSig = getCurrentSyncSignature();
-              const effCand = getEffectiveFeishuCandidate();
-              const isSyncedGreen = Boolean(
-                prePubState.syncedSig && prePubState.syncedSig === curSig && !prePubState.lastAlertIsError
-              );
-              const feishuRealTime = isSyncedGreen
-                ? effCand?.feishuPublishedAt || prePubState.syncedFeishuTime || ''
-                : '';
-              const modeTag =
-                schedInfo.mode === 'scheduled' ? `定时 ${schedInfo.plannedAt.slice(5)}` : '立即发布';
+            // 吸顶迷你悬浮条样式与文案（滚动到下方填描述/标签时自动置顶悬停，一眼看清状态且可直接点同步，绝不遗漏！）
+            const stickyVisibleClass = (prePubState.pubScrollTop || 0) > 56 ? ' is-visible' : '';
+            let stickyBg = '';
+            let stickyBorder = '';
+            let stickyColor = '';
+            let stickyLeftHtml = '';
+            let stickyRightHtml = '';
+            if (syncVisualState === 'unconfigured') {
+              stickyBg = isLight ? 'rgba(254,242,242,0.97)' : 'rgba(127,29,29,0.94)';
+              stickyBorder = '#dc2626';
+              stickyColor = isLight ? '#b91c1c' : '#fecaca';
+              stickyLeftHtml = `<span>🚨 未连接飞书 · 未同步</span>`;
+              stickyRightHtml = `<button class="ppf-btn" id="ppf-sticky-scroll-top" style="padding:2px 8px; font-size:11px; background:#dc2626; color:#fff; border:none; font-weight:700;">去连接 ↑</button>`;
+            } else if (syncVisualState === 'conflict') {
+              stickyBg = isLight ? 'rgba(254,242,242,0.97)' : 'rgba(127,29,29,0.94)';
+              stickyBorder = '#dc2626';
+              stickyColor = isLight ? '#b91c1c' : '#fecaca';
+              stickyLeftHtml = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">⛔ 时间冲突 · 禁止同步 (${escapeHtml(modeTag)})</span>`;
+              stickyRightHtml = `<button class="ppf-btn" id="ppf-sticky-scroll-top" style="padding:2px 8px; font-size:11px; background:#991b1b; color:#fff; border:none; font-weight:700; flex-shrink:0;">查看冲突 ↑</button>`;
+            } else if (syncVisualState === 'synced') {
+              stickyBg = isLight ? 'rgba(236,253,245,0.97)' : 'rgba(6,78,59,0.94)';
+              stickyBorder = '#10b981';
+              stickyColor = isLight ? '#047857' : '#6ee7b7';
+              stickyLeftHtml = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">✅ 已同步完成 (${escapeHtml(
+                feishuRealTime || prePubState.syncedLabel || modeTag
+              )})</span>`;
+              stickyRightHtml = `<span class="ppf-state-pill" style="background:rgba(16,185,129,0.18); color:${stickyColor};">已落表</span>`;
+            } else {
+              stickyBg = isLight ? 'rgba(255,251,235,0.97)' : 'rgba(69,26,3,0.94)';
+              stickyBorder = '#f59e0b';
+              stickyColor = isLight ? '#92400e' : '#fde68a';
+              stickyLeftHtml = `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">⏳ 待同步 · <strong style="color:${
+                isLight ? '#059669' : '#34d399'
+              };">🟢排期安全</strong></span>`;
+              stickyRightHtml = `<button class="ppf-btn" id="ppf-sticky-sync-btn" ${
+                prePubState.syncing ? 'disabled' : ''
+              } style="padding:3px 9px; font-size:11px; background:linear-gradient(135deg, #f59e0b, #d97706); color:#fff; border:none; font-weight:800; flex-shrink:0;">${
+                prePubState.syncing ? '⏳ 同步中' : `⚡ 同步 (${escapeHtml(modeTag)})`
+              }</button>`;
+            }
 
+            const stickyBarHtml = `<div class="ppf-sticky-sync-bar${stickyVisibleClass}" id="ppf-sticky-sync-bar" data-sync-state="${syncVisualState}" style="background:${stickyBg}; border-bottom:2px solid ${stickyBorder}; color:${stickyColor};">
+              <div id="ppf-sticky-bar-title" style="display:flex; align-items:center; gap:5px; min-width:0; flex:1; cursor:pointer;" title="点击回到面板最顶部查看完整排期详情">${stickyLeftHtml}</div>
+              ${stickyRightHtml}
+            </div>`;
+
+            // 完整顶部三态卡片 HTML
+            let topCardHtml = '';
+            if (!feishuState.configured) {
+              const unconfAlert = prePubState.lastAlert || (feishuState.error ? `❌ ${feishuState.error}` : '');
+              topCardHtml = `<div class="ppf-sec" id="ppf-top-status-card" data-sync-state="unconfigured" style="border:2px solid #dc2626; background:${
+                isLight ? '#fef2f2' : 'rgba(220,38,38,0.18)'
+              }; gap:6px; padding:8px 10px;">
+                <div class="ppf-sec-hd" style="color:${isLight ? '#b91c1c' : '#fca5a5'}; font-size:12px; font-weight:800;">
+                  <span>🚨 未连接飞书 · 尚未同步真实发布时间</span>
+                  <button class="ppf-icon-btn" id="ppf-open-feishu-opts" title="打开飞书多维表连接设置">⚙️</button>
+                </div>
+                <div id="ppf-top-alert-msg" style="display:${unconfAlert ? 'block' : 'none'}; background:${
+                isLight ? 'rgba(220,38,38,0.10)' : 'rgba(239,68,68,0.22)'
+              }; color:${
+                isLight ? '#991b1b' : '#fecaca'
+              }; border-left:3px solid #dc2626; padding:5px 8px; border-radius:5px; font-size:11.5px; font-weight:700; line-height:1.4; word-break:break-word;">${escapeHtml(
+                unconfAlert
+              )}</div>
+                <div style="display:flex; gap:6px;">
+                  <button class="ppf-btn" id="ppf-toggle-quick-code" style="flex:1; font-weight:600;">📥 粘贴配置码秒连</button>
+                  <button class="ppf-btn" id="ppf-open-feishu-opts-btn" style="background:#dc2626; color:#fff; border:none; font-weight:700; padding:4px 10px;">⚙️ 设置</button>
+                </div>
+                ${
+                  prePubState.showQuickSetup
+                    ? `<div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+                        <input class="ppf-input" id="ppf-quick-code-inp" placeholder="在此粘贴 PPF2:... 跨设备配置码" />
+                        <button class="ppf-btn ppf-btn-accent ppf-btn-block" id="ppf-quick-code-apply">⚡ 立即验证并连接飞书</button>
+                      </div>`
+                    : ''
+                }
+              </div>`;
+            } else {
               // 防张冠李戴检测：若网页输入框已填标题，但与自动匹配的作品毫无重合字，在顶部警告栏高亮提醒
               let mismatchWarn = '';
               const { pageRawTitle } = readCurrentFormTitleAndBody();
-              if (prePubState.selectedWorkKey === 'auto' && effCand && pageRawTitle && pageRawTitle.length >= 5) {
+              if (prePubState.selectedWorkKey === 'auto' && effCandTop && pageRawTitle && pageRawTitle.length >= 5) {
                 const pNorm = normalizeCompareTitle(pageRawTitle);
-                const cNorm1 = normalizeCompareTitle(effCand.label.replace(/^[0-9？?]+｜/, ''));
-                const cNorm2 = normalizeCompareTitle(effCand.fallbackTitle || '');
+                const cNorm1 = normalizeCompareTitle(effCandTop.label.replace(/^[0-9？?]+｜/, ''));
+                const cNorm2 = normalizeCompareTitle(effCandTop.fallbackTitle || '');
                 const cNorm3 = currentPack.meta?.isPresetDefault ? '' : normalizeCompareTitle(activeTitle || '');
                 const hasBigramOverlap = (a, b) => {
                   if (!a || !b || a.length < 2 || b.length < 2) return false;
@@ -6721,7 +6982,7 @@
                   !hasBigramOverlap(pNorm, cNorm2) &&
                   (!cNorm3 || !hasBigramOverlap(pNorm, cNorm3))
                 ) {
-                  mismatchWarn = `⚠️ 网页标题与关联记录《${effCand.label}》疑似不符，请在 B 区核对切换！`;
+                  mismatchWarn = `⚠️ 网页标题与关联记录《${effCandTop.label}》疑似不符，请在 B 区核对切换！`;
                 }
               }
 
@@ -6729,34 +6990,138 @@
                 prePubState.lastAlert ||
                 (feishuState.error ? `❌ 飞书异常：${feishuState.error}` : '') ||
                 (prePubState.conflictConfirm ? prePubState.conflictConfirm.summary : '') ||
-                (!isSyncedGreen && feishuState.hasConflict ? feishuState.summary : '') ||
+                (isConflictRed ? feishuState.summary : '') ||
                 mismatchWarn ||
                 '';
 
-              const topBorder = isSyncedGreen ? '#10b981' : '#dc2626';
+              const topBorder = isSyncedGreen ? '#10b981' : isConflictRed ? '#dc2626' : '#f59e0b';
               const topBg = isSyncedGreen
                 ? isLight
                   ? '#ecfdf5'
                   : 'rgba(16,185,129,0.16)'
+                : isConflictRed
+                ? isLight
+                  ? '#fef2f2'
+                  : 'rgba(220,38,38,0.18)'
                 : isLight
-                ? '#fef2f2'
-                : 'rgba(220,38,38,0.18)';
+                ? '#fffbeb'
+                : 'rgba(245,158,11,0.14)';
               const topHdColor = isSyncedGreen
                 ? isLight
                   ? '#047857'
                   : '#6ee7b7'
+                : isConflictRed
+                ? isLight
+                  ? '#b91c1c'
+                  : '#fca5a5'
                 : isLight
-                ? '#b91c1c'
-                : '#fca5a5';
+                ? '#b45309'
+                : '#fcd34d';
 
-              return `<div class="ppf-sec" id="ppf-top-status-card" style="border:2px solid ${topBorder}; background:${topBg}; gap:6px; padding:8px 10px;">
+              const stateBadgeHtml = isSyncedGreen
+                ? `<span class="ppf-state-pill" style="background:rgba(16,185,129,0.18); color:${topHdColor};">同步完成</span>`
+                : isConflictRed
+                ? `<span class="ppf-state-pill" style="background:rgba(220,38,38,0.16); color:${topHdColor};">禁止同步</span>`
+                : `<span class="ppf-state-pill" style="background:rgba(245,158,11,0.20); color:${topHdColor};">${
+                    schedInfoTop.isPostSubmitted ? '发后补同步' : '可以同步'
+                  }</span>`;
+
+              const headerTitleText = isSyncedGreen
+                ? `✅ 已同步真实发布时间 (${escapeHtml(feishuRealTime || prePubState.syncedLabel || modeTag)})`
+                : isConflictRed
+                ? '⛔ 排期时间冲突 · 禁止同步'
+                : schedInfoTop.isPostSubmitted
+                ? '🕒 稿件已提交 · 请确认时间补同步'
+                : '⏳ 未同步真实发布时间 · 可以同步';
+
+              // 将「排期安全」转化为醒目绿底绿字高亮块，一眼识别无冲突且最近排期清晰可见！
+              let safeRadarHtml = '';
+              if (!isSyncedGreen && !isConflictRed && feishuState.summary) {
+                const rawSum = String(feishuState.summary || '').trim();
+                const cleanRest = rawSum.replace(/^🟢\s*排期安全\s*/, '').trim();
+                const goldenTail = feishuState.goldenWindows ? ` · 黄金档 ${feishuState.goldenWindows}` : '';
+                safeRadarHtml = `<div id="ppf-safe-radar-line" style="background:${
+                  isLight ? 'rgba(16,185,129,0.13)' : 'rgba(16,185,129,0.20)'
+                }; border:1px solid rgba(16,185,129,0.42); border-radius:6px; padding:5px 8px; font-size:11.5px; line-height:1.42;">
+                  <strong style="color:${isLight ? '#047857' : '#34d399'}; font-weight:800;">🟢 排期安全</strong>
+                  <span style="color:${isLight ? '#065f46' : '#a7f3d0'}; font-weight:600;">${escapeHtml(
+                    `${cleanRest}${goldenTail}`
+                  )}</span>
+                </div>`;
+              }
+
+              // 发后漏点同步补救确认栏（FB-20261121-0003）：页面跳到《稿件投递成功》后自动保留发前最后一次选定的定时时间供确认修改
+              let postSubmitConfirmHtml = '';
+              if (!isSyncedGreen && schedInfoTop.isPostSubmitted) {
+                const prefillVal =
+                  prePubState.manualTimeOverride ||
+                  (schedInfoTop.mode === 'scheduled' && schedInfoTop.plannedAt
+                    ? schedInfoTop.plannedAt
+                    : prePubState.nativeSubmitImmediateTime || formatLocalYMDHM(Date.now()));
+                const hasRetainedSched = Boolean(prePubState.lastCapturedSchedule);
+                postSubmitConfirmHtml = `<div id="ppf-post-submit-confirm" style="background:${
+                  isLight ? '#ffffff' : 'rgba(0,0,0,0.26)'
+                }; border:1px dashed ${isConflictRed ? '#dc2626' : '#d97706'}; border-radius:7px; padding:6px 8px; display:flex; flex-direction:column; gap:5px;">
+                  <div style="font-size:11px; font-weight:700; color:${topHdColor}; display:flex; align-items:center; justify-content:space-between; gap:4px;">
+                    <span>${
+                      schedInfoTop.isRetainedSchedule
+                        ? '📌 已保留发前最后选定的定时时间（可核对微调）：'
+                        : '📌 检测到稿件已发布，请确认实际发布时间：'
+                    }</span>
+                    ${
+                      hasRetainedSched
+                        ? `<button class="ppf-btn" id="ppf-post-toggle-mode" style="padding:1px 6px; font-size:10.5px;">${
+                            schedInfoTop.mode === 'scheduled' ? '改为立即发布' : `恢复定时 ${prePubState.lastCapturedSchedule.slice(5)}`
+                          }</button>`
+                        : ''
+                    }
+                  </div>
+                  <input class="ppf-input" id="ppf-post-confirm-time-inp" value="${escapeHtml(
+                    prefillVal
+                  )}" placeholder="YYYY-MM-DD HH:mm" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:700;" />
+                </div>`;
+              }
+
+              let actionAreaHtml = '';
+              if (!isSyncedGreen) {
+                if (isConflictRed) {
+                  if (prePubState.conflictConfirm) {
+                    actionAreaHtml = `<div style="display:flex; gap:6px; justify-content:flex-end;">
+                      <button class="ppf-btn" id="ppf-conf-cancel">返回修改排期</button>
+                      <button class="ppf-btn" id="ppf-conf-force" style="background:#dc2626; color:#fff; border:none; font-weight:700;">已知冲突 · 仍强制同步</button>
+                    </div>`;
+                  } else {
+                    actionAreaHtml = `<div style="display:flex; flex-direction:column; gap:4px;">
+                      <button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-blocked" disabled style="background:#991b1b; color:#ffffff; border:none; opacity:0.65; cursor:not-allowed; font-weight:800; padding:7px 10px; font-size:12px;">
+                        ⛔ 时间冲突禁止同步 · 请先修改页面排期时间
+                      </button>
+                      <div style="text-align:right;">
+                        <button id="ppf-unlock-force-sync" style="background:transparent; border:none; color:${
+                          isLight ? '#991b1b' : '#fca5a5'
+                        }; font-size:10.5px; text-decoration:underline; cursor:pointer; padding:0; opacity:0.82;">特殊情况需忽略冲突强制同步？</button>
+                      </div>
+                    </div>`;
+                  }
+                } else {
+                  actionAreaHtml = `<button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-pub" ${
+                    prePubState.syncing ? 'disabled' : ''
+                  } style="background:linear-gradient(135deg, #f59e0b, #d97706); color:#fff; border:none; font-weight:800; padding:7px 10px; font-size:12.5px; box-shadow:0 3px 10px rgba(217,119,6,0.26);">
+                    ${
+                      prePubState.syncing
+                        ? '⏳ 正在写入飞书并回读真实发布时间...'
+                        : schedInfoTop.isPostSubmitted
+                        ? `⚡ 确认时间并补同步飞书 · ${escapeHtml(modeTag)}`
+                        : `⚡ 可以同步 · 点此同步真实发布时间 (${escapeHtml(modeTag)})`
+                    }
+                  </button>`;
+                }
+              }
+
+              topCardHtml = `<div class="ppf-sec" id="ppf-top-status-card" data-sync-state="${syncVisualState}" style="border:2px solid ${topBorder}; background:${topBg}; gap:6px; padding:8px 10px;">
                 <div class="ppf-sec-hd" style="color:${topHdColor}; font-size:12px; font-weight:800;">
-                  <span>${
-                    isSyncedGreen
-                      ? `✅ 已同步真实发布时间 (${escapeHtml(feishuRealTime || prePubState.syncedLabel || modeTag)})`
-                      : '🚨 未同步真实发布时间 · 发布前必点同步'
-                  }</span>
+                  <span>${headerTitleText}</span>
                   <div class="ppf-row-nowrap">
+                    ${stateBadgeHtml}
                     <button class="ppf-icon-btn" id="ppf-toggle-time-override" title="手动指定发布时间（页面未识别定时框时兜底）">⏰</button>
                     ${
                       isSyncedGreen
@@ -6775,7 +7140,7 @@
               )}</div>
 
                 ${
-                  prePubState.showTimeInput || prePubState.manualTimeOverride
+                  !schedInfoTop.isPostSubmitted && (prePubState.showTimeInput || prePubState.manualTimeOverride)
                     ? `<div style="display:flex; gap:5px; align-items:center;">
                         <input class="ppf-input" id="ppf-manual-time-inp" placeholder="手动指定定时 YYYY-MM-DD HH:mm (留空自动读页面)" value="${escapeHtml(
                           prePubState.manualTimeOverride
@@ -6789,32 +7154,17 @@
                     : ''
                 }
 
-                ${
-                  !isSyncedGreen && !feishuState.hasConflict && feishuState.summary
-                    ? `<div style="font-size:11px; line-height:1.35; opacity:0.85;">${escapeHtml(feishuState.summary)}${
-                        feishuState.goldenWindows ? ` · 黄金档 ${escapeHtml(feishuState.goldenWindows)}` : ''
-                      }</div>`
-                    : ''
-                }
-
-                ${
-                  !isSyncedGreen
-                    ? prePubState.conflictConfirm
-                      ? `<div style="display:flex; gap:6px; justify-content:flex-end;">
-                          <button class="ppf-btn" id="ppf-conf-cancel">去改页面定时</button>
-                          <button class="ppf-btn" id="ppf-conf-force" style="background:#dc2626; color:#fff; border:none; font-weight:700;">已知风险 · 强制同步变绿</button>
-                        </div>`
-                      : `<button class="ppf-btn ppf-btn-block" id="ppf-panel-sync-pub" style="background:linear-gradient(135deg, #ef4444, #dc2626); color:#fff; border:none; font-weight:800; padding:7px 10px; font-size:12.5px; box-shadow:0 3px 10px rgba(220,38,38,0.28);">
-                          ${
-                            prePubState.syncing
-                              ? '⏳ 正在写入飞书并回读真实发布时间...'
-                              : `🚨 点此同步真实发布时间 · ${escapeHtml(modeTag)}`
-                          }
-                        </button>`
-                    : ''
-                }
+                ${postSubmitConfirmHtml}
+                ${safeRadarHtml}
+                ${actionAreaHtml}
               </div>`;
-            })()}
+            }
+
+            return `<div class="ppf-body-wrap">
+              ${stickyBarHtml}
+              <div class="ppf-body" id="ppf-pub-body">
+                ${topCardHtml}`;
+          })()}
 
             <!-- 结构 A：极简本地作品文件栏（Hover 展示真实完整路径 + 一键打开路径） -->
             ${(() => {
@@ -7093,11 +7443,48 @@
               <span>🛡️ 拟人延时 · 不自动点发布</span>
               <span>左边缘可拖宽 · Alt+S 收起</span>
             </div>
-          </div>
+              </div>
+            </div>
         </div>
       `;
 
       rootWrap.appendChild(shell);
+
+      // 保持面板滚动位置并在向下滚动填描述/标签时平滑置顶展示迷你同步状态条（防滚走遗忘同步！）
+      const pubBodyEl = shadow.getElementById('ppf-pub-body');
+      const stickyBarEl = shadow.getElementById('ppf-sticky-sync-bar');
+      if (pubBodyEl) {
+        if (prePubState.pubScrollTop > 0) {
+          pubBodyEl.scrollTop = prePubState.pubScrollTop;
+        }
+        pubBodyEl.onscroll = () => {
+          const st = pubBodyEl.scrollTop || 0;
+          prePubState.pubScrollTop = st;
+          if (stickyBarEl) {
+            stickyBarEl.classList.toggle('is-visible', st > 56);
+          }
+        };
+      }
+      const scrollTopTrigger = () => {
+        if (pubBodyEl) {
+          pubBodyEl.scrollTop = 0;
+          prePubState.pubScrollTop = 0;
+          if (stickyBarEl) stickyBarEl.classList.remove('is-visible');
+        }
+      };
+      const stickyTitleEl = shadow.getElementById('ppf-sticky-bar-title');
+      if (stickyTitleEl) stickyTitleEl.onclick = scrollTopTrigger;
+      const stickyScrollBtn = shadow.getElementById('ppf-sticky-scroll-top');
+      if (stickyScrollBtn) stickyScrollBtn.onclick = scrollTopTrigger;
+      const stickySyncBtn = shadow.getElementById('ppf-sticky-sync-btn');
+      if (stickySyncBtn) {
+        stickySyncBtn.onclick = guardAsyncButton(
+          stickySyncBtn,
+          'sync_pub',
+          () => syncPrePublishAndTurnGreen({ force: false }),
+          1800
+        );
+      }
 
       // 渲染封面切换胶囊（按当前平台独立保存选中项，切到其它平台不会互相干扰）
       const coverChipsWrap = shadow.getElementById('ppf-cover-chips');
@@ -7300,6 +7687,33 @@
           prePubState.showTimeInput = false;
           prePubState.conflictConfirm = null;
           refreshFeishuPublishContext(false);
+        };
+      }
+      const postConfirmInp = shadow.getElementById('ppf-post-confirm-time-inp');
+      if (postConfirmInp) {
+        postConfirmInp.onchange = (e) => {
+          prePubState.manualTimeOverride = e.target.value.trim();
+          prePubState.conflictConfirm = null;
+          refreshFeishuPublishContext(false);
+        };
+      }
+      const postToggleModeBtn = shadow.getElementById('ppf-post-toggle-mode');
+      if (postToggleModeBtn) {
+        postToggleModeBtn.onclick = () => {
+          prePubState.manualTimeOverride = '';
+          prePubState.postSubmitForceImmediate = !prePubState.postSubmitForceImmediate;
+          prePubState.conflictConfirm = null;
+          refreshFeishuPublishContext(false);
+        };
+      }
+      const unlockForceSyncBtn = shadow.getElementById('ppf-unlock-force-sync');
+      if (unlockForceSyncBtn) {
+        unlockForceSyncBtn.onclick = () => {
+          prePubState.conflictConfirm = {
+            summary: feishuState.summary || '⛔ 当前排期与同号其它视频间隔不足 6 小时，请谨慎确认是否强制覆盖同步！',
+            conflicts: feishuState.conflicts || [],
+          };
+          render();
         };
       }
 
@@ -7546,9 +7960,11 @@
           currentPack = await loadPackState();
           coverBlobsMap = await loadCoversCrossPlatform();
           await hydrateCoversFromBlobs();
+          prePubState.selectedAccountId = '';
           prePubState.selectedWorkKey = 'auto';
           prePubState.syncedSig = '';
           prePubState.conflictConfirm = null;
+          resetTransientPrePubCapture();
           setStatus(`🔄 已同步发布包：${currentPack.meta?.packTitle || ''}`);
           needRender = true;
           refreshFeishuPublishContext(true);
@@ -7586,12 +8002,13 @@
       }
       if (isPublishPageContext()) {
         const initSched = detectPagePublishModeAndTime();
-        prePubState.lastTimeSig = `${initSched.mode}|${initSched.plannedAt}`;
+        prePubState.lastTimeSig = `${initSched.mode}|${initSched.plannedAt}|${initSched.isPostSubmitted ? '1' : '0'}`;
         refreshFeishuPublishContext(true);
       }
     }, 1200);
 
-    // 即使手动直接点网页原生的「导出数据 / 下载明细」按钮，也在按下瞬间同步当前账号与板块名，让后台自动重命名与 12h 缓存生效！
+    // 1) 手动点网页原生「导出 / 下载」按钮时实时同步账号提示；
+    // 2) 手动点网页原生「立即投稿 / 发布 / 发表」按钮瞬间（表单尚未卸载前！），立即快照最后一次选定的定时时间与标题正文，供发后发现未同步时一键确认补同步！
     document.addEventListener(
       'mousedown',
       (e) => {
@@ -7602,12 +8019,29 @@
         const txt = (btn.textContent || '').replace(/\s+/g, '').trim();
         if (txt.length <= 12 && /(?:导出|下载)/.test(txt)) {
           pushExportHintToBackground({ btnEl: btn, enqueue: true });
+        } else if (
+          isPublishPageContext() &&
+          txt.length <= 14 &&
+          /^(?:立即投稿|定时投稿|立即发布|定时发布|发布|发表|确认发布|发布作品|发布笔记)$/.test(txt)
+        ) {
+          const snapSched = scanRawDomScheduledTime();
+          if (snapSched?.plannedAt) {
+            prePubState.lastCapturedSchedule = snapSched.plannedAt;
+            prePubState.lastCapturedScheduleAt = Date.now();
+          }
+          readCurrentFormTitleAndBody();
+          prePubState.nativeSubmitClickedAt = Date.now();
+          prePubState.nativeSubmitImmediateTime = formatLocalYMDHM(Date.now());
+        } else if (isPublishPageContext() && txt.length <= 12 && /^(?:再投一个|继续发布|重新上传)$/.test(txt)) {
+          resetTransientPrePubCapture();
+          prePubState.manualTimeOverride = '';
+          prePubState.syncedSig = '';
         }
       },
       { capture: true, passive: true }
     );
 
-    // SPA 路由切换感知（从首页/列表页进入发布页立即挂载，发布完成跳回列表页立即隐藏）& 页面定时时间变更实时监测
+    // SPA 路由切换感知（从首页/列表页进入发布页立即挂载，发布完成跳回列表页立即隐藏）& 页面定时时间/发后结果页状态变更实时监测
     let lastObservedHref = location.href;
     setInterval(() => {
       if (location.href !== lastObservedHref) {
@@ -7615,6 +8049,7 @@
         pendingExportConfirm = null;
         prePubState.syncedSig = '';
         prePubState.conflictConfirm = null;
+        resetTransientPrePubCapture();
         pushExportHintToBackground({ enqueue: false });
         render();
         if (isPublishPageContext()) {
@@ -7622,7 +8057,7 @@
         }
       } else if (isPublishPageContext()) {
         const curSched = detectPagePublishModeAndTime();
-        const curTimeSig = `${curSched.mode}|${curSched.plannedAt}`;
+        const curTimeSig = `${curSched.mode}|${curSched.plannedAt}|${curSched.isPostSubmitted ? '1' : '0'}`;
         if (curTimeSig !== prePubState.lastTimeSig) {
           prePubState.lastTimeSig = curTimeSig;
           prePubState.conflictConfirm = null;
@@ -7652,11 +8087,15 @@
       });
     }
 
-    // 若本地 8765 桥接服务切换了新作品，或此前缓存的发布包因 publish_receipt.json 导致文案为空，自动静默拉取恢复！
+    // 若本地 8765 桥接服务切换了新作品，或此前缓存的发布包因 publish_receipt.json / sources.json 导致文案为空，自动静默拉取恢复！
+    const curPlatObj = currentPack.platforms?.[platform] || {};
     const cachedPlatEmpty =
       !currentPack.meta?.isPresetDefault &&
       !currentPack.meta?.localMissing &&
-      (!currentPack.platforms?.[platform]?.body && !currentPack.platforms?.[platform]?.title);
+      !curPlatObj.body &&
+      !curPlatObj.title &&
+      !curPlatObj.shortTitleClean &&
+      !curPlatObj.shortTitleRaw;
     gmRequestJson(`${settings.bridgeUrl}/api/status`)
       .then((st) => {
         if (
@@ -7819,14 +8258,13 @@
           if (!isValidPublishPackContent(fileName, rawContent)) {
             fileName = '';
             rawContent = '';
-            const fallbackPackNames = ['publish.pack.json', '发布包_v03.md', '发布包_v02.md', '发布包_v01.md', '发布包.md'];
-            for (const candName of fallbackPackNames) {
+            for (const candName of FALLBACK_PACK_PROBE_NAMES) {
               try {
                 const fbRes = await fetch(`${origin}/api/file?path=${encodeURIComponent(candName)}`, { cache: 'no-store' });
                 if (fbRes.ok) {
                   const fbText = await fbRes.text();
                   if (isValidPublishPackContent(candName, fbText)) {
-                    fileName = candName;
+                    fileName = candName.split('/').pop() || candName;
                     rawContent = fbText;
                     break;
                   }
@@ -7858,6 +8296,13 @@
                 } else if (subPath.includes('B站') && subData.body) {
                   parsed.platforms.bilibili.title = subData.title || parsed.platforms.bilibili.title;
                   parsed.platforms.bilibili.body = subData.body;
+                } else if (subPath.includes('视频号') && subData.body) {
+                  if (subData.title) {
+                    parsed.platforms.weixin.shortTitleRaw = subData.title;
+                    parsed.platforms.weixin.shortTitleClean = sanitizeWeixinShortTitle(subData.title);
+                  }
+                  parsed.platforms.weixin.body = subData.body;
+                  parsed.platforms.weixin.tags = subData.tags;
                 }
               }
             }

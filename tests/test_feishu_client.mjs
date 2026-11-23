@@ -56,6 +56,9 @@ const {
   buildSafeV3WriteFields,
   smartBatchUpdateRecord,
   smartBatchCreateRecord,
+  matchAccountRecord,
+  normalizePlatformCn,
+  platformMatches,
   evaluateScheduleConflicts,
   queryFeishuPublishContext,
   syncPrePublishToFeishu,
@@ -670,4 +673,85 @@ assert.equal(sp2.cRecordId, 'recCExisting110');
 assert.equal(cBatchCreateCount, 0, '同一账号同一内容严禁调用 batch_create 新建重复记录');
 assert.equal(cBatchUpdateCount, 1, '并发点击发前同步严格只发 1 次 batch_update 更新原记录');
 
-console.log('✅ All Feishu pure-JS client, 429 retry + anti-duplicate idempotency + 1-account-1-content tests passed!');
+// ==================== Test 9: FB-20261120-0001 视频号多账号精准匹配（杜绝数见万象/万物有数误落到排第一的靖蜀黍视频号或微信私域号） ====================
+const mockZ3Accounts = [
+  {
+    record_id: 'recWxPrivate',
+    fields: { 账号名称: '微信·靖ss', 账号昵称: '靖ss', 平台: '微信', 所属品牌: '微信私域', 账号状态: 'Z310运营中' },
+  },
+  {
+    record_id: 'recSphJingshu',
+    fields: { 账号名称: '视频号·靖蜀黍.', 账号昵称: '靖蜀黍.', 平台: '视频号', 所属品牌: '靖蜀黍·个人IP', 账号状态: 'Z310运营中' },
+  },
+  {
+    record_id: 'recSphShujian',
+    fields: { 账号名称: '视频号·数见万象', 账号昵称: '数见万象', 平台: '视频号', 所属品牌: '万物皆有数', 账号状态: 'Z310运营中' },
+  },
+];
+const fmAccTest = { name: '账号名称', nickname: '账号昵称', platform: '平台', brand: '所属品牌', status: '账号状态' };
+assert.equal(platformMatches('微信', normalizePlatformCn('weixin')), false, '微信私域号严禁与微信视频号混淆');
+for (const hint of ['视频号·数见万象', '数见万象', '万物有数', '万物皆有数']) {
+  const hit = matchAccountRecord(mockZ3Accounts, fmAccTest, '视频号', hint);
+  assert.equal(hit?.record_id, 'recSphShujian', `提示词 "${hint}" 必须精准命中视频号·数见万象`);
+}
+assert.equal(
+  matchAccountRecord(mockZ3Accounts, fmAccTest, '视频号', '靖蜀黍')?.record_id,
+  'recSphJingshu',
+  '提示词 靖蜀黍 必须精准命中视频号·靖蜀黍.'
+);
+
+// ==================== Test 10: FB-20261121-0002 排期雷达同时纳入「已定时未来排期」计算最近邻（015｜贵阳 场景回归） ====================
+const mockNowMs = new Date('2026-11-21T20:38:00+08:00').getTime();
+const guiyangFutureMs = new Date('2026-11-22T11:00:00+08:00').getTime(); // 未来已定时：11-22 11:00
+const zhujiangPastMs = new Date('2026-11-21T18:00:00+08:00').getTime(); // 过去已发：11-21 18:00
+const chengduTargetMs = new Date('2026-11-22T17:00:00+08:00').getTime(); // 当前待排：11-22 17:00（距贵阳 6h，距珠江口 23h）
+
+const bMapGuiyang = new Map([
+  ['recB_Guiyang', { record_id: 'recB_Guiyang', fields: { 选题方向: '015｜贵阳' } }],
+  ['recB_Zhujiang', { record_id: 'recB_Zhujiang', fields: { 选题方向: '110｜珠江口三虎' } }],
+]);
+const cRowsGuiyang = [
+  {
+    record_id: 'recC_Zhujiang',
+    fields: {
+      分发账号: [{ id: 'recAcc_BiliWanwu' }],
+      内容运营表: [{ id: 'recB_Zhujiang' }],
+      状态: 'C21已发布',
+      真实发布日期: zhujiangPastMs,
+      标题: '当年站在同一起跑线的广东四小虎，为什么后来走出了三条完全不同的路？',
+    },
+  },
+  {
+    record_id: 'recC_Guiyang',
+    fields: {
+      分发账号: [{ id: 'recAcc_BiliWanwu' }],
+      内容运营表: [{ id: 'recB_Guiyang' }],
+      状态: 'C21已发布',
+      真实发布日期: guiyangFutureMs,
+      标题: '没有大平原的贵阳是怎么逆袭大数据之都的？',
+    },
+  },
+];
+
+const radarScheduledAfterGuiyang = evaluateScheduleConflicts({
+  cRows: cRowsGuiyang,
+  bById: bMapGuiyang,
+  fmPub: { accountLink: '分发账号', workLink: '内容运营表', status: '状态', publishedAt: '真实发布日期', title: '标题' },
+  fmWork: { title: '选题方向' },
+  accountId: 'recAcc_BiliWanwu',
+  platCn: 'B站',
+  targetMs: chengduTargetMs,
+  excludeBId: 'recB_Chengdu',
+  excludeCId: '',
+  minGapHours: 6,
+  nowMs: mockNowMs,
+});
+assert.equal(radarScheduledAfterGuiyang.hasConflict, false);
+assert.equal(radarScheduledAfterGuiyang.nearestSlot?.title, '015｜贵阳', '最近邻排期必须识别为未来已定时的《015｜贵阳》而非过去已发的珠江口');
+assert.equal(radarScheduledAfterGuiyang.nearestSlot?.diffHours, 6);
+assert.ok(
+  radarScheduledAfterGuiyang.summary.includes('015｜贵阳') && radarScheduledAfterGuiyang.summary.includes('间隔 6h'),
+  `排期安全提示必须显式展示最近已定时《015｜贵阳》及 6h 间隔，实际为：${radarScheduledAfterGuiyang.summary}`
+);
+
+console.log('✅ All Feishu pure-JS client, 429 retry + anti-duplicate + Weixin match + future schedule radar tests passed!');

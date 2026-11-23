@@ -13,7 +13,7 @@ assert.ok(startIdx > 0 && endIdx > startIdx, '未定位到解析器代码段');
 
 const snippet =
   userScriptCode.slice(startIdx, endIdx) +
-  '\nglobalThis.__exported = { calcXhsTitleLen, sanitizeWeixinShortTitle, parsePublishPackMarkdown, parsePublishPackJson, exportPackToSpecJson };';
+  '\nglobalThis.__exported = { calcXhsTitleLen, sanitizeWeixinShortTitle, extractPackVersionScore, isValidPublishPackContent, parsePublishPackMarkdown, parsePublishPackJson, exportPackToSpecJson };';
 
 const context = { globalThis: {} };
 vm.createContext(context);
@@ -22,6 +22,8 @@ vm.runInContext(snippet, context);
 const {
   calcXhsTitleLen,
   sanitizeWeixinShortTitle,
+  extractPackVersionScore,
+  isValidPublishPackContent,
   parsePublishPackMarkdown,
   parsePublishPackJson,
   exportPackToSpecJson,
@@ -112,4 +114,54 @@ assert.equal(parsedJingshu.platforms.bilibili.tags.length, 3);
 assert.ok(parsedJingshu.platforms.weixin.body.includes('火箭下半截掉进海里'));
 assert.ok(parsedJingshu.platforms.douyin.pinnedComment.includes('卫星列车'));
 
-console.log('✅ ALL MARKDOWN + JINGSHUSHU SOP + PUBLISHPACK v1.0 JSON TESTS PASSED!');
+// ==================== Test 7: FB-20261120-0001 视频号多版本 Markdown (v03/v10) 解析与辅助 JSON 过滤 ====================
+assert.equal(parsedMd.meta.format, 'markdown', 'Markdown 发布包必须显式标记 meta.format = markdown');
+assert.equal(
+  isValidPublishPackContent('sources_changzhutan.json', '{"cities":["长沙","株洲","湘潭"]}'),
+  false,
+  'sources_*.json 严禁被误识别为发布包'
+);
+assert.equal(
+  isValidPublishPackContent('publish_receipt.json', '{"publishedAt":"2026-11-20"}'),
+  false,
+  'publish_receipt.json 严禁被误识别为发布包'
+);
+assert.ok(
+  extractPackVersionScore('发布包_v10.md') > extractPackVersionScore('发布包_v03.md') &&
+    extractPackVersionScore('发布包_v03.md') > extractPackVersionScore('发布包_v2.md') &&
+    extractPackVersionScore('发布包_v2.md') > extractPackVersionScore('发布包_v01.md'),
+  '发布包版本号必须按自然数值 v10 > v03 > v2 > v01 排序'
+);
+
+const wxVariantMd = `# 《一座城的年轮 · 湘江三城》四平台标准发布包（v03）
+## 02｜微信视频号（熟人裂变）
+- **指定封面**：竖版主封面 \`封面/封面_3x4_A_v03.png\`
+- **合集**：\`一座城的年轮\`
+- **位置**：\`长沙市\`
+- **主推短标题（6–16 字）**：
+\`\`\`text
+相距40公里 长株潭谁带飞了谁？
+\`\`\`
+- **备选短标题（2 个）**：
+1. \`地铁跨市上班 长株潭为啥没合并？\`
+2. \`融城40年 长株潭谁带飞了谁？\`
+- **描述正文（直接复制）**：
+\`\`\`text
+一条湘江向北流，串起相距不到40公里的三座城。
+#长株潭 #长沙 #株洲 #湘潭
+\`\`\`
+- **置顶首评**：
+\`\`\`text
+这四十年三兄弟到底是虹吸多还是托举多？
+\`\`\`
+`;
+const parsedWxV03 = JSON.parse(JSON.stringify(parsePublishPackMarkdown(wxVariantMd, { mdFileName: '发布包_v03.md' })));
+assert.equal(parsedWxV03.meta.format, 'markdown');
+assert.equal(parsedWxV03.platforms.weixin.shortTitleClean, '相距40公里 长株潭谁带飞了谁？');
+assert.equal(parsedWxV03.platforms.weixin.altTitles.length, 2);
+assert.ok(parsedWxV03.platforms.weixin.body.includes('一条湘江向北流'));
+assert.deepEqual(parsedWxV03.platforms.weixin.tags, ['长株潭', '长沙', '株洲', '湘潭']);
+assert.equal(parsedWxV03.platforms.weixin.collection, '一座城的年轮');
+assert.equal(parsedWxV03.platforms.weixin.location, '长沙市');
+
+console.log('✅ ALL MARKDOWN + JINGSHUSHU SOP + PUBLISHPACK v1.0 JSON + WEIXIN v03 TESTS PASSED!');

@@ -7,7 +7,7 @@ const scriptSource = fs.readFileSync(
   'utf8'
 );
 
-function createMockDomEnv(targetUrl, feishuConfigured = true) {
+function createMockDomEnv(targetUrl, feishuConfigured = true, extraOpts = {}) {
   let lastShadowRoot = null;
   let innerHtmlStore = new WeakMap();
 
@@ -22,8 +22,22 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       this.textContent = '';
       this.innerText = '';
       this.value = '';
+      this.scrollTop = 0;
+      this.offsetParent = {};
       this.attributes = new Map();
       this.parentElement = null;
+      const classSet = new Set();
+      this.classList = {
+        add: (...cls) => cls.forEach((c) => classSet.add(c)),
+        remove: (...cls) => cls.forEach((c) => classSet.delete(c)),
+        toggle: (c, force) => {
+          const shouldAdd = force === undefined ? !classSet.has(c) : Boolean(force);
+          if (shouldAdd) classSet.add(c);
+          else classSet.delete(c);
+          return shouldAdd;
+        },
+        contains: (c) => classSet.has(c),
+      };
       innerHtmlStore.set(this, '');
     }
     get innerHTML() {
@@ -127,6 +141,10 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   let ccApproveCallCount = 0;
   let ccBiliPublishedInMock = false;
   let syncedTimeInFeishu = '';
+  let lastSyncPayload = null;
+  let mockHasConflict = Boolean(extraOpts.hasConflict);
+  let mockDomSelectorHandler = extraOpts.querySelectorAll || (() => []);
+  const intervalCallbacks = [];
   const timers = [];
   const sandbox = {
     window: win,
@@ -161,7 +179,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       title: '投稿中心',
       createElement: (t) => new MockElement(t),
       getElementById: () => null,
-      querySelectorAll: () => [],
+      querySelectorAll: (sel) => mockDomSelectorHandler(sel, MockElement),
       querySelector: () => null,
       addEventListener: () => {},
       dispatchEvent: () => {},
@@ -329,15 +347,22 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
                       fallbackTitle: '百元手搓AI桌面大脑',
                       fallbackBody: '测试云端文案 #AI硬件',
                     },
-                    hasConflict: false,
-                    summary: '🟢 排期安全（近 6h 内无同号冲突排期）',
+                    hasConflict: mockHasConflict,
+                    conflicts: mockHasConflict
+                      ? [{ title: '015｜贵阳', timeStr: '2026-11-22 11:00', diffHours: 2.5 }]
+                      : [],
+                    summary: mockHasConflict
+                      ? '🔴 排期撞车预警：与《015｜贵阳》(2026-11-22 11:00) 仅隔 2.5h (<6h)'
+                      : '🟢 排期安全（最近已定时《015｜贵阳》于 2026-11-22 11:00，间隔 6h）',
                   }
                 : { ok: true, configured: false, summary: '尚未配置' },
             });
             return;
           }
           if (msg.type === 'PPF_FEISHU_SYNC_PUBLISH') {
-            syncedTimeInFeishu = '2026-11-19 18:00';
+            lastSyncPayload = msg.payload || null;
+            syncedTimeInFeishu = msg.payload?.plannedAt || '2026-11-19 18:00';
+            mockHasConflict = false;
             cb?.({
               ok: true,
               data: {
@@ -395,7 +420,10 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
       return timers.length;
     },
     clearTimeout: () => {},
-    setInterval: () => 1,
+    setInterval: (fn) => {
+      intervalCallbacks.push(fn);
+      return intervalCallbacks.length;
+    },
     clearInterval: () => {},
     console,
     Date,
@@ -421,6 +449,16 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
     docEl,
     bodyEl,
     openedUrls,
+    setMockSelectorHandler: (fn) => {
+      mockDomSelectorHandler = fn;
+    },
+    setMockConflict: (v) => {
+      mockHasConflict = Boolean(v);
+    },
+    getLastSyncPayload: () => lastSyncPayload,
+    triggerIntervals: () => {
+      for (const fn of intervalCallbacks) fn();
+    },
     markMockBiliPublished: () => {
       ccBiliPublishedInMock = true;
     },
@@ -436,7 +474,7 @@ function createMockDomEnv(targetUrl, feishuConfigured = true) {
   };
 }
 
-// 1. 验证发布页挂载（已配置飞书）：统一右侧分屏停靠（移除靠左停靠并替换为 💬 反馈入口）+ 顶部高危红色未同步横幅 + A/B/C 三段式极简结构
+// 1. 验证发布页挂载（FB-20261123-0004 三态分明 + 排期安全绿字强化 + 滚动吸顶迷你条）：
 const pubEnv = createMockDomEnv('https://member.bilibili.com/platform/upload/video/frame', true);
 await pubEnv.flushTimers();
 const pubShadow = pubEnv.getShadowRoot();
@@ -448,8 +486,16 @@ const pubHtml = pubShadow.children.map((c) => c.innerHTML).join('\n');
 assert.ok(pubHtml.includes('全平台半自动发布助手'), '必须渲染侧边栏标题');
 assert.ok(!pubHtml.includes('ppf-toggle-dock-side'), '必须彻底移除靠左停靠切换按钮');
 assert.ok(pubHtml.includes('ppf-open-feedback'), '必须在原靠左停靠槽位渲染 💬 反馈按钮');
-assert.ok(pubHtml.includes('border:2px solid #dc2626'), '同步前顶部状态栏必须为高危红色 (#dc2626)');
-assert.ok(pubHtml.includes('未同步真实发布时间'), '同步前顶部必须醒目提示未同步真实发布时间');
+assert.ok(
+  pubHtml.includes('data-sync-state="ready"') && pubHtml.includes('border:2px solid #f59e0b'),
+  '排期安全未同步态必须采用与冲突红严格区分的琥珀色待同步卡片 (#f59e0b)'
+);
+assert.ok(
+  pubHtml.includes('id="ppf-safe-radar-line"') && pubHtml.includes('🟢 排期安全') && pubHtml.includes('#047857'),
+  '排期安全时必须使用醒目绿色文字强化展示「🟢 排期安全」及最近排期信息'
+);
+assert.ok(pubHtml.includes('可以同步'), '无冲突待同步态必须清晰展示「可以同步」标识');
+assert.ok(pubHtml.includes('ppf-sticky-sync-bar'), '必须渲染顶部吸顶迷你状态条供滚动到底部填描述时防遗忘');
 assert.ok(pubHtml.includes('ppf-sec-local') && pubHtml.includes('ppf-open-local-dir'), 'A区必须展示极简本地路径与打开路径按钮');
 assert.ok(pubHtml.includes('20261102_百元AI大脑'), 'A区必须展示干净的本地作品目录标识');
 assert.ok(!pubHtml.includes('选成品包目录') && !pubHtml.includes('粘贴JSON') && !pubHtml.includes('云文案'), '已按要求移除选成品包/粘贴JSON/云文案冗余按钮');
@@ -457,15 +503,100 @@ assert.ok(pubHtml.includes('⏳@B站·靖蜀黍_018｜百元AI大脑'), 'B区必
 assert.ok(pubHtml.includes('id="ppf-feishu-real-time"') && !pubHtml.includes('2026-11-19 18:00'), '未点同步前飞书真实发布时间必须为空');
 assert.ok(pubHtml.includes('C 发布包'), 'C区必须清晰分隔展示发布包内容');
 
-// 验证点击同步后：顶部状态横幅翻绿 + B区记录变 ✅ + 回显飞书真实发布时间
-const syncBtn = pubShadow.getElementById('ppf-panel-sync-pub');
-assert.ok(syncBtn && typeof syncBtn.onclick === 'function', '必须绑定顶部红色同步按钮点击事件');
-await syncBtn.onclick();
+// 验证滚动到底部填描述时：吸顶迷你条自动激活悬停，且可直接从吸顶迷你条点击同步变绿！
+const pubBodyEl = pubShadow.getElementById('ppf-pub-body');
+const stickyBarBefore = pubShadow.getElementById('ppf-sticky-sync-bar');
+assert.ok(pubBodyEl && stickyBarBefore, '必须挂载可滚动面板主体与吸顶状态栏');
+pubBodyEl.scrollTop = 180;
+pubBodyEl.onscroll();
+assert.equal(stickyBarBefore.classList.contains('is-visible'), true, '向下滚动超过阈值后顶部吸顶状态栏必须自动显现');
+
+const stickySyncBtn = pubShadow.getElementById('ppf-sticky-sync-btn');
+assert.ok(stickySyncBtn && typeof stickySyncBtn.onclick === 'function', '吸顶栏必须支持直接一键同步');
+await stickySyncBtn.onclick();
 const greenHtml = pubShadow.children.map((c) => c.innerHTML).join('\n');
-assert.ok(greenHtml.includes('border:2px solid #10b981'), '点击同步后顶部状态栏必须翻为安全绿 (#10b981)');
-assert.ok(greenHtml.includes('已同步真实发布时间 (2026-11-19 18:00)'), '点击同步后顶部必须展示飞书真实发布时间');
+assert.ok(
+  greenHtml.includes('data-sync-state="synced"') && greenHtml.includes('border:2px solid #10b981'),
+  '点击同步后顶部状态栏与吸顶条必须切换为同步完成翡翠绿 (#10b981)'
+);
+assert.ok(greenHtml.includes('已同步真实发布时间 (2026-11-19 18:00)') && greenHtml.includes('同步完成'), '点击同步后顶部必须展示飞书真实发布时间与同步完成标识');
 assert.ok(greenHtml.includes('✅@B站·靖蜀黍_018｜百元AI大脑'), '点击同步后B区发布记录名称必须切换为 ✅');
 assert.ok(greenHtml.includes('>2026-11-19 18:00</span>'), '点击同步后B区必须展示飞书真实发布时间');
+assert.ok(greenHtml.includes('ppf-sticky-sync-bar is-visible'), '重绘后必须保持底部滚动位置与吸顶栏可见态');
+
+// 1b. 验证「时间冲突 · 禁止同步」高危红态（FB-20261123-0004 第一态）：主按钮禁用禁止误点同步
+const conflictEnv = createMockDomEnv('https://member.bilibili.com/platform/upload/video/frame', true, {
+  hasConflict: true,
+});
+await conflictEnv.flushTimers();
+const conflictShadow = conflictEnv.getShadowRoot();
+const conflictHtml = conflictShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(
+  conflictHtml.includes('data-sync-state="conflict"') && conflictHtml.includes('border:2px solid #dc2626'),
+  '存在时间冲突时顶部状态栏必须展示高危红色 (#dc2626)'
+);
+assert.ok(
+  conflictHtml.includes('排期时间冲突 · 禁止同步') && conflictHtml.includes('ppf-panel-sync-blocked'),
+  '存在时间冲突时必须明确展示「禁止同步」并渲染禁用态拦截按钮'
+);
+assert.equal(conflictShadow.getElementById('ppf-panel-sync-pub'), null, '冲突未解锁前严禁暴露普通可点同步主按钮');
+
+// 1c. 验证「先点发布跳至《稿件投递成功》后发现未同步」（FB-20261121-0003）：自动保留发前最后一次选定的定时时间供确认补同步！
+let biliSubmittedStage = false;
+const postPubEnv = createMockDomEnv('https://member.bilibili.com/platform/upload/video/frame', true, {
+  querySelectorAll: (sel, MockEl) => {
+    if (!biliSubmittedStage) {
+      if (sel === 'input') {
+        const schedInp = new MockEl('INPUT');
+        schedInp.value = '2026-11-22 17:00';
+        const titleInp = new MockEl('INPUT');
+        titleInp.setAttribute('placeholder', '请输入稿件标题');
+        titleInp.value = '成都城市变迁测试稿';
+        return [schedInp, titleInp];
+      }
+      if (sel.includes('placeholder')) {
+        const titleInp = new MockEl('INPUT');
+        titleInp.setAttribute('placeholder', '请输入稿件标题');
+        titleInp.value = '成都城市变迁测试稿';
+        return [titleInp];
+      }
+      return [];
+    }
+    // 模拟已点击 B站「立即投稿」，表单卸载并进入「稿件投递成功」结果页
+    if (sel.includes('h1')) {
+      const doneNode = new MockEl('DIV');
+      doneNode.textContent = '稿件投递成功';
+      return [doneNode];
+    }
+    return [];
+  },
+});
+await postPubEnv.flushTimers();
+const postShadow = postPubEnv.getShadowRoot();
+assert.ok(
+  postShadow.children.map((c) => c.innerHTML).join('\n').includes('定时 11-22 17:00'),
+  '提交前必须识别到页面选定的定时时间 2026-11-22 17:00'
+);
+
+// 切换为发后「稿件投递成功」页面（原定时 input 消失）
+biliSubmittedStage = true;
+postPubEnv.triggerIntervals();
+await postPubEnv.flushTimers();
+const postSubmittedHtml = postShadow.children.map((c) => c.innerHTML).join('\n');
+assert.ok(
+  postSubmittedHtml.includes('稿件已提交 · 请确认时间补同步') && postSubmittedHtml.includes('ppf-post-submit-confirm'),
+  '投递成功后发现未同步时，必须展示发后时间确认补同步面板'
+);
+assert.ok(
+  postSubmittedHtml.includes('value="2026-11-22 17:00"') && postSubmittedHtml.includes('定时 11-22 17:00'),
+  '投递成功后即使页面定时框已消失，仍必须完整保留发前最后一次选定的 2026-11-22 17:00'
+);
+await postShadow.getElementById('ppf-panel-sync-pub').onclick();
+assert.equal(
+  postPubEnv.getLastSyncPayload()?.plannedAt,
+  '2026-11-22 17:00',
+  '发后点击确认补同步必须将保留的最后一次选定时间 2026-11-22 17:00 精准写入飞书'
+);
 
 // 2. 验证发布页挂载（新设备尚未配置飞书）：必须渲染高危红顶部警示与跨设备 PPF2 配置码激活入口，不崩溃
 const unconfEnv = createMockDomEnv('https://channels.weixin.qq.com/platform/post/create', false);
@@ -570,7 +701,7 @@ for (const key of ['所属产品', '产品代号', '产品形态', '版本号', 
 assert.equal(fbUrl.searchParams.get('prefill_所属产品'), '全平台发布助手');
 assert.equal(fbUrl.searchParams.get('prefill_产品代号'), 'publish-pack-filler');
 assert.equal(fbUrl.searchParams.get('prefill_产品形态'), '浏览器插件');
-assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.4');
+assert.equal(fbUrl.searchParams.get('prefill_版本号'), '2.5.5');
 assert.equal(
   fbUrl.searchParams.get('prefill_页面路径'),
   '[小红书发布页] https://creator.xiaohongshu.com/publish/publish',

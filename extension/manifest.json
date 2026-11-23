@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "全平台半自动发布助手",
   "short_name": "半自动发布助手",
-  "version": "2.5.4",
-  "description": "全平台半自动发布与飞书多维表直连助手：支持右侧统一停靠/自由悬浮窗/贴边收起、Cutcheck在线审片工作台、顶部红转绿状态门禁与四端数据导表归档",
+  "version": "2.5.5",
+  "description": "全平台半自动发布与飞书多维表直连助手：支持右侧统一停靠/自由悬浮窗/贴边收起、Cutcheck在线审片工作台、三态吸顶排期防撞同步与发后补同步",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -30,7 +30,7 @@
   ],
   "options_page": "options.html",
   "action": {
-    "default_title": "全平台半自动发布助手 (v2.5.4)",
+    "default_title": "全平台半自动发布助手 (v2.5.5)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

@@ -80,7 +80,19 @@ def run_tests() -> None:
         assert f_unknown.is_file(), "Unmatched unknown-account file must stay untouched in ~/Downloads!"
         assert not f_valid.exists() and (existing_jingshu / f_valid.name).is_file(), "Matched file must move cleanly!"
 
-    print("✅ All Python archive target & zero-mkdir non-destructive tests passed!")
+        # 5. FB-20261120-0001: Natural pack version sorting (v10 > v03 > v2 > v01) & ignoring sources/receipt JSON
+        pack_dir = ws / "2 AH领域·Areas" / "2026_万物有数" / "04_作品" / "20261118_湘江品字三城变迁" / "成片"
+        pack_dir.mkdir(parents=True)
+        (pack_dir / "sources_changzhutan.json").write_text('{"cities":["长沙"]}', encoding="utf-8")
+        (pack_dir / "publish_receipt.json").write_text('{"ok":true}', encoding="utf-8")
+        (pack_dir / "发布包_v01.md").write_text("# v01", encoding="utf-8")
+        (pack_dir / "发布包_v2.md").write_text("# v2", encoding="utf-8")
+        (pack_dir / "发布包_v03.md").write_text("# v03", encoding="utf-8")
+        assert serve_pack.find_latest_pack_file(pack_dir).name == "发布包_v03.md", "v03 must beat v2 and ignore sources.json!"
+        (pack_dir / "发布包_v10.md").write_text("# v10", encoding="utf-8")
+        assert serve_pack.find_latest_pack_file(pack_dir).name == "发布包_v10.md", "v10 must beat v03 and v2!"
+
+    print("✅ All Python archive target, zero-mkdir & natural pack version sorting tests passed!")
 
 
 if __name__ == "__main__":

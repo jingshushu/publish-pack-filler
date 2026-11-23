@@ -1075,18 +1075,50 @@ async function smartBatchCreateRecord(cfg, tableId, fieldsMeta, rawEntries) {
 }
 
 // ==================== 核心业务 1：匹配账号、拉取待发作品关联池（含云端兜底）与 6h 排期防撞雷达 ====================
+const ACCOUNT_BRAND_ALIAS_GROUPS = [
+  ['万物有数', '万物皆有数', '数见万象', '万物有数可视化'],
+  ['靖蜀黍', '靖蜀黍个人ip', '靖蜀黍·个人ip'],
+  ['工程检测科普', '工程检测', '水利检测'],
+];
+
 function matchAccountRecord(z3Rows, fmAcc, platCn, accountHint = '') {
   const samePlat = z3Rows.filter((r) => platformMatches(cellText(r.fields[fmAcc.platform]), platCn));
   if (!samePlat.length) return null;
 
   const cleanHint = String(accountHint || '')
     .replace(/^(?:小红书|抖音|微信视频号|视频号|B站|哔哩哔哩|快手)[·・:：\-\s]*/i, '')
-    .replace(/[.。]+$/, '')
+    .replace(/[.。·・\s]+$/g, '')
     .trim()
     .toLowerCase();
 
   if (cleanHint && cleanHint !== 'auto' && cleanHint !== '创作者账号') {
-    for (const r of samePlat) {
+    const compactHint = cleanHint.replace(/[\s·・.。_-]+/g, '');
+    const aliasTokens = new Set([cleanHint, compactHint]);
+    for (const grp of ACCOUNT_BRAND_ALIAS_GROUPS) {
+      if (grp.some((kw) => compactHint === kw.replace(/[\s·・.。_-]+/g, '') || cleanHint.includes(kw))) {
+        for (const kw of grp) aliasTokens.add(kw.toLowerCase());
+      }
+    }
+
+    // 第一轮：优先精确/直连匹配账号名称或昵称（避免「靖蜀黍」误命中暂停的「靖蜀黍.FLYLOY」）
+    const activeFirst = [
+      ...samePlat.filter((r) => !cellText(r.fields[fmAcc.status]) || /运营中|启用|正常|Z310/i.test(cellText(r.fields[fmAcc.status]))),
+      ...samePlat.filter((r) => cellText(r.fields[fmAcc.status]) && !/运营中|启用|正常|Z310/i.test(cellText(r.fields[fmAcc.status]))),
+    ];
+
+    for (const r of activeFirst) {
+      const rawName = cellText(r.fields[fmAcc.name]).toLowerCase();
+      const rawNick = cellText(r.fields[fmAcc.nickname]).replace(/[.。·・\s]+$/g, '').toLowerCase();
+      if (rawNick && (rawNick === cleanHint || rawNick === compactHint)) {
+        return r;
+      }
+      if (rawName && (rawName === String(accountHint || '').replace(/[.。]+$/, '').trim().toLowerCase() || rawName.endsWith(`·${cleanHint}`))) {
+        return r;
+      }
+    }
+
+    // 第二轮：包含品牌/同义词组匹配（如「数见万象 / 万物有数 / 万物皆有数」互通命中「视频号·数见万象」）
+    for (const r of activeFirst) {
       const hay = [
         cellText(r.fields[fmAcc.name]),
         cellText(r.fields[fmAcc.nickname]),
@@ -1094,8 +1126,13 @@ function matchAccountRecord(z3Rows, fmAcc, platCn, accountHint = '') {
       ]
         .join(' ')
         .toLowerCase();
-      if (hay.includes(cleanHint) || (cleanHint.length >= 2 && hay.replace(/\s+/g, '').includes(cleanHint))) {
-        return r;
+      const hayCompact = hay.replace(/[\s·・.。_-]+/g, '');
+      for (const tok of aliasTokens) {
+        if (!tok || tok.length < 2) continue;
+        const tokCompact = tok.replace(/[\s·・.。_-]+/g, '');
+        if (hay.includes(tok) || (tokCompact.length >= 2 && hayCompact.includes(tokCompact))) {
+          return r;
+        }
       }
     }
   }
@@ -1108,12 +1145,26 @@ function matchAccountRecord(z3Rows, fmAcc, platCn, accountHint = '') {
   return active || samePlat[0];
 }
 
-function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, platCn, targetMs, excludeBId, excludeCId, minGapHours = 6 }) {
+function evaluateScheduleConflicts({
+  cRows,
+  bById,
+  fmPub,
+  fmWork,
+  accountId,
+  platCn,
+  targetMs,
+  excludeBId,
+  excludeCId,
+  minGapHours = 6,
+  nowMs: customNowMs,
+}) {
   const gapMs = Math.max(0.5, Number(minGapHours || 6)) * 3600 * 1000;
   const conflicts = [];
   let lastPublished = null;
+  let latestSlot = null;
+  let nearestSlot = null;
   const futureScheduled = [];
-  const nowMs = Date.now();
+  const nowMs = Number.isFinite(customNowMs) ? customNowMs : Date.now();
 
   for (const cr of cRows) {
     if (excludeCId && cr.record_id === excludeCId) continue;
@@ -1131,6 +1182,8 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
 
     const st = cellText(cf[fmPub.status]);
     if (/取消|废弃|未通过|隐藏|C22|C23|C24/.test(st)) continue;
+    const notes = fmPub.notes ? cellText(cf[fmPub.notes]) : '';
+    if (/防重自动拦截/.test(notes)) continue;
 
     // 完全基于「真实发布日期」单一时间列对比当前时间（不依赖计划发布时间列，删除计划发布时间列亦零影响）
     const pubMs = parseDateTimeMs(cf[fmPub.publishedAt]);
@@ -1139,19 +1192,24 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
     const isFutureSlot = effMs > nowMs;
 
     const linkedB = bIds[0] && bById.get(bIds[0]);
-    const itemTitle =
-      cellText(cf[fmPub.title]) ||
+    const workName =
       (linkedB ? cellText(linkedB.fields[fmWork.title]) : '') ||
       cellText(cf[fmPub.workTitleText]) ||
-      '未命名排期';
+      '';
+    const postTitle = cellText(cf[fmPub.title]) || '';
+    // 优先采用与飞书表格一致的短作品名（如 015｜贵阳 / 110｜珠江口三虎），无关联作品名时回退至稿件标题
+    const itemTitle = workName || postTitle || '未命名排期';
 
+    const absDiffHours = Math.round((Math.abs(targetMs - effMs) / 3600000) * 10) / 10;
     const recInfo = {
       cRecordId: cr.record_id,
       title: itemTitle,
+      postTitle,
       status: st,
+      isFuture: isFutureSlot,
       timeMs: effMs,
       timeStr: formatMsLocalHM(effMs),
-      diffHours: Math.round((Math.abs(targetMs - effMs) / 3600000) * 10) / 10,
+      diffHours: absDiffHours,
     };
 
     if (!isFutureSlot && (!lastPublished || effMs > lastPublished.timeMs)) {
@@ -1159,6 +1217,16 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
     }
     if (isFutureSlot) {
       futureScheduled.push(recInfo);
+    }
+    if (!latestSlot || effMs > latestSlot.timeMs) {
+      latestSlot = recInfo;
+    }
+    if (
+      !nearestSlot ||
+      absDiffHours < nearestSlot.diffHours ||
+      (absDiffHours === nearestSlot.diffHours && effMs > nearestSlot.timeMs)
+    ) {
+      nearestSlot = recInfo;
     }
     if (Math.abs(targetMs - effMs) < gapMs) {
       conflicts.push(recInfo);
@@ -1172,8 +1240,22 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
   if (conflicts.length > 0) {
     const first = conflicts[0];
     summary = `🔴 排期撞车预警：与《${first.title}》(${first.timeStr}) 仅隔 ${first.diffHours}h (<${minGapHours}h)`;
+  } else if (nearestSlot && nearestSlot.isFuture) {
+    if (latestSlot && latestSlot.cRecordId !== nearestSlot.cRecordId && latestSlot.isFuture) {
+      summary = `🟢 排期安全（最近已定时《${nearestSlot.title}》于 ${nearestSlot.timeStr}，间隔 ${nearestSlot.diffHours}h · 最晚已排至《${latestSlot.title}》${latestSlot.timeStr.slice(5)}）`;
+    } else {
+      summary = `🟢 排期安全（最近已定时《${nearestSlot.title}》于 ${nearestSlot.timeStr}，间隔 ${nearestSlot.diffHours}h）`;
+    }
+  } else if (futureScheduled.length > 0) {
+    const farSched = futureScheduled[futureScheduled.length - 1];
+    if (lastPublished) {
+      const hrsFromLast = Math.round((Math.abs(targetMs - lastPublished.timeMs) / 3600000) * 10) / 10;
+      summary = `🟢 排期安全（最新已定时《${farSched.title}》于 ${farSched.timeStr}；上条《${lastPublished.title}》于 ${lastPublished.timeStr}，间隔 ${hrsFromLast}h）`;
+    } else {
+      summary = `🟢 排期安全（最新已定时《${farSched.title}》于 ${farSched.timeStr}，间隔 ${farSched.diffHours}h）`;
+    }
   } else if (lastPublished) {
-    const hrs = Math.round(((targetMs - lastPublished.timeMs) / 3600000) * 10) / 10;
+    const hrs = Math.round((Math.abs(targetMs - lastPublished.timeMs) / 3600000) * 10) / 10;
     summary = `🟢 排期安全（上条《${lastPublished.title}》于 ${lastPublished.timeStr}，间隔 ${hrs}h）`;
   } else {
     summary = `🟢 排期安全（近 ${minGapHours}h 内无同号冲突排期）`;
@@ -1183,6 +1265,8 @@ function evaluateScheduleConflicts({ cRows, bById, fmPub, fmWork, accountId, pla
     hasConflict: conflicts.length > 0,
     conflicts,
     lastPublished,
+    latestSlot,
+    nearestSlot,
     futureScheduled: futureScheduled.slice(0, 5),
     summary,
   };
@@ -1621,7 +1705,7 @@ async function syncPrePublishToFeishu(payload = {}) {
     const nowMs = Date.now();
     const parsedPlanMs = parseDateTimeMs(payload.plannedAt);
     const isScheduled = payload.mode === 'scheduled' || Boolean(parsedPlanMs && parsedPlanMs > nowMs + 5 * 60_000);
-    const targetMs = isScheduled && parsedPlanMs ? parsedPlanMs : nowMs;
+    const targetMs = parsedPlanMs || nowMs;
     const timeStr = formatMsLocalHM(targetMs);
 
     const bById = new Map(bRows.map((r) => [r.record_id, r]));
@@ -2201,5 +2285,8 @@ self.PPFFeishuClient = {
   buildSafeV3WriteFields,
   smartBatchUpdateRecord,
   smartBatchCreateRecord,
+  matchAccountRecord,
+  normalizePlatformCn,
+  platformMatches,
   evaluateScheduleConflicts,
 };
